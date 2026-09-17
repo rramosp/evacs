@@ -184,3 +184,13 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
   2. **Pont de l'Alma**: Bridge polygon crossing the Seine `[48.8633, 2.3015]`, blocking the adjacent Seine crossing and forcing detour via Pont de Bir-Hakeim or Pont Alexandre III.
 - **Vehicle Fleets**:
   1. **RATP Bus Fleet**: `50` buses × `50` capacity (`2,500` total cap) | Staging Depot: Esplanade des Invalides `[48.8606, 2.3125]`
+
+---
+
+## 8. Living Specification & Iteration Log
+
+This specification is maintained as a living document. Every functional addition, UI refinement, or routing/simulation enhancement requested during iterative reviews is integrated into the core sections above and logged below:
+
+| Iteration | Date | Summary of Specification & Implementation Changes |
+| :--- | :--- | :--- |
+| **v1.0** | 2026-09-17 | Initial restructured specification & full React/TypeScript/Leaflet implementation of the 4-panel cockpit UI, Brussels & Paris presets, OSRM + Turf.js obstacle-avoiding routing engine, and 60 FPS thermal heatmap simulation. |
