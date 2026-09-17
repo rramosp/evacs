@@ -5,15 +5,20 @@ import {
   NoGoArea,
   VehicleFleet,
   ComputedRoute,
-  SimulationCohort,
+  PickupLocationState,
+  SourceInternalCluster,
+  ActiveVehicleUnit,
   HeatmapPoint,
   LogEntry,
   PresetScenarioId,
   ActiveDrawMode,
 } from './types/evacuation';
 import { PRESET_SCENARIOS } from './data/presets';
-import { computeAllEvacuationRoutes, getPolygonCentroid } from './services/routingEngine';
-import { createSimulationCohorts, stepSimulation } from './services/simulationEngine';
+import { computeAllEvacuationRoutes } from './services/routingEngine';
+import {
+  initializeSimulationState,
+  stepSimulationState,
+} from './services/simulationEngine';
 import { LeftControlPanel } from './components/LeftControlPanel';
 import { EvacuationMap } from './components/EvacuationMap';
 import { BottomLogPanel } from './components/BottomLogPanel';
@@ -50,8 +55,12 @@ export function App() {
   // Routing & Simulation states
   const [computedRoutes, setComputedRoutes] = useState<ComputedRoute[]>([]);
   const [isComputingRoutes, setIsComputingRoutes] = useState<boolean>(false);
-  const [cohorts, setCohorts] = useState<SimulationCohort[]>([]);
+
+  const [clusters, setClusters] = useState<SourceInternalCluster[]>([]);
+  const [pickupStates, setPickupStates] = useState<PickupLocationState[]>([]);
+  const [vehicles, setVehicles] = useState<ActiveVehicleUnit[]>([]);
   const [heatmapPoints, setHeatmapPoints] = useState<HeatmapPoint[]>([]);
+
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [simSpeed, setSimSpeed] = useState<number>(2);
   const [elapsedSimSeconds, setElapsedSimSeconds] = useState<number>(0);
@@ -60,6 +69,7 @@ export function App() {
   const [totalEvacuated, setTotalEvacuated] = useState<number>(0);
   const [totalInTransit, setTotalInTransit] = useState<number>(0);
   const [totalRemainingAtSource, setTotalRemainingAtSource] = useState<number>(0);
+  const [totalWaitingAtPickups, setTotalWaitingAtPickups] = useState<number>(0);
 
   // System & Simulation Logs
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -84,30 +94,6 @@ export function App() {
     []
   );
 
-  // Generate initial static heatmap at t=0 (all evacuees inside source polygons)
-  const generateInitialHeatmap = useCallback((sources: SourceArea[]) => {
-    const pts: HeatmapPoint[] = [];
-    sources.forEach((src) => {
-      const centroid = getPolygonCentroid(src.polygon);
-      const intensity = Math.min(1.0, src.population / 1200);
-      pts.push({
-        lat: centroid[0],
-        lng: centroid[1],
-        intensity,
-        behavior: 'obedient',
-      });
-      src.polygon.forEach((corner) => {
-        pts.push({
-          lat: (centroid[0] + corner[0]) / 2,
-          lng: (centroid[1] + corner[1]) / 2,
-          intensity: intensity * 0.75,
-          behavior: 'obedient',
-        });
-      });
-    });
-    setHeatmapPoints(pts);
-  }, []);
-
   // Switch preset scenario
   const handleSelectPreset = (preset: PresetScenarioId) => {
     setIsSimulating(false);
@@ -127,37 +113,49 @@ export function App() {
       setNoGoAreas(data.noGoAreas);
       setVehicleFleets(data.vehicleFleets);
       setComputedRoutes([]);
-      setCohorts([]);
+      setClusters([]);
+      setPickupStates([]);
+      setVehicles([]);
+      setHeatmapPoints([]);
+
       const totalPop = data.sourceAreas.reduce((acc, s) => acc + s.population, 0);
       setTotalEvacuated(0);
       setTotalInTransit(0);
       setTotalRemainingAtSource(totalPop);
-      generateInitialHeatmap(data.sourceAreas);
+      setTotalWaitingAtPickups(0);
 
       appendLog(
         'INFO',
         `Loaded preset scenario: "${data.name}" (${data.sourceAreas.length} sources, ${data.targetAreas.length} shelters, ${data.noGoAreas.length} no-go zones).`
       );
     } else {
-      // Custom blank scenario
       setSourceAreas([]);
       setTargetAreas([]);
       setNoGoAreas([]);
       setVehicleFleets([]);
       setComputedRoutes([]);
-      setCohorts([]);
+      setClusters([]);
+      setPickupStates([]);
+      setVehicles([]);
       setHeatmapPoints([]);
       setTotalEvacuated(0);
       setTotalInTransit(0);
       setTotalRemainingAtSource(0);
-      appendLog('INFO', 'Initialized blank custom scenario. Use the left panel buttons to draw zones on the map.');
+      setTotalWaitingAtPickups(0);
+      appendLog(
+        'INFO',
+        'Initialized blank custom scenario. Use the left panel buttons to draw zones on the map.'
+      );
     }
   };
 
-  // Run OSRM + Obstacle Avoidance Route Computation
+  // Run OSRM + Obstacle Avoidance Route Computation & Establish Blue Square Pickups
   const handleComputeRoutes = useCallback(async () => {
     if (sourceAreas.length === 0 || targetAreas.length === 0) {
-      appendLog('WARN', 'Cannot compute routes: At least 1 Source Area and 1 Target Shelter are required.');
+      appendLog(
+        'WARN',
+        'Cannot compute routes: At least 1 Source Area and 1 Target Shelter are required.'
+      );
       return;
     }
 
@@ -175,29 +173,33 @@ export function App() {
       setComputedRoutes(result.routes);
       setLogs((prev) => [...prev, ...result.logs]);
 
-      // Initialize simulation cohorts ready for playback
-      const initialCohorts = createSimulationCohorts(
+      // Initialize micro-simulation state ready for playback
+      const initialSimState = initializeSimulationState(
         result.routes,
         sourceAreas,
+        targetAreas,
         vehicleFleets
       );
-      setCohorts(initialCohorts);
+
+      setClusters(initialSimState.clusters);
+      setPickupStates(initialSimState.pickupStates);
+      setVehicles(initialSimState.vehicles);
+      setHeatmapPoints(initialSimState.heatmapPoints);
       setElapsedSimSeconds(0);
 
-      const totalPop = sourceAreas.reduce((acc, s) => acc + s.population, 0);
       setTotalEvacuated(0);
       setTotalInTransit(0);
-      setTotalRemainingAtSource(totalPop);
+      setTotalRemainingAtSource(initialSimState.totalRemainingAtSource);
+      setTotalWaitingAtPickups(0);
       setTargetAreas((prev) => prev.map((t) => ({ ...t, currentOccupancy: 0 })));
-      generateInitialHeatmap(sourceAreas);
     } catch (err) {
       appendLog('WARN', `Route computation encountered an error: ${String(err)}`);
     } finally {
       setIsComputingRoutes(false);
     }
-  }, [sourceAreas, targetAreas, noGoAreas, vehicleFleets, appendLog, generateInitialHeatmap]);
+  }, [sourceAreas, targetAreas, noGoAreas, vehicleFleets, appendLog]);
 
-  // Automatically compute routes on initial mount so the user immediately sees the Brussels routes
+  // Automatically compute routes on initial mount
   useEffect(() => {
     handleComputeRoutes();
   }, []);
@@ -209,7 +211,6 @@ export function App() {
       return;
     }
 
-    // If simulation already completed, reset first
     if (totalRemainingAtSource === 0 && totalInTransit === 0 && totalEvacuated > 0) {
       handleResetSimulation();
     }
@@ -217,7 +218,7 @@ export function App() {
     setIsSimulating(true);
     appendLog(
       'SIMULATION',
-      `Simulation playback started at ${simSpeed}x speed. Animating evacuee heatmap and vehicle fleets.`
+      `Simulation started (${simSpeed}x). Evacuees moving within source zones toward Blue Square pickup locations; vehicles board until 80% occupancy.`
     );
   };
 
@@ -232,22 +233,35 @@ export function App() {
     setIsSimulating(false);
     setElapsedSimSeconds(0);
 
-    const freshCohorts = createSimulationCohorts(computedRoutes, sourceAreas, vehicleFleets);
-    setCohorts(freshCohorts);
+    const freshState = initializeSimulationState(
+      computedRoutes,
+      sourceAreas,
+      targetAreas,
+      vehicleFleets
+    );
+    setClusters(freshState.clusters);
+    setPickupStates(freshState.pickupStates);
+    setVehicles(freshState.vehicles);
+    setHeatmapPoints(freshState.heatmapPoints);
 
-    const totalPop = sourceAreas.reduce((acc, s) => acc + s.population, 0);
     setTotalEvacuated(0);
     setTotalInTransit(0);
-    setTotalRemainingAtSource(totalPop);
+    setTotalRemainingAtSource(freshState.totalRemainingAtSource);
+    setTotalWaitingAtPickups(0);
     setTargetAreas((prev) => prev.map((t) => ({ ...t, currentOccupancy: 0 })));
-    generateInitialHeatmap(sourceAreas);
 
-    appendLog('SIMULATION', 'Simulation reset to t=00:00. All evacuees returned to source zones.');
+    appendLog(
+      'SIMULATION',
+      'Simulation reset to t=00:00. All evacuees returned to initial positions inside source zones.'
+    );
   };
 
-  // Animation Loop for Discrete-Time Simulation
+  // Keep latest simulation state in ref for interval loop
   const simStateRef = useRef({
-    cohorts,
+    clusters,
+    pickupStates,
+    vehicles,
+    targetOccupancies: {} as Record<string, number>,
     elapsedSimSeconds,
     sourceAreas,
     targetAreas,
@@ -255,14 +269,22 @@ export function App() {
   });
 
   useEffect(() => {
+    const occMap: Record<string, number> = {};
+    targetAreas.forEach((t) => {
+      occMap[t.id] = t.currentOccupancy;
+    });
+
     simStateRef.current = {
-      cohorts,
+      clusters,
+      pickupStates,
+      vehicles,
+      targetOccupancies: occMap,
       elapsedSimSeconds,
       sourceAreas,
       targetAreas,
       simSpeed,
     };
-  }, [cohorts, elapsedSimSeconds, sourceAreas, targetAreas, simSpeed]);
+  }, [clusters, pickupStates, vehicles, elapsedSimSeconds, sourceAreas, targetAreas, simSpeed]);
 
   useEffect(() => {
     if (!isSimulating) return;
@@ -270,25 +292,39 @@ export function App() {
     const intervalMs = 100; // 10 ticks per second
     const timer = setInterval(() => {
       const state = simStateRef.current;
-      const deltaSimSec = (intervalMs / 1000) * state.simSpeed * 6; // 1 wall second = 6 sim seconds at 1x
+      const deltaSimSec = (intervalMs / 1000) * state.simSpeed * 4.5;
       const nextElapsed = state.elapsedSimSeconds + deltaSimSec;
 
-      const stepResult = stepSimulation(
-        state.cohorts,
+      const stepResult = stepSimulationState(
+        {
+          clusters: state.clusters,
+          pickupStates: state.pickupStates,
+          vehicles: state.vehicles,
+          heatmapPoints: [],
+          targetOccupancies: state.targetOccupancies,
+          newLogs: [],
+          totalEvacuated: 0,
+          totalInTransit: 0,
+          totalRemainingAtSource: 0,
+          totalWaitingAtPickups: 0,
+        },
         nextElapsed,
         deltaSimSec,
         state.sourceAreas,
         state.targetAreas
       );
 
-      setCohorts(stepResult.cohorts);
+      setClusters(stepResult.clusters);
+      setPickupStates(stepResult.pickupStates);
+      setVehicles(stepResult.vehicles);
       setHeatmapPoints(stepResult.heatmapPoints);
       setElapsedSimSeconds(nextElapsed);
+
       setTotalEvacuated(stepResult.totalEvacuated);
       setTotalInTransit(stepResult.totalInTransit);
       setTotalRemainingAtSource(stepResult.totalRemainingAtSource);
+      setTotalWaitingAtPickups(stepResult.totalWaitingAtPickups);
 
-      // Update target occupancies
       setTargetAreas((prev) =>
         prev.map((tgt) => ({
           ...tgt,
@@ -296,22 +332,22 @@ export function App() {
         }))
       );
 
-      // Emit arrival logs
       if (stepResult.newLogs.length > 0) {
         stepResult.newLogs.forEach((msg) => {
           appendLog('SIMULATION', msg, nextElapsed);
         });
       }
 
-      // Auto-stop when 100% of cohorts have arrived
-      const allArrived =
-        stepResult.cohorts.length > 0 &&
-        stepResult.cohorts.every((c) => c.status === 'arrived');
-      if (allArrived) {
+      // Auto-complete when source areas are empty and all vehicles have offloaded
+      if (
+        stepResult.totalRemainingAtSource === 0 &&
+        stepResult.totalInTransit === 0 &&
+        stepResult.totalEvacuated > 0
+      ) {
         setIsSimulating(false);
         appendLog(
           'SIMULATION',
-          `Evacuation simulation completed! All ${stepResult.totalEvacuated.toLocaleString()} evacuees have reached safe target shelters.`,
+          `Evacuation simulation complete! All ${stepResult.totalEvacuated.toLocaleString()} evacuees transported from pickup locations to target shelters. Source area heatmaps fully cooled.`,
           nextElapsed
         );
       }
@@ -323,31 +359,31 @@ export function App() {
   // Entity CRUD Handlers
   const handleAddSourceArea = (src: Omit<SourceArea, 'id'>) => {
     const newSrc: SourceArea = { ...src, id: `src-${Date.now()}` };
-    const updated = [...sourceAreas, newSrc];
-    setSourceAreas(updated);
-    generateInitialHeatmap(updated);
-    appendLog('INFO', `Added Source Area "${newSrc.name}" (${newSrc.population.toLocaleString()} evacuees).`);
+    setSourceAreas((prev) => [...prev, newSrc]);
+    appendLog(
+      'INFO',
+      `Added Source Area "${newSrc.name}" (${newSrc.population.toLocaleString()} evacuees). Click "Compute evacuation routes" to establish pickup locations.`
+    );
   };
 
   const handleUpdateSourceArea = (updatedSrc: SourceArea) => {
-    const updated = sourceAreas.map((s) => (s.id === updatedSrc.id ? updatedSrc : s));
-    setSourceAreas(updated);
-    generateInitialHeatmap(updated);
+    setSourceAreas((prev) => prev.map((s) => (s.id === updatedSrc.id ? updatedSrc : s)));
     appendLog('INFO', `Modified Source Area "${updatedSrc.name}".`);
   };
 
   const handleDeleteSourceArea = (id: string) => {
     const target = sourceAreas.find((s) => s.id === id);
-    const updated = sourceAreas.filter((s) => s.id !== id);
-    setSourceAreas(updated);
-    generateInitialHeatmap(updated);
+    setSourceAreas((prev) => prev.filter((s) => s.id !== id));
     appendLog('WARN', `Deleted Source Area "${target?.name || id}".`);
   };
 
   const handleAddTargetArea = (tgt: Omit<TargetArea, 'id' | 'currentOccupancy'>) => {
     const newTgt: TargetArea = { ...tgt, id: `tgt-${Date.now()}`, currentOccupancy: 0 };
     setTargetAreas((prev) => [...prev, newTgt]);
-    appendLog('INFO', `Added Target Shelter "${newTgt.name}" (Capacity: ${newTgt.capacity.toLocaleString()}).`);
+    appendLog(
+      'INFO',
+      `Added Target Shelter "${newTgt.name}" (Capacity: ${newTgt.capacity.toLocaleString()}).`
+    );
   };
 
   const handleUpdateTargetArea = (updatedTgt: TargetArea) => {
@@ -364,7 +400,10 @@ export function App() {
   const handleAddNoGoArea = (nogo: Omit<NoGoArea, 'id'>) => {
     const newNoGo: NoGoArea = { ...nogo, id: `nogo-${Date.now()}` };
     setNoGoAreas((prev) => [...prev, newNoGo]);
-    appendLog('WARN', `Defined No-Go Hazard Zone "${newNoGo.name}". Re-compute routes to update detours.`);
+    appendLog(
+      'WARN',
+      `Defined No-Go Hazard Zone "${newNoGo.name}". Re-compute routes to update detours.`
+    );
   };
 
   const handleUpdateNoGoArea = (updatedNoGo: NoGoArea) => {
@@ -388,7 +427,9 @@ export function App() {
   };
 
   const handleUpdateVehicleFleet = (updatedFleet: VehicleFleet) => {
-    setVehicleFleets((prev) => prev.map((v) => (v.id === updatedFleet.id ? updatedFleet : v)));
+    setVehicleFleets((prev) =>
+      prev.map((v) => (v.id === updatedFleet.id ? updatedFleet : v))
+    );
     appendLog('INFO', `Modified Vehicle Fleet "${updatedFleet.name}".`);
   };
 
@@ -404,10 +445,16 @@ export function App() {
     setPendingPlacedPoint(null);
     if (type === 'vehicle') {
       setActiveDrawMode({ type: 'vehicle', point: null });
-      appendLog('INFO', 'Click anywhere on the OSM map to set the Vehicle Fleet depot coordinates.');
+      appendLog(
+        'INFO',
+        'Click anywhere on the OSM map to set the Vehicle Fleet depot coordinates.'
+      );
     } else {
       setActiveDrawMode({ type, points: [] });
-      appendLog('INFO', `Drawing mode active: Click on the OSM map to place polygon vertices for new ${type.toUpperCase()} area.`);
+      appendLog(
+        'INFO',
+        `Drawing mode active: Click on the OSM map to place polygon vertices for new ${type.toUpperCase()} area.`
+      );
     }
   };
 
@@ -476,7 +523,9 @@ export function App() {
             noGoAreas={noGoAreas}
             vehicleFleets={vehicleFleets}
             computedRoutes={computedRoutes}
-            cohorts={cohorts}
+            pickupStates={pickupStates}
+            vehicles={vehicles}
+            clusters={clusters}
             heatmapPoints={heatmapPoints}
             isSimulating={isSimulating}
             activeDrawMode={activeDrawMode}
@@ -488,10 +537,7 @@ export function App() {
           />
         </div>
 
-        <BottomLogPanel
-          logs={logs}
-          onClearLogs={() => setLogs([])}
-        />
+        <BottomLogPanel logs={logs} onClearLogs={() => setLogs([])} />
       </main>
 
       {/* 3. RIGHT SIDE PANEL (25% Width x 100% Height) */}
@@ -500,10 +546,12 @@ export function App() {
         targetAreas={targetAreas}
         vehicleFleets={vehicleFleets}
         computedRoutes={computedRoutes}
+        pickupStates={pickupStates}
         elapsedSimSeconds={elapsedSimSeconds}
         totalEvacuated={totalEvacuated}
         totalInTransit={totalInTransit}
         totalRemainingAtSource={totalRemainingAtSource}
+        totalWaitingAtPickups={totalWaitingAtPickups}
         isSimulating={isSimulating}
       />
     </div>

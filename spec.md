@@ -16,29 +16,32 @@ Build a responsive, high-usability web User Interface (UI) backed by OpenStreetM
   1. Load a preset city scenario (e.g., Brussels, Paris) or define a custom scenario from scratch.
   2. Draw or edit **Source Areas** (evacuation zones), **Target Areas** (safe shelters/assembly points), **No-Go Areas** (hazards/blocked zones), and **Vehicle Fleets** (staging depots).
   3. Trigger **Compute Evacuation Routes** to calculate optimal paths from sources to targets while avoiding No-Go zones, respecting shelter capacities, and establishing specific **Pickup Locations (marked with blue squares)** on each Source Area for every route.
-  4. Trigger **Run Simulation** to animate the movement of evacuees and vehicles over time from their established pickup locations to target shelters, visualized via a dynamic density heatmap and live telemetry metrics.
+  4. Trigger **Run Simulation** to animate:
+     - Evacuees moving *within* each Source Area toward established Pickup Locations according to their behavioral profile (`obedient`, `autonomous`, `random`), causing the heatmap to become hotter around Pickup Locations as queues form.
+     - Vehicles arriving at Pickup Locations, boarding waiting evacuees until **80% vehicle occupancy** is reached, and transporting them to Target Shelters.
+     - Progressive cooling of the Source Area heatmap over time as vehicles evacuate the population.
 
 ---
 
 ## 3. Domain Entities & Data Models
 
-### 3.1 Evacuation Source Areas
-Geographic zones requiring evacuation.
+### 3.1 Evacuation Source Areas & Internal Population Behavior
+Geographic zones requiring evacuation. The population within a Source Area **remains inside that Source Area until picked up by an evacuation vehicle**. Their behavioral profile governs how they move *within* the Source Area to reach a Pickup Location (Blue Square):
 - **Name**: String identifier (e.g., `"Grand Place"`).
 - **Geometry**: Polygon (`GeoJSON Polygon`) drawn on the map.
 - **Total Population**: Integer count of evacuees (`N > 0`).
 - **Behavioral Profile Distribution** (percentages summing to 100%):
-  - **Obedient (`%`)**: Follow official designated evacuation routes and instructions strictly.
-  - **Autonomous (`%`)**: Make dynamic local decisions based on observed conditions (e.g., slowing down or re-routing around visible traffic jams/congestion).
-  - **Random (`%`)**: Exhibit panic or non-compliance, taking random or non-optimal exit paths regardless of official instructions.
-- **Route Pickup Locations**: Specific `[lat, lng]` assembly points established within or along the perimeter of the Source Area polygon once routes are computed (one distinct pickup point per computed route, visually marked with a **blue square** on the map).
+  - **Obedient (`%`)**: Immediately head directly to the **closest Pickup Location** within the Source Area at `t = 0`.
+  - **Autonomous (`%`)**: Wander along the **limits (perimeter boundary)** of the Source Area polygon until they stumble upon a Pickup Location.
+  - **Random (`%`)**: Wander randomly throughout the interior of the Source Area polygon until they come within **50 meters** of any Pickup Location, at which point they direct themselves straight to it.
+- **Route Pickup Locations (Blue Squares)**: Specific `[lat, lng]` assembly points established on/within the Source Area polygon once routes are computed. Any evacuees arriving at a Pickup Location wait there in queue (`waitingPopulation`) until a vehicle boards them.
 
 ### 3.2 Evacuation Target Areas (Safe Zones)
-Designated safe destinations or shelters where evacuees are directed.
+Designated safe destinations or shelters where evacuees are transported by vehicles.
 - **Name**: String identifier (e.g., `"Parc du Cinquantenaire"`).
 - **Geometry**: Polygon (`GeoJSON Polygon`) drawn on the map.
 - **Capacity**: Maximum number of evacuees the area can accommodate (`Integer`).
-- **Current Occupancy**: Tracked dynamically during simulation (`0` to `Capacity`).
+- **Current Occupancy**: Tracked dynamically as vehicles offload passengers (`0` to `Capacity`).
 
 ### 3.3 No-Go Areas (Hazard / Blocked Zones)
 Restricted or hazardous areas impassable for evacuation routing.
@@ -46,14 +49,14 @@ Restricted or hazardous areas impassable for evacuation routing.
 - **Geometry**: Polygon (`GeoJSON Polygon`) drawn on the map.
 - **Routing Effect**: Any road network edge or segment intersecting a No-Go polygon is marked impassable (infinite weight / removed from routing graph).
 
-### 3.4 Evacuation Vehicle Fleets
-Available public or private transport units managed by authorities. To avoid requiring users to place hundreds of individual pins, vehicles are modeled as **Fleets / Staging Depots**:
+### 3.4 Evacuation Vehicle Fleets & 80% Occupancy Boarding Rule
+Available public or private transport units managed by authorities, modeled as **Fleets / Staging Depots**:
 - **Name**: String identifier (e.g., `"STIB Bus Fleet Alpha"`).
 - **Vehicle Type**: Category (`Bus`, `Private Car`, `Shuttle`, etc.).
 - **Initial Location**: Point (`GeoJSON Point` — `[lat, lng]`) representing the depot or staging area at `t = 0`.
 - **Unit Count**: Number of vehicles in this fleet (`Integer`).
 - **Capacity per Unit**: Passenger occupancy per vehicle (e.g., `50` for buses, `4` for cars).
-- **Total Fleet Capacity**: `Unit Count × Capacity per Unit`.
+- **80% Occupancy Departure Rule**: When vehicles arrive at a Source Area Pickup Location (Blue Square), they board waiting evacuees and **wait at the Pickup Location until their occupancy reaches at least 80% of capacity** (or until no further evacuees remain in the Source Area). Once $\ge 80\%$ occupied, they depart along the computed route to the Target Area shelter and offload passengers, cycling back for additional trips until the Source Area is fully evacuated.
 
 ---
 
@@ -87,61 +90,62 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 - **Execution Toolbar**:
   - `Compute Evacuation Routes` (Primary action button — computes paths and establishes blue square pickup locations on source areas)
   - `Run Simulation` / `Pause Simulation` (Toggleable playback button)
-  - `Stop / Reset Simulation` (Resets time to `t = 0` and clears heatmap state)
+  - `Stop / Reset Simulation` (Resets time to `t = 0` and restores initial source area population)
   - Simulation Speed Selector (`1x`, `2x`, `5x`, `10x`)
 
 ### 4.2 Center Area: Interactive OSM Map (`50% Width × 75% Height`)
-- **Base Layer**: OpenStreetMap vector/raster tiles.
+- **Base Layer**: OpenStreetMap vector/raster tiles (Tactical Dark / Standard OSM).
 - **Interactive Drawing Tools**: Polygon drawing/editing controls for zones and marker placement for vehicle depots.
 - **Visual Overlays**:
   - Source Areas: Color-coded polygons (Amber/Orange fill with border).
   - Target Areas: Color-coded polygons (Emerald Green fill with border).
   - No-Go Areas: Cross-hatched Crimson Red polygons.
-  - **Route Pickup Locations (Blue Squares)**: Once route computation is completed, each route's specific pickup/assembly point within its Source Area is marked with a distinct **blue square** marker on the map (`#2563eb` / `#3b82f6` with crisp white border). Hovering or clicking displays the assigned route, cohort type, population count, and exact coordinates.
-  - Computed Routes: Styled polylines originating from their respective blue square pickup locations to target shelters, showing primary (obedient), secondary (autonomous), random, and vehicle corridors.
-  - Dynamic Heatmap Overlay: Time-evolving density layer showing evacuee concentration during simulation.
-  - Vehicle Markers: Animated icons moving along routes between depots, blue square pickup points, and target shelters.
+  - **Route Pickup Locations (Blue Squares)**: Marked with a distinct **blue square** (`#2563eb` with crisp white border) on each Source Area. Displays live waiting queue counts (`Waiting: N people`) and active vehicle boarding status (`Boarding: X/Y - Z%`) during simulation.
+  - Computed Routes: Styled polylines connecting staging depots, Blue Square pickup points, and Target Shelters while avoiding No-Go zones.
+  - **Dynamic Heatmap Overlay**:
+    - Shows crowd movement inside Source Areas (`obedient` heading to closest pickup, `autonomous` along perimeter limits, `random` wandering until within 50m).
+    - **Hotter around Pickup Locations**: As evacuees reach Pickup Locations and wait for vehicles, thermal density concentrates intensely around the Blue Squares.
+    - **Progressive Cooling of Source Areas**: As vehicles reach 80% occupancy and depart with evacuees, the remaining population inside the Source Area drops and the Source Area heatmap steadily cools down until empty.
+  - Vehicle Markers: Animated vehicle icons showing current passenger load and state (`To Pickup`, `Waiting/Boarding >=80%`, `En Route to Shelter`).
 
 ### 4.3 Bottom Panel: System & Simulation Console (`50% Width × 25% Height`)
 - Timestamped log stream displaying:
-  - Routing engine requests, established pickup location coordinates for each route, path lengths, estimated travel times, and detour warnings around No-Go zones.
-  - Simulation tick events (e.g., `"[t=04:30] Bus Fleet #1 arrived at Grand Place Pickup Point, boarding 500 evacuees"`).
-  - Capacity warnings if a Target Area approaches 100% occupancy.
+  - Routing engine requests, established pickup location coordinates, and detour warnings around No-Go zones.
+  - Simulation events: Pickup queue growth, vehicle arrivals at Blue Squares, boarding progress up to 80% occupancy departure threshold, and shelter offload confirmations.
 - Filterable by log level (`INFO`, `WARN`, `ROUTING`, `SIMULATION`).
 
 ### 4.4 Right Panel: Telemetry & KPI Dashboard (`25% Width × 100% Height`)
-*(Note: Originally left empty in early scoping; designated for live situational awareness metrics, with a toggle button to switch between KPI view and Blank Scoping View).*
 - **Evacuation Progress Summary**:
-  - Total Evacuated (`Safe at Target`) vs. `In Transit` vs. `Remaining at Source`.
+  - `Safe at Shelter` vs. `In Transit (On Vehicles)` vs. `Remaining in Source Area` (broken down by `Wandering in Zone` vs. `Waiting at Pickup Squares`).
   - Overall progress bar and elapsed simulation clock (`MM:SS`).
-- **Target Area Occupancy Cards**:
-  - Real-time fill bars (`Current / Capacity`) for each shelter.
-- **Population Behavior Breakdown**:
-  - Visual indicator of active Obedient, Autonomous, and Random agents.
+- **Target Area Occupancy Cards**: Real-time fill bars (`Current / Capacity`) for each shelter.
+- **Population Behavior Breakdown**: Live status of Obedient, Autonomous, and Random populations.
 
 ---
 
 ## 5. Routing & Simulation Architecture
 
-### 5.1 Routing Algorithm, Pickup Location Establishment & Obstacle Avoidance
-- **Pickup Location Establishment**:
-  - When `Compute evacuation routes` is triggered, the engine establishes a specific, distinct **Pickup Location (`[lat, lng]`)** inside or along the perimeter of each Source Area for every route originating from that zone (Obedient cohort route, Autonomous cohort route, Random cohort route, and Vehicle Fleet pickup route).
-  - Pickup points are spatially distributed within the Source Area polygon toward the exit vector so crowds and vehicle fleets assemble at dedicated staging coordinates rather than overlapping at a single centroid point.
-  - Each pickup point is rendered on the map as a **blue square marker**.
-- **Obstacle Avoidance**:
-  - *Note on OSRM*: Standard public OSRM HTTP endpoints (`router.project-osrm.org`) calculate fast shortest paths on OSM road networks but **do not natively support arbitrary polygon exclusion (`avoid_polygons`)** in public API requests.
-  - **Hybrid Solution**:
-    1. Use **OSRM** (or fallback urban road-grid synthesizer) starting from each route's established **Pickup Location** to the Target Area.
-    2. Implement an **Obstacle-Aware Graph / Waypoint Detour Engine**: When a route intersects a user-defined No-Go polygon, compute boundary detour waypoints around the polygon's bounding box/hull and geometrically sanitize vertices to guarantee zero traversal through restricted zones.
+### 5.1 Routing Algorithm & Pickup Location Establishment
+- When `Compute evacuation routes` is clicked:
+  - Distinct **Pickup Locations (Blue Squares)** are established along the perimeter/exit edges of each Source Area polygon.
+  - OSRM + Turf.js obstacle-avoiding routes are computed from Vehicle Staging Depots $\rightarrow$ Source Area Pickup Locations $\rightarrow$ Target Area Shelters (avoiding all No-Go polygons).
 
-### 5.2 Simulation & Heatmap Engine
-- **Discrete Time-Step Animation**: Runs at configurable tick intervals (10 ticks/sec logical progression, smooth visual interpolation).
-- **Agent & Group Dynamics**:
-  - At `t = 0`, evacuee cohorts assemble at their respective route's **Blue Square Pickup Location** inside their Source Area.
-  - **Vehicles** dispatch from staging depots to the assigned Source Area's **Pickup Location**, board evacuees up to fleet capacity, and transport them along routed road segments to Target Areas.
-  - **Pedestrians / Remaining Evacuees** depart from their route's **Pickup Location** at walking speed (`~1.4 m/s` baseline), modulated by their behavioral type (`Obedient`, `Autonomous`, `Random`).
-- **Heatmap Rendering**:
-  - An HTML5 Canvas thermal heatmap layer renders real-time spatial density based on current cohort coordinates and population weights.
+### 5.2 Micro-Simulation & Thermal Heatmap Engine
+- **Internal Source Area Crowd Dynamics**:
+  - Source Area populations are modeled as spatial micro-clusters distributed inside the polygon at `t = 0`:
+    1. **Obedient clusters**: Compute Euclidean/geodesic vector to the nearest Pickup Location in their Source Area and walk directly to it (`~1.5 m/s`).
+    2. **Autonomous clusters**: Navigate to the nearest polygon boundary edge and traverse along the perimeter limits of the Source Area until they encounter a Pickup Location.
+    3. **Random clusters**: Perform a bounded random walk inside the Source Area polygon. At each step, if their distance to any Pickup Location falls $\le 50\text{ meters}$, they transition to direct approach and walk straight to that Pickup Location.
+  - Upon reaching a Pickup Location, clusters join that Blue Square's waiting queue (`waitingPopulation`).
+- **Vehicle Boarding & 80% Occupancy Departure**:
+  - Vehicles dispatch from depots to assigned Pickup Locations.
+  - At a Pickup Location, a vehicle boards waiting evacuees from the queue.
+  - The vehicle remains at the Pickup Location until `currentOccupancy >= 0.80 * capacity` (or until no further evacuees remain in the Source Area).
+  - Once $\ge 80\%$ full, the vehicle departs for the Target Area shelter, removing those evacuees from the Source Area.
+- **Heatmap Thermal Dynamics**:
+  - Heatmap intensity at any coordinate is proportional to local evacuee headcount.
+  - As evacuees converge on Blue Squares and wait, thermal intensity peaks sharply at the Pickup Locations (`Hotter around pickup locations`).
+  - As vehicles depart with boarded passengers, total headcount in the Source Area decreases, causing the Source Area heatmap to progressively cool down (`Cooler over time`).
 
 ---
 
@@ -150,8 +154,8 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 - **Frontend Framework**: React 18+ with TypeScript and Vite.
 - **UI Styling & Layout**: Vanilla CSS with custom tactical HSL design tokens + Lucide Icons.
 - **Map & Geospatial Engine**:
-  - **Leaflet** (`leaflet`) with custom HTML5 Canvas thermal heatmap overlay and custom divIcons for polygons, depot pins, and **blue square pickup markers**.
-  - **Turf.js** (`@turf/turf`) for client-side polygon intersection checks, point-in-polygon sampling, pickup point distribution, and detour waypoint generation around No-Go polygons.
+  - **Leaflet** (`leaflet`) with custom HTML5 Canvas thermal heatmap overlay and custom divIcons for polygons, depot pins, moving vehicles, and **blue square pickup markers with live queue/boarding badges**.
+  - **Turf.js** (`@turf/turf`) for polygon containment, perimeter traversal, 50m proximity detection, and No-Go detour waypoint generation.
 - **Routing Services**: OSRM HTTP API (`router.project-osrm.org`) paired with client-side Turf.js obstacle-avoidance waypoint routing.
 
 ---
@@ -196,3 +200,4 @@ This specification is maintained as a living document. Every functional addition
 | :--- | :--- | :--- |
 | **v1.0** | 2026-09-17 | Initial restructured specification & full React/TypeScript/Leaflet implementation of the 4-panel cockpit UI, Brussels & Paris presets, OSRM + Turf.js obstacle-avoiding routing engine, and 60 FPS thermal heatmap simulation. |
 | **v1.1** | 2026-09-17 | Added requirement and implementation for **Route Pickup Locations**: once route computation completes, specific pickup/assembly points are established inside each Source Area for every route and marked with **blue squares** on the map (with interactive tooltips and legend entry). |
+| **v1.2** | 2026-09-17 | Refined **Population Behavior & Vehicle Boarding Mechanics**: (1) Evacuees remain inside their Source Area until picked up by a vehicle; (2) `Obedient` evacuees head immediately to the closest pickup location, `Random` evacuees wander inside the zone until within **50m** of a pickup location, and `Autonomous` evacuees circulate along the **limits (perimeter)** of the Source Area until encountering a pickup location; (3) Evacuees wait at pickup locations until vehicles arrive, making the heatmap **hotter around pickup locations**; (4) Vehicles wait at pickup locations until reaching **80% occupancy** before departing to Target Shelters, progressively **cooling down the Source Area heatmap** as people are evacuated. |

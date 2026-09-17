@@ -1510,3 +1510,146 @@ body,
   border-radius: 2px;
   box-shadow: 0 0 4px rgba(37, 99, 235, 0.8);
 }
+
+/* ==========================================================================
+   V1.2 PICKUP QUEUE BADGES, VEHICLE BOARDING STATES & TELEMETRY
+   ========================================================================== */
+.pickup-square-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  pointer-events: auto;
+}
+
+.pickup-live-queue-pill {
+  background-color: rgba(15, 23, 42, 0.94);
+  border: 1.5px solid #3b82f6;
+  border-radius: 10px;
+  padding: 2px 7px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #93c5fd;
+  white-space: nowrap;
+  margin-bottom: 3px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.pickup-live-queue-pill.hot {
+  border-color: #f97316;
+  color: #fdba74;
+  background-color: rgba(45, 18, 10, 0.94);
+  box-shadow: 0 0 12px rgba(249, 115, 22, 0.55);
+}
+
+.boarding-sub-pill {
+  color: #34d399;
+  font-size: 9px;
+}
+
+.hotspot-swatch {
+  background: radial-gradient(circle, #ff1e1e 0%, #f97316 60%, #fbbf24 100%);
+  border: 1px solid #ffffff;
+  border-radius: 50%;
+}
+
+/* Vehicle Marker State Variations */
+.sim-vehicle-marker.boarding-wait {
+  background-color: #7c2d12;
+  border-color: #fb923c;
+  box-shadow: 0 0 12px rgba(251, 146, 60, 0.75);
+}
+
+.sim-vehicle-marker.evac-enroute {
+  background-color: #065f46;
+  border-color: #34d399;
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.75);
+}
+
+.sim-vehicle-marker.approach-empty {
+  background-color: #1e1b4b;
+  border-color: #818cf8;
+  opacity: 0.88;
+}
+
+/* Right Panel Sub-breakdown & Pickup Queue List */
+.source-sub-breakdown {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sub-breakdown-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.sub-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.sub-dot.hotspot {
+  background-color: #f97316;
+  box-shadow: 0 0 6px #f97316;
+}
+
+.sub-dot.wandering {
+  background-color: #38bdf8;
+}
+
+.pickup-queues-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pickup-queue-item {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 7px 9px;
+}
+
+.pickup-queue-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+}
+
+.pickup-queue-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pickup-queue-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #fdba74;
+}
+
+.pickup-boarding-status {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+.pickup-boarding-status.active {
+  color: #34d399;
+  font-weight: 600;
+}

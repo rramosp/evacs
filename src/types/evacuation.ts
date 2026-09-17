@@ -48,7 +48,8 @@ export interface ComputedRoute {
   behaviorType: PopulationBehaviorType | 'vehicle_dispatch';
   pickupLocation: [number, number]; // Specific [lat, lng] pickup point on the Source Area
   pickupLabel: string;              // Descriptive label for the pickup location
-  coordinates: [number, number][]; // [lat, lng] path
+  coordinates: [number, number][];  // [lat, lng] path from Pickup Location -> Target Area
+  approachCoordinates?: [number, number][]; // [lat, lng] path from Vehicle Depot -> Pickup Location
   distanceMeters: number;
   estimatedDurationSeconds: number;
   assignedPopulation: number;
@@ -68,33 +69,76 @@ export interface LogEntry {
   message: string;
 }
 
-export interface SimulationCohort {
+export interface PickupLocationState {
   id: string;
   routeId: string;
   sourceId: string;
+  sourceName: string;
   targetId: string;
-  behaviorType: PopulationBehaviorType;
-  isVehicle: boolean;
-  vehicleType?: VehicleType;
-  vehicleFleetName?: string;
-  vehicleUnits?: number;
-  populationCount: number;
-  coordinates: [number, number][];
-  cumulativeDistances: number[];
-  totalDistanceMeters: number;
-  progressMeters: number;
-  baseSpeedMps: number; // meters per second
-  currentSpeedMps: number;
+  targetName: string;
+  label: string;
+  location: [number, number];
+  waitingPopulation: number;
+  totalBoardedCount: number;
+  boardingVehicleInfo?: string; // e.g., "STIB Bus #1 (38/50 - 76%)"
+}
+
+export interface SourceInternalCluster {
+  id: string;
+  sourceId: string;
+  behavior: PopulationBehaviorType;
+  headcount: number;
+  position: [number, number];
+  targetPickupId: string | null;
+  perimeterEdgeIndex: number;
+  perimeterProgress: number;
+  randomHeadingRad: number;
+  status: 'moving_in_zone' | 'waiting_at_pickup' | 'boarded';
+}
+
+export interface ActiveVehicleUnit {
+  id: string;
+  fleetId: string;
+  fleetName: string;
+  vehicleType: VehicleType;
+  unitCount: number;
+  capacityPerUnit: number;
+  maxCapacity: number; // unitCount * capacityPerUnit
+  currentOccupancy: number;
+  assignedRouteId: string;
+  assignedPickupId: string;
+  sourceId: string;
+  targetId: string;
+  targetName: string;
+  status: 'to_pickup' | 'waiting_for_80_pct' | 'to_target' | 'completed';
   currentPosition: [number, number];
-  status: 'waiting' | 'boarding' | 'en_route' | 'arrived';
+  progressMeters: number;
+  speedMps: number;
+  approachCoords: [number, number][];
+  approachCumulative: number[];
+  evacCoords: [number, number][];
+  evacCumulative: number[];
   departureDelaySeconds: number;
+}
+
+export interface SimulationStateSnapshot {
+  clusters: SourceInternalCluster[];
+  pickupStates: PickupLocationState[];
+  vehicles: ActiveVehicleUnit[];
+  heatmapPoints: HeatmapPoint[];
+  targetOccupancies: Record<string, number>;
+  newLogs: string[];
+  totalEvacuated: number;
+  totalInTransit: number;
+  totalRemainingAtSource: number;
+  totalWaitingAtPickups: number;
 }
 
 export interface HeatmapPoint {
   lat: number;
   lng: number;
-  intensity: number; // normalized or headcount weight
-  behavior: PopulationBehaviorType;
+  intensity: number; // normalized thermal weight
+  behavior: PopulationBehaviorType | 'pickup_hotspot';
 }
 
 export type ActiveDrawMode =

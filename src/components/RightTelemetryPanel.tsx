@@ -4,6 +4,7 @@ import {
   TargetArea,
   VehicleFleet,
   ComputedRoute,
+  PickupLocationState,
 } from '../types/evacuation';
 import {
   Activity,
@@ -15,6 +16,7 @@ import {
   Bus,
   EyeOff,
   BarChart3,
+  MapPin,
 } from 'lucide-react';
 
 interface RightTelemetryPanelProps {
@@ -22,10 +24,12 @@ interface RightTelemetryPanelProps {
   targetAreas: TargetArea[];
   vehicleFleets: VehicleFleet[];
   computedRoutes: ComputedRoute[];
+  pickupStates: PickupLocationState[];
   elapsedSimSeconds: number;
   totalEvacuated: number;
   totalInTransit: number;
   totalRemainingAtSource: number;
+  totalWaitingAtPickups: number;
   isSimulating: boolean;
 }
 
@@ -34,17 +38,21 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
   targetAreas,
   vehicleFleets,
   computedRoutes,
+  pickupStates,
   elapsedSimSeconds,
   totalEvacuated,
   totalInTransit,
   totalRemainingAtSource,
+  totalWaitingAtPickups,
   isSimulating,
 }) => {
   const [minimalMode, setMinimalMode] = useState<boolean>(false);
 
   const totalPopulation = sourceAreas.reduce((acc, s) => acc + s.population, 0);
   const progressPercent =
-    totalPopulation > 0 ? Math.min(100, Math.round((totalEvacuated / totalPopulation) * 100)) : 0;
+    totalPopulation > 0
+      ? Math.min(100, Math.round((totalEvacuated / totalPopulation) * 100))
+      : 0;
 
   const formatSimTime = (sec: number) => {
     const mins = Math.floor(sec / 60);
@@ -52,7 +60,6 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
     return `${String(mins).padStart(2, '0')}:${String(remSec).padStart(2, '0')}`;
   };
 
-  // Behavioral headcount totals across all source areas
   const totalObedient = sourceAreas.reduce(
     (acc, s) => acc + Math.round((s.population * s.behavior.obedient) / 100),
     0
@@ -68,6 +75,8 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
     (acc, f) => acc + f.count * f.capacityPerUnit,
     0
   );
+
+  const wanderingInZones = Math.max(0, totalRemainingAtSource - totalWaitingAtPickups);
 
   return (
     <aside className="cockpit-right-panel" id="right-telemetry-panel">
@@ -138,7 +147,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
               <div className="kpi-stat-box transit">
                 <div className="kpi-stat-label">
                   <Navigation size={13} />
-                  <span>In Transit</span>
+                  <span>On Vehicles</span>
                 </div>
                 <div className="kpi-stat-value">{totalInTransit.toLocaleString()}</div>
               </div>
@@ -146,12 +155,62 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
               <div className="kpi-stat-box waiting">
                 <div className="kpi-stat-label">
                   <Users size={13} />
-                  <span>At Source</span>
+                  <span>In Source Area</span>
                 </div>
                 <div className="kpi-stat-value">{totalRemainingAtSource.toLocaleString()}</div>
               </div>
             </div>
+
+            {/* Sub-breakdown of Source Area population */}
+            <div className="source-sub-breakdown">
+              <div className="sub-breakdown-item">
+                <span className="sub-dot hotspot" />
+                <span>Waiting at Pickup Squares:</span>
+                <strong>{totalWaitingAtPickups.toLocaleString()}</strong>
+              </div>
+              <div className="sub-breakdown-item">
+                <span className="sub-dot wandering" />
+                <span>Moving Inside Source Zones:</span>
+                <strong>{wanderingInZones.toLocaleString()}</strong>
+              </div>
+            </div>
           </section>
+
+          {/* Blue Square Pickup Locations Live Queue & 80% Boarding Status */}
+          {pickupStates.length > 0 && (
+            <section className="telemetry-card">
+              <div className="telemetry-card-header">
+                <div className="header-with-icon">
+                  <MapPin size={14} style={{ color: '#3b82f6' }} />
+                  <span>BLUE SQUARE PICKUP QUEUES (80% RULE)</span>
+                </div>
+              </div>
+
+              <div className="pickup-queues-list">
+                {pickupStates.map((p, i) => (
+                  <div key={p.id} className="pickup-queue-item">
+                    <div className="pickup-queue-top">
+                      <span className="pickup-queue-name">
+                        🟦 #{i + 1} {p.label}
+                      </span>
+                      <span className="pickup-queue-count">
+                        Queue: <strong>{p.waitingPopulation}</strong>
+                      </span>
+                    </div>
+                    {p.boardingVehicleInfo ? (
+                      <div className="pickup-boarding-status active">
+                        🚌 {p.boardingVehicleInfo}
+                      </div>
+                    ) : (
+                      <div className="pickup-boarding-status">
+                        Boarded so far: {p.totalBoardedCount.toLocaleString()} evacuees
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           {/* Target Shelter Occupancy Meters */}
           <section className="telemetry-card">
@@ -194,7 +253,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
             <div className="telemetry-card-header">
               <div className="header-with-icon">
                 <Users size={14} />
-                <span>POPULATION BEHAVIOR MODEL</span>
+                <span>INTERNAL ZONE BEHAVIOR MODEL</span>
               </div>
             </div>
 
@@ -203,8 +262,8 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
                 <div className="behavior-row-info">
                   <span className="behavior-dot obedient" />
                   <div>
-                    <div className="behavior-title">Obedient Evacuees</div>
-                    <div className="behavior-desc">Follow official optimal routes strictly</div>
+                    <div className="behavior-title">Obedient Population</div>
+                    <div className="behavior-desc">Go immediately to closest pickup point</div>
                   </div>
                 </div>
                 <span className="behavior-count">{totalObedient.toLocaleString()}</span>
@@ -214,8 +273,8 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
                 <div className="behavior-row-info">
                   <span className="behavior-dot autonomous" />
                   <div>
-                    <div className="behavior-title">Autonomous Evacuees</div>
-                    <div className="behavior-desc">Detour dynamically around congestion</div>
+                    <div className="behavior-title">Autonomous Population</div>
+                    <div className="behavior-desc">Wander along zone limits until pickup</div>
                   </div>
                 </div>
                 <span className="behavior-count">{totalAutonomous.toLocaleString()}</span>
@@ -225,8 +284,8 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
                 <div className="behavior-row-info">
                   <span className="behavior-dot random" />
                   <div>
-                    <div className="behavior-title">Random Evacuees</div>
-                    <div className="behavior-desc">Non-compliant / random exit selection</div>
+                    <div className="behavior-title">Random Population</div>
+                    <div className="behavior-desc">Wander inside zone until within 50m</div>
                   </div>
                 </div>
                 <span className="behavior-count">{totalRandom.toLocaleString()}</span>
@@ -253,7 +312,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
               </div>
               <div className="fleet-stat">
                 <span className="fleet-stat-num">{computedRoutes.length}</span>
-                <span className="fleet-stat-lbl">Active Corridors</span>
+                <span className="fleet-stat-lbl">Pickup Squares</span>
               </div>
             </div>
           </section>

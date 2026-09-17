@@ -7,7 +7,9 @@ import {
   NoGoArea,
   VehicleFleet,
   ComputedRoute,
-  SimulationCohort,
+  PickupLocationState,
+  ActiveVehicleUnit,
+  SourceInternalCluster,
   HeatmapPoint,
   ActiveDrawMode,
 } from '../types/evacuation';
@@ -22,7 +24,9 @@ interface EvacuationMapProps {
   noGoAreas: NoGoArea[];
   vehicleFleets: VehicleFleet[];
   computedRoutes: ComputedRoute[];
-  cohorts: SimulationCohort[];
+  pickupStates: PickupLocationState[];
+  vehicles: ActiveVehicleUnit[];
+  clusters: SourceInternalCluster[];
   heatmapPoints: HeatmapPoint[];
   isSimulating: boolean;
   activeDrawMode: ActiveDrawMode;
@@ -41,7 +45,9 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   noGoAreas,
   vehicleFleets,
   computedRoutes,
-  cohorts,
+  pickupStates,
+  vehicles,
+  clusters,
   heatmapPoints,
   isSimulating,
   activeDrawMode,
@@ -181,7 +187,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         color: isSelected ? '#fbbf24' : '#f59e0b',
         weight: isSelected ? 3 : 2,
         fillColor: '#f59e0b',
-        fillOpacity: isSelected ? 0.38 : 0.24,
+        fillOpacity: isSelected ? 0.28 : 0.16,
         dashArray: isSelected ? undefined : '4, 4',
       });
 
@@ -191,10 +197,29 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       });
 
       const centroid = getPolygonCentroid(src.polygon);
+
+      // Compute live remaining headcount in this source area
+      const movingInThisSrc = clusters
+        .filter((c) => c.sourceId === src.id && c.status === 'moving_in_zone')
+        .reduce((acc, c) => acc + c.headcount, 0);
+      const waitingInThisSrc = pickupStates
+        .filter((p) => p.sourceId === src.id)
+        .reduce((acc, p) => acc + p.waitingPopulation, 0);
+      const boardingInThisSrc = vehicles
+        .filter((v) => v.sourceId === src.id && v.status === 'waiting_for_80_pct')
+        .reduce((acc, v) => acc + v.currentOccupancy, 0);
+
+      const currentRemaining =
+        clusters.length > 0
+          ? movingInThisSrc + waitingInThisSrc + boardingInThisSrc
+          : src.population;
+
       const labelHtml = `
         <div class="map-zone-badge map-zone-source ${isSelected ? 'selected' : ''}">
           <div class="zone-badge-title">SOURCE: ${src.name}</div>
-          <div class="zone-badge-sub">${src.population.toLocaleString()} evacuees</div>
+          <div class="zone-badge-sub">
+            <strong>${currentRemaining.toLocaleString()}</strong> / ${src.population.toLocaleString()} in zone
+          </div>
           <div class="zone-badge-split">
             <span>Ob: ${src.behavior.obedient}%</span>
             <span>Au: ${src.behavior.autonomous}%</span>
@@ -207,8 +232,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         icon: L.divIcon({
           className: 'custom-div-icon',
           html: labelHtml,
-          iconSize: [160, 54],
-          iconAnchor: [80, 27],
+          iconSize: [170, 56],
+          iconAnchor: [85, 28],
         }),
       });
       marker.on('click', () => onSelectEntity(src.id));
@@ -336,42 +361,34 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     vehicleFleets,
     selectedEntityId,
     showZones,
+    clusters,
+    pickupStates,
+    vehicles,
   ]);
 
-  // Render Computed Evacuation Routes AND Blue Square Pickup Locations
+  // Render Computed Evacuation Routes
   useEffect(() => {
     const routesGroup = routesLayerGroupRef.current;
-    const pickupGroup = pickupSquaresLayerGroupRef.current;
-    if (!routesGroup || !pickupGroup) return;
-
+    if (!routesGroup) return;
     routesGroup.clearLayers();
-    pickupGroup.clearLayers();
 
     if (!showRoutes || computedRoutes.length === 0) return;
 
-    computedRoutes.forEach((route, idx) => {
-      let color = '#38bdf8'; // Obedient primary cyan-blue
-      let weight = 4;
-      let dashArray: string | undefined = undefined;
-      let opacity = 0.88;
+    computedRoutes.forEach((route) => {
+      const color = route.behaviorType === 'obedient' ? '#38bdf8' : '#fbbf24';
+      const weight = 3.5;
 
-      if (route.behaviorType === 'autonomous') {
-        color = '#fbbf24'; // Amber alternate corridor
-        weight = 3.5;
-        dashArray = '8, 6';
-      } else if (route.behaviorType === 'random') {
-        color = '#fb7185'; // Rose/coral random path
-        weight = 2.5;
-        dashArray = '3, 6';
-        opacity = 0.75;
-      } else if (route.behaviorType === 'vehicle_dispatch') {
-        color = '#a855f7'; // Purple/Indigo vehicle fleet corridor
-        weight = 3;
-        dashArray = '10, 5';
-        opacity = 0.82;
+      // Render approach path from depot to Blue Square Pickup Location (subtle dashed purple)
+      if (route.approachCoordinates && route.approachCoordinates.length >= 2) {
+        L.polyline(route.approachCoordinates, {
+          color: '#a855f7',
+          weight: 2,
+          opacity: 0.65,
+          dashArray: '5, 5',
+        }).addTo(routesGroup);
       }
 
-      // Outer casing for high contrast
+      // Outer casing for main evacuation route
       L.polyline(route.coordinates, {
         color: '#090d16',
         weight: weight + 3,
@@ -381,87 +398,187 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       const polyline = L.polyline(route.coordinates, {
         color,
         weight,
-        opacity,
-        dashArray,
+        opacity: 0.88,
       });
 
       const distKm = (route.distanceMeters / 1000).toFixed(2);
-      const durationMin = Math.ceil(route.estimatedDurationSeconds / 60);
       polyline.bindTooltip(
         `<div class="route-tooltip">
-          <strong>${route.behaviorType.toUpperCase()} CORRIDOR</strong><br/>
-          ${route.sourceName} &rarr; ${route.targetName}<br/>
-          Distance: <b>${distKm} km</b> | Est. Time: <b>~${durationMin} min</b><br/>
-          Assigned Evacuees: <b>${route.assignedPopulation.toLocaleString()}</b>
+          <strong>EVACUATION CORRIDOR</strong><br/>
+          ${route.pickupLabel} &rarr; ${route.targetName}<br/>
+          Distance: <b>${distKm} km</b>
           ${route.isDetour ? '<br/><span style="color:#f87171">⚠️ Obstacle Detour Active</span>' : ''}
         </div>`,
         { sticky: true }
       );
 
       polyline.addTo(routesGroup);
-
-      // Establish Blue Square Marker at route.pickupLocation on the Source Area
-      if (route.pickupLocation) {
-        const squareHtml = `
-          <div class="map-pickup-square-marker" title="Route Pickup Location">
-            <span class="pickup-square-inner">${idx + 1}</span>
-          </div>
-        `;
-
-        const pickupMarker = L.marker(route.pickupLocation, {
-          icon: L.divIcon({
-            className: 'custom-div-icon',
-            html: squareHtml,
-            iconSize: [20, 20],
-            iconAnchor: [10, 10],
-          }),
-          zIndexOffset: 900,
-        });
-
-        pickupMarker.bindTooltip(
-          `<div class="route-tooltip">
-            <strong style="color:#60a5fa">🟦 ROUTE PICKUP LOCATION #${idx + 1}</strong><br/>
-            <b>${route.pickupLabel}</b><br/>
-            Destination: <b>${route.targetName}</b><br/>
-            Assigned Evacuees: <b>${route.assignedPopulation.toLocaleString()} people</b><br/>
-            Coordinates: <code>[${route.pickupLocation[0]}, ${route.pickupLocation[1]}]</code>
-          </div>`,
-          { direction: 'top', offset: [0, -8] }
-        );
-
-        pickupMarker.addTo(pickupGroup);
-      }
     });
   }, [computedRoutes, showRoutes]);
 
-  // Render active simulation moving vehicle markers
+  // Render Blue Square Pickup Locations with Live Queue & Boarding Badges
+  useEffect(() => {
+    const pickupGroup = pickupSquaresLayerGroupRef.current;
+    if (!pickupGroup) return;
+    pickupGroup.clearLayers();
+
+    if (!showRoutes || computedRoutes.length === 0) return;
+
+    computedRoutes.forEach((route, idx) => {
+      if (!route.pickupLocation) return;
+
+      const pState = pickupStates.find((p) => p.routeId === route.id);
+      const waitingCount = pState ? pState.waitingPopulation : 0;
+
+      // Also check if a vehicle is currently boarding at this pickup point
+      const boardingVeh = vehicles.find(
+        (v) => v.assignedRouteId === route.id && v.status === 'waiting_for_80_pct'
+      );
+
+      const boardingPct = boardingVeh
+        ? Math.round((boardingVeh.currentOccupancy / Math.max(1, boardingVeh.maxCapacity)) * 100)
+        : 0;
+
+      const squareHtml = `
+        <div class="pickup-square-wrapper">
+          ${
+            waitingCount > 0 || boardingVeh
+              ? `<div class="pickup-live-queue-pill ${waitingCount > 100 ? 'hot' : ''}">
+                  <span>⏳ ${waitingCount} waiting</span>
+                  ${
+                    boardingVeh
+                      ? `<span class="boarding-sub-pill">🚌 ${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} (${boardingPct}%)</span>`
+                      : ''
+                  }
+                </div>`
+              : ''
+          }
+          <div class="map-pickup-square-marker" title="${route.pickupLabel}">
+            <span class="pickup-square-inner">${idx + 1}</span>
+          </div>
+        </div>
+      `;
+
+      const pickupMarker = L.marker(route.pickupLocation, {
+        icon: L.divIcon({
+          className: 'custom-div-icon',
+          html: squareHtml,
+          iconSize: [140, 48],
+          iconAnchor: [70, 38],
+        }),
+        zIndexOffset: 950,
+      });
+
+      pickupMarker.bindTooltip(
+        `<div class="route-tooltip">
+          <strong style="color:#60a5fa">🟦 BLUE SQUARE PICKUP #${idx + 1}</strong><br/>
+          <b>${route.pickupLabel}</b><br/>
+          Destination: <b>${route.targetName}</b><br/>
+          Waiting in Queue: <b>${waitingCount.toLocaleString()} evacuees</b><br/>
+          ${
+            boardingVeh
+              ? `Active Vehicle Boarding: <b>${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} seats (${boardingPct}% — departs at 80%)</b><br/>`
+              : 'Vehicle Status: <b>En route to pickup</b><br/>'
+          }
+          Coordinates: <code>[${route.pickupLocation[0]}, ${route.pickupLocation[1]}]</code>
+        </div>`,
+        { direction: 'top', offset: [0, -16] }
+      );
+
+      pickupMarker.addTo(pickupGroup);
+    });
+  }, [computedRoutes, pickupStates, vehicles, showRoutes]);
+
+  // Render Active Moving Vehicle Markers AND Internal Source Crowd Clusters
   useEffect(() => {
     const group = vehiclesLayerGroupRef.current;
     if (!group) return;
     group.clearLayers();
 
-    if (!isSimulating) return;
+    if (!isSimulating && clusters.length === 0) return;
 
-    cohorts
-      .filter((c) => c.status === 'en_route' && c.isVehicle)
+    // 1. Render micro-dots for crowd clusters moving inside Source Areas
+    clusters
+      .filter((c) => c.status === 'moving_in_zone' && c.headcount > 0)
+      .forEach((c) => {
+        const dotColor =
+          c.behavior === 'obedient'
+            ? '#38bdf8'
+            : c.behavior === 'autonomous'
+            ? '#fbbf24'
+            : '#fb7185';
+
+        L.circleMarker(c.position, {
+          radius: 3.5,
+          color: '#090d16',
+          weight: 1,
+          fillColor: dotColor,
+          fillOpacity: 0.9,
+        })
+          .bindTooltip(
+            `<b>${c.behavior.toUpperCase()} Cluster</b> (${c.headcount} evacuees)<br/>Moving toward Blue Square pickup`,
+            { direction: 'top' }
+          )
+          .addTo(group);
+      });
+
+    // 2. Render active vehicles (en route to pickup, waiting for 80% occupancy, or en route to shelter)
+    vehicles
+      .filter((v) => v.status !== 'completed')
       .forEach((veh) => {
+        const occPct = Math.round(
+          (veh.currentOccupancy / Math.max(1, veh.maxCapacity)) * 100
+        );
+        const statusClass =
+          veh.status === 'waiting_for_80_pct'
+            ? 'boarding-wait'
+            : veh.status === 'to_target'
+            ? 'evac-enroute'
+            : 'approach-empty';
+
         const html = `
-          <div class="sim-vehicle-marker">
+          <div class="sim-vehicle-marker ${statusClass}">
             <span class="sim-veh-icon">${veh.vehicleType === 'Bus' ? '🚌' : '🚓'}</span>
-            <span class="sim-veh-badge">${veh.populationCount}</span>
+            <span class="sim-veh-badge">
+              ${
+                veh.status === 'waiting_for_80_pct'
+                  ? `${occPct}%`
+                  : veh.currentOccupancy > 0
+                  ? `${veh.currentOccupancy}`
+                  : '0'
+              }
+            </span>
           </div>
         `;
+
         const marker = L.marker(veh.currentPosition, {
           icon: L.divIcon({
             className: 'custom-div-icon',
             html,
-            iconSize: [52, 26],
-            iconAnchor: [26, 13],
+            iconSize: [58, 26],
+            iconAnchor: [29, 13],
           }),
+          zIndexOffset: 920,
         });
+
+        marker.bindTooltip(
+          `<div class="route-tooltip">
+            <strong>${veh.fleetName}</strong> (${veh.unitCount}x ${veh.vehicleType})<br/>
+            Status: <b>${
+              veh.status === 'waiting_for_80_pct'
+                ? `Boarding at Pickup (${occPct}% — Waiting for 80%)`
+                : veh.status === 'to_target'
+                ? `Departed (>=80% Full) -> En Route to ${veh.targetName}`
+                : 'Approaching Blue Square Pickup Point'
+            }</b><br/>
+            Occupancy: <b>${veh.currentOccupancy} / ${veh.maxCapacity} evacuees (${occPct}%)</b>
+          </div>`,
+          { direction: 'top' }
+        );
+
         marker.addTo(group);
       });
-  }, [cohorts, isSimulating]);
+  }, [vehicles, clusters, isSimulating]);
 
   // Render drawing preview polygon/markers
   useEffect(() => {
@@ -528,7 +645,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (!showHeatmap || heatmapPoints.length === 0) return;
 
     const currentZoom = map.getZoom();
-    const baseRadius = Math.max(18, Math.min(58, Math.pow(1.32, currentZoom - 10) * 16));
+    const baseRadius = Math.max(20, Math.min(64, Math.pow(1.32, currentZoom - 10) * 18));
 
     heatmapPoints.forEach((pt) => {
       const containerPt = map.latLngToContainerPoint([pt.lat, pt.lng]);
@@ -542,35 +659,43 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         return;
       }
 
+      const radius =
+        pt.behavior === 'pickup_hotspot' ? baseRadius * 1.28 : baseRadius * 0.88;
+
       const grad = ctx.createRadialGradient(
         containerPt.x,
         containerPt.y,
-        baseRadius * 0.1,
+        radius * 0.08,
         containerPt.x,
         containerPt.y,
-        baseRadius
+        radius
       );
 
-      const alpha = Math.min(0.82, Math.max(0.18, pt.intensity * 0.78));
+      const alpha = Math.min(0.88, Math.max(0.15, pt.intensity * 0.85));
 
-      if (pt.behavior === 'random') {
-        grad.addColorStop(0, `rgba(244, 63, 94, ${alpha})`);
-        grad.addColorStop(0.45, `rgba(251, 146, 60, ${alpha * 0.65})`);
+      if (pt.behavior === 'pickup_hotspot') {
+        // Intense glowing thermal hotspot around Blue Square Pickup Locations!
+        grad.addColorStop(0, `rgba(255, 30, 30, ${Math.min(0.95, alpha * 1.15)})`);
+        grad.addColorStop(0.32, `rgba(249, 115, 22, ${alpha})`);
+        grad.addColorStop(0.65, `rgba(250, 204, 21, ${alpha * 0.65})`);
+        grad.addColorStop(1, 'rgba(250, 204, 21, 0)');
+      } else if (pt.behavior === 'random') {
+        grad.addColorStop(0, `rgba(244, 63, 94, ${alpha * 0.8})`);
+        grad.addColorStop(0.5, `rgba(251, 146, 60, ${alpha * 0.55})`);
         grad.addColorStop(1, 'rgba(251, 146, 60, 0)');
       } else if (pt.behavior === 'autonomous') {
-        grad.addColorStop(0, `rgba(250, 204, 21, ${alpha})`);
-        grad.addColorStop(0.5, `rgba(52, 211, 153, ${alpha * 0.6})`);
+        grad.addColorStop(0, `rgba(250, 204, 21, ${alpha * 0.8})`);
+        grad.addColorStop(0.5, `rgba(52, 211, 153, ${alpha * 0.55})`);
         grad.addColorStop(1, 'rgba(52, 211, 153, 0)');
       } else {
-        grad.addColorStop(0, `rgba(239, 68, 68, ${alpha})`);
-        grad.addColorStop(0.35, `rgba(245, 158, 11, ${alpha * 0.8})`);
-        grad.addColorStop(0.7, `rgba(6, 182, 212, ${alpha * 0.45})`);
+        grad.addColorStop(0, `rgba(245, 158, 11, ${alpha * 0.75})`);
+        grad.addColorStop(0.5, `rgba(6, 182, 212, ${alpha * 0.5})`);
         grad.addColorStop(1, 'rgba(6, 182, 212, 0)');
       }
 
       ctx.fillStyle = grad;
       ctx.beginPath();
-      ctx.arc(containerPt.x, containerPt.y, baseRadius, 0, Math.PI * 2);
+      ctx.arc(containerPt.x, containerPt.y, radius, 0, Math.PI * 2);
       ctx.fill();
     });
   };
@@ -654,15 +779,11 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           </div>
           <div className="legend-item">
             <span className="legend-line obedient-line" />
-            <span>Obedient Route</span>
+            <span>Evac Corridor</span>
           </div>
           <div className="legend-item">
-            <span className="legend-line autonomous-line" />
-            <span>Autonomous Detour</span>
-          </div>
-          <div className="legend-item">
-            <span className="legend-line random-line" />
-            <span>Random Path</span>
+            <span className="legend-swatch hotspot-swatch" />
+            <span>Pickup Queue Heat</span>
           </div>
         </div>
       </div>
