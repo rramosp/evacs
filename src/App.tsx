@@ -218,7 +218,7 @@ export function App() {
     setIsSimulating(true);
     appendLog(
       'SIMULATION',
-      `Simulation started (${simSpeed}x). Evacuees moving within source zones toward Blue Square pickup locations; vehicles board until 80% occupancy.`
+      `Simulation started (${simSpeed}x). Evacuees moving within source zones toward Blue Square pickup locations; vehicles board until 80% occupancy or 10 minutes waiting time (with >=1 passenger).`
     );
   };
 

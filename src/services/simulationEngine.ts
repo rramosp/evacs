@@ -14,6 +14,15 @@ import {
 import { getPolygonCentroid, toTurfPolygon } from './routingEngine';
 
 /**
+ * Format seconds as MM:SS
+ */
+export function formatMMSS(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+/**
  * Precompute cumulative distance array (in meters) along a polyline
  */
 export function buildCumulativeDistances(coords: [number, number][]): {
@@ -83,7 +92,6 @@ function samplePointInsidePolygon(
     const poly = toTurfPolygon(polygonCoords);
     const bbox = turf.bbox(poly); // [minLng, minLat, maxLng, maxLat]
 
-    // Deterministic quasi-random sampling inside bbox
     for (let attempt = 0; attempt < 25; attempt++) {
       const seed = index * 17 + attempt * 31 + 1;
       const u = ((seed * 16807) % 2147483647) / 2147483647;
@@ -109,7 +117,7 @@ function samplePointInsidePolygon(
 }
 
 /**
- * Generate initial heatmap points from clusters and pickup states
+ * Generate dynamic heatmap points from clusters and pickup states
  */
 export function generateHeatmapFromState(
   clusters: SourceInternalCluster[],
@@ -135,7 +143,6 @@ export function generateHeatmapFromState(
 
   // 2. Waiting queues at Blue Square Pickup Locations (HOTTEST SPOTS!)
   pickupStates.forEach((p) => {
-    // Include people waiting in queue + people currently sitting in a boarding vehicle at this pickup
     const boardingHere = vehicles
       .filter((v) => v.assignedPickupId === p.id && v.status === 'waiting_for_80_pct')
       .reduce((acc, v) => acc + v.currentOccupancy, 0);
@@ -145,7 +152,6 @@ export function generateHeatmapFromState(
     if (totalAtPickup > 0) {
       const coreIntensity = Math.min(1.0, 0.35 + totalAtPickup / 180);
 
-      // Primary hotspot core right on the Blue Square
       pts.push({
         lat: p.location[0],
         lng: p.location[1],
@@ -153,7 +159,6 @@ export function generateHeatmapFromState(
         behavior: 'pickup_hotspot',
       });
 
-      // Multi-point thermal aura around the Blue Square so the heatmap glows intensely hot around the pickup square
       const numAura = Math.min(10, Math.max(3, Math.ceil(totalAtPickup / 40)));
       const radius = 0.00045;
       for (let i = 0; i < numAura; i++) {
@@ -200,10 +205,7 @@ export function generateHeatmapFromState(
 }
 
 /**
- * Initialize full simulation state:
- * - PickupLocationStates for each route's Blue Square
- * - SourceInternalClusters distributed inside each Source Area polygon
- * - ActiveVehicleUnits dispatched from VehicleFleets
+ * Initialize full simulation state
  */
 export function initializeSimulationState(
   routes: ComputedRoute[],
@@ -227,7 +229,7 @@ export function initializeSimulationState(
   const clusters: SourceInternalCluster[] = [];
 
   sourceAreas.forEach((src) => {
-    const numClusters = 75; // 75 spatial clusters per source area
+    const numClusters = 75;
     const totalPop = src.population;
     const obCount = Math.round((numClusters * src.behavior.obedient) / 100);
     const auCount = Math.round((numClusters * src.behavior.autonomous) / 100);
@@ -290,7 +292,6 @@ export function initializeSimulationState(
     const approachDist = buildCumulativeDistances(approachCoords);
     const evacDist = buildCumulativeDistances(evacCoords);
 
-    // Create 4 staggered vehicle dispatch waves per corridor so vehicles arrive continuously
     const numWaves = 4;
     const totalFleetUnits = fleet ? Math.max(4, Math.ceil(fleet.count / 2)) : 12;
     const unitsPerWave = Math.max(2, Math.round(totalFleetUnits / numWaves));
@@ -313,14 +314,15 @@ export function initializeSimulationState(
         targetId: route.targetId,
         targetName: route.targetName,
         status: 'to_pickup',
+        waitingAtPickupSeconds: 0,
         currentPosition: approachCoords[0],
         progressMeters: 0,
-        speedMps: 18.0, // Urban emergency transit speed
+        speedMps: 18.0,
         approachCoords,
         approachCumulative: approachDist.cumulative,
         evacCoords,
         evacCumulative: evacDist.cumulative,
-        departureDelaySeconds: w * 22, // Staggered dispatch every 22 sim seconds
+        departureDelaySeconds: w * 22,
       });
     }
   });
@@ -359,7 +361,10 @@ export function initializeSimulationState(
  * 1. Obedient population moving immediately to closest pickup location
  * 2. Random population wandering inside Source Area until within 50m of a pickup location
  * 3. Autonomous population wandering along Source Area perimeter limits until stumbling on a pickup location
- * 4. Vehicles waiting at pickup locations until occupancy >= 80% before departing to Target Shelters
+ * 4. Vehicles waiting at pickup locations until EITHER:
+ *    - Occupancy reaches >= 80%, OR
+ *    - Waiting time reaches 10 minutes (600s)
+ *    Whichever happens first, departing to Target Area provided there is at least 1 passenger onboard!
  * 5. Dynamic heatmap updating (hotter around pickup locations as queues build, cooler over time as source empties)
  */
 export function stepSimulationState(
@@ -371,7 +376,6 @@ export function stepSimulationState(
 ): SimulationStateSnapshot {
   const newLogs: string[] = [];
 
-  // Deep clone pickup states so we can mutate waiting counts cleanly
   const pickupMap = new Map<string, PickupLocationState>();
   prevState.pickupStates.forEach((p) => {
     pickupMap.set(p.id, { ...p, boardingVehicleInfo: undefined });
@@ -380,8 +384,8 @@ export function stepSimulationState(
   const sourceMap = new Map<string, SourceArea>();
   sourceAreas.forEach((s) => sourceMap.set(s.id, s));
 
-  // Speed of pedestrians moving inside Source Area (in degrees/sec equivalent ~ 3.2 m/s scaled for visual clarity)
-  const walkSpeedMetersPerSec = 5.2;
+  // Speed of pedestrians moving inside Source Area (scaled so Obedient arrive quickly and Random/Autonomous trickle in over minutes)
+  const walkSpeedMetersPerSec = 3.2;
 
   // --- STEP 1: Move internal Source Area crowd clusters ---
   const updatedClusters = prevState.clusters.map((cluster) => {
@@ -396,7 +400,6 @@ export function stepSimulationState(
 
     if (pickupsInZone.length === 0) return cluster;
 
-    // Helper to find distance (in meters) to all pickup points in this source zone
     const pickupsWithDist = pickupsInZone
       .map((p) => {
         const distMeters =
@@ -443,7 +446,6 @@ export function stepSimulationState(
     // Wander around the source area until within 50m of ANY pickup point, then direct straight to it
     if (cluster.behavior === 'random') {
       if (closest.distMeters <= 50.0) {
-        // Within 50m! Lock onto this pickup location and walk directly to it
         const stepDist = walkSpeedMetersPerSec * 1.15 * deltaSimSeconds;
         const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
         const nextLat =
@@ -457,18 +459,15 @@ export function stepSimulationState(
           targetPickupId: closest.pickup.id,
         };
       } else {
-        // Wander inside the Source Area polygon
-        const stepDeg = (walkSpeedMetersPerSec * deltaSimSeconds) / 111000;
-        let heading = cluster.randomHeadingRad + (Math.sin(elapsedSimSeconds + cluster.headcount) * 0.35);
+        const stepDeg = (walkSpeedMetersPerSec * 0.65 * deltaSimSeconds) / 111000;
+        let heading = cluster.randomHeadingRad + Math.sin(elapsedSimSeconds * 0.4 + cluster.headcount) * 0.28;
         let candidateLat = cluster.position[0] + Math.sin(heading) * stepDeg;
         let candidateLng = cluster.position[1] + Math.cos(heading) * stepDeg;
 
-        // Keep inside Source Area polygon
         if (src && src.polygon.length >= 3) {
           try {
             const poly = toTurfPolygon(src.polygon);
             if (!turf.booleanPointInPolygon(turf.point([candidateLng, candidateLat]), poly)) {
-              // Bounce heading toward polygon centroid
               const centroid = getPolygonCentroid(src.polygon);
               heading = Math.atan2(
                 centroid[0] - cluster.position[0],
@@ -493,7 +492,6 @@ export function stepSimulationState(
     // --- BEHAVIOR 3: AUTONOMOUS ---
     // Wander around the LIMITS (perimeter boundary) of the source area until stumbling upon a pickup location
     if (cluster.behavior === 'autonomous') {
-      // Stumble threshold along perimeter: if within 55m of a pickup location, direct straight to it
       if (closest.distMeters <= 55.0) {
         const stepDist = walkSpeedMetersPerSec * 1.1 * deltaSimSeconds;
         const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
@@ -509,7 +507,6 @@ export function stepSimulationState(
         };
       }
 
-      // Otherwise circulate along the polygon perimeter edges
       if (src && src.polygon.length >= 3) {
         const poly = src.polygon;
         const pStart = poly[cluster.perimeterEdgeIndex % poly.length];
@@ -518,8 +515,8 @@ export function stepSimulationState(
         const edgeDistMeters =
           turf.distance([pStart[1], pStart[0]], [pEnd[1], pEnd[0]], { units: 'kilometers' }) *
           1000;
-        const stepMeters = walkSpeedMetersPerSec * 1.2 * deltaSimSeconds;
-        const progressDelta = edgeDistMeters > 0 ? stepMeters / edgeDistMeters : 0.2;
+        const stepMeters = walkSpeedMetersPerSec * 0.85 * deltaSimSeconds;
+        const progressDelta = edgeDistMeters > 0 ? stepMeters / edgeDistMeters : 0.15;
 
         let nextProgress = cluster.perimeterProgress + progressDelta;
         let nextEdgeIdx = cluster.perimeterEdgeIndex;
@@ -534,7 +531,6 @@ export function stepSimulationState(
         const perimLat = edgeA[0] + (edgeB[0] - edgeA[0]) * nextProgress;
         const perimLng = edgeA[1] + (edgeB[1] - edgeA[1]) * nextProgress;
 
-        // Smoothly pull cluster position onto the perimeter edge
         const nextLat = cluster.position[0] * 0.35 + perimLat * 0.65;
         const nextLng = cluster.position[1] * 0.35 + perimLng * 0.65;
 
@@ -563,7 +559,7 @@ export function stepSimulationState(
 
   const updatedTargetOccupancies = { ...prevState.targetOccupancies };
 
-  // --- STEP 2: Process Vehicle Dispatches, 80% Boarding Rule, and Shelter Offloads ---
+  // --- STEP 2: Process Vehicle Dispatches, Dual Departure Condition (80% Occupancy OR 10 Minutes Wait), and Shelter Offloads ---
   const updatedVehicles = prevState.vehicles.map((veh) => {
     if (veh.status === 'completed') return veh;
     if (elapsedSimSeconds < veh.departureDelaySeconds) return veh;
@@ -581,6 +577,7 @@ export function stepSimulationState(
         return {
           ...veh,
           status: 'waiting_for_80_pct' as const,
+          waitingAtPickupSeconds: 0,
           progressMeters: 0,
           currentPosition: pickup.location,
         };
@@ -598,8 +595,13 @@ export function stepSimulationState(
       };
     }
 
-    // STATE B: At Blue Square Pickup Location — Board waiting evacuees & WAIT UNTIL >= 80% OCCUPANCY
+    // STATE B: At Blue Square Pickup Location — Board waiting evacuees & WAIT UNTIL:
+    // (1) Occupancy >= 80%, OR (2) Waiting time >= 10 minutes (600 seconds)
+    // Whichever happens first, depart to Target Area IF there is at least 1 passenger!
     if (veh.status === 'waiting_for_80_pct') {
+      const nextWaitSeconds = veh.waitingAtPickupSeconds + deltaSimSeconds;
+
+      // Board any waiting evacuees from the pickup queue
       const spaceNeeded = veh.maxCapacity - veh.currentOccupancy;
       if (spaceNeeded > 0 && pickup.waitingPopulation > 0) {
         const boardedNow = Math.min(spaceNeeded, pickup.waitingPopulation);
@@ -608,41 +610,62 @@ export function stepSimulationState(
         pickup.totalBoardedCount += boardedNow;
       }
 
+      const hasAtLeastOnePassenger = veh.currentOccupancy >= 1;
       const occupancyRatio = veh.currentOccupancy / Math.max(1, veh.maxCapacity);
       const remainingUnboardedInSource = getUnboardedInSource(veh.sourceId);
 
-      // 80% Occupancy Departure Condition (or last remaining evacuees boarded)
-      const isAtLeast80PctFull = occupancyRatio >= 0.80;
+      // Dual Departure Conditions:
+      const reached80Percent = occupancyRatio >= 0.80;
+      const reached10Minutes = nextWaitSeconds >= 600.0; // 10 minutes = 600 simulation seconds
       const isLastCleanupSweep =
-        remainingUnboardedInSource === 0 && veh.currentOccupancy > 0;
+        remainingUnboardedInSource === 0 && hasAtLeastOnePassenger;
 
-      if (isAtLeast80PctFull || isLastCleanupSweep) {
+      // Depart if (80% occupancy OR 10 min wait OR cleanup sweep) AND at least 1 passenger is onboard
+      if (hasAtLeastOnePassenger && (reached80Percent || reached10Minutes || isLastCleanupSweep)) {
         const pctStr = Math.round(occupancyRatio * 100);
+        const waitFormatted = formatMMSS(nextWaitSeconds);
+
+        let triggerReason = '80% Occupancy Reached';
+        if (!reached80Percent && reached10Minutes) {
+          triggerReason = '10-Minute Wait Timeout Reached';
+        } else if (!reached80Percent && !reached10Minutes && isLastCleanupSweep) {
+          triggerReason = 'Final Evacuees Boarded';
+        }
+
         newLogs.push(
-          `${veh.fleetName} reached ${pctStr}% occupancy (${veh.currentOccupancy}/${veh.maxCapacity} seats) at ${pickup.label} -> Departing to ${veh.targetName}.`
+          `${veh.fleetName} departing ${pickup.label} -> ${veh.targetName} [${triggerReason}: ${veh.currentOccupancy}/${veh.maxCapacity} passengers (${pctStr}%), Wait Time: ${waitFormatted}].`
         );
 
         return {
           ...veh,
           status: 'to_target' as const,
+          waitingAtPickupSeconds: 0,
           progressMeters: 0,
           currentPosition: veh.evacCoords[0] || pickup.location,
         };
       } else {
-        // Still waiting at Blue Square for more evacuees to arrive and reach 80% occupancy
+        // Still waiting at Blue Square
         const pctStr = Math.round(occupancyRatio * 100);
-        pickup.boardingVehicleInfo = `${veh.fleetName}: ${veh.currentOccupancy}/${veh.maxCapacity} (${pctStr}% — Waiting for 80%)`;
+        const waitFormatted = formatMMSS(nextWaitSeconds);
+
+        if (nextWaitSeconds >= 600.0 && !hasAtLeastOnePassenger) {
+          pickup.boardingVehicleInfo = `${veh.fleetName}: 0/${veh.maxCapacity} (Wait ${waitFormatted}/10:00 — Awaiting >=1 passenger)`;
+        } else {
+          pickup.boardingVehicleInfo = `${veh.fleetName}: ${veh.currentOccupancy}/${veh.maxCapacity} (${pctStr}% | Wait ${waitFormatted}/10:00)`;
+        }
 
         // If 0 people left anywhere in source area and vehicle is empty, mark completed
         if (remainingUnboardedInSource === 0 && veh.currentOccupancy === 0) {
           return {
             ...veh,
+            waitingAtPickupSeconds: nextWaitSeconds,
             status: 'completed' as const,
           };
         }
 
         return {
           ...veh,
+          waitingAtPickupSeconds: nextWaitSeconds,
           currentPosition: pickup.location,
         };
       }
@@ -654,7 +677,6 @@ export function stepSimulationState(
       const nextProgress = veh.progressMeters + veh.speedMps * deltaSimSeconds;
 
       if (nextProgress >= totalEvacDist) {
-        // Arrived at Target Shelter! Offload passengers
         updatedTargetOccupancies[veh.targetId] =
           (updatedTargetOccupancies[veh.targetId] || 0) + veh.currentOccupancy;
 
@@ -665,14 +687,13 @@ export function stepSimulationState(
         const offloadedVeh = {
           ...veh,
           currentOccupancy: 0,
+          waitingAtPickupSeconds: 0,
           progressMeters: 0,
           currentPosition: veh.evacCoords[veh.evacCoords.length - 1],
         };
 
-        // Check if more evacuees remain in the Source Area for another round trip
         const remainingInSource = getUnboardedInSource(veh.sourceId);
         if (remainingInSource > 0) {
-          // Reverse evacCoords as return approach back to the Blue Square pickup point
           const returnCoords = [...veh.evacCoords].reverse();
           const returnDist = buildCumulativeDistances(returnCoords);
           return {
@@ -732,7 +753,6 @@ export function stepSimulationState(
   const totalWaitingAtPickups = totalWaitingInQueues + totalBoardingInVehicles;
   const totalRemainingAtSource = totalMovingInZone + totalWaitingAtPickups;
 
-  // Generate dynamic spatial HeatmapPoints
   const heatmapPoints = generateHeatmapFromState(
     updatedClusters,
     finalPickupStates,

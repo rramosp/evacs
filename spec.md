@@ -18,7 +18,7 @@ Build a responsive, high-usability web User Interface (UI) backed by OpenStreetM
   3. Trigger **Compute Evacuation Routes** to calculate optimal paths from sources to targets while avoiding No-Go zones, respecting shelter capacities, and establishing specific **Pickup Locations (marked with blue squares)** on each Source Area for every route.
   4. Trigger **Run Simulation** to animate:
      - Evacuees moving *within* each Source Area toward established Pickup Locations according to their behavioral profile (`obedient`, `autonomous`, `random`), causing the heatmap to become hotter around Pickup Locations as queues form.
-     - Vehicles arriving at Pickup Locations, boarding waiting evacuees until **80% vehicle occupancy** is reached, and transporting them to Target Shelters.
+     - Vehicles arriving at Pickup Locations, boarding waiting evacuees, and departing for Target Shelters when **either 80% occupancy is reached OR 10 minutes of waiting time have elapsed** (whichever happens first, provided there is **at least 1 passenger** onboard).
      - Progressive cooling of the Source Area heatmap over time as vehicles evacuate the population.
 
 ---
@@ -49,14 +49,19 @@ Restricted or hazardous areas impassable for evacuation routing.
 - **Geometry**: Polygon (`GeoJSON Polygon`) drawn on the map.
 - **Routing Effect**: Any road network edge or segment intersecting a No-Go polygon is marked impassable (infinite weight / removed from routing graph).
 
-### 3.4 Evacuation Vehicle Fleets & 80% Occupancy Boarding Rule
+### 3.4 Evacuation Vehicle Fleets & Dual Departure Condition (80% Occupancy or 10-Minute Timeout)
 Available public or private transport units managed by authorities, modeled as **Fleets / Staging Depots**:
 - **Name**: String identifier (e.g., `"STIB Bus Fleet Alpha"`).
 - **Vehicle Type**: Category (`Bus`, `Private Car`, `Shuttle`, etc.).
 - **Initial Location**: Point (`GeoJSON Point` — `[lat, lng]`) representing the depot or staging area at `t = 0`.
 - **Unit Count**: Number of vehicles in this fleet (`Integer`).
 - **Capacity per Unit**: Passenger occupancy per vehicle (e.g., `50` for buses, `4` for cars).
-- **80% Occupancy Departure Rule**: When vehicles arrive at a Source Area Pickup Location (Blue Square), they board waiting evacuees and **wait at the Pickup Location until their occupancy reaches at least 80% of capacity** (or until no further evacuees remain in the Source Area). Once $\ge 80\%$ occupied, they depart along the computed route to the Target Area shelter and offload passengers, cycling back for additional trips until the Source Area is fully evacuated.
+- **Dual Departure Rule (80% Occupancy OR 10 Minutes Waiting Time)**:
+  - When a vehicle arrives at a Source Area Pickup Location (Blue Square), a waiting timer (`waitingAtPickupSeconds`) starts at `00:00` and the vehicle boards any waiting evacuees.
+  - The vehicle waits at the Pickup Location until **whichever of the following two events happens first**:
+    1. **80% Occupancy Reached**: `currentOccupancy >= 0.80 * maxCapacity`.
+    2. **10 Minutes Waiting Time Elapsed**: `waitingAtPickupSeconds >= 600` (10 minutes of simulation time).
+  - Provided there is **at least 1 passenger** onboard (`currentOccupancy >= 1`), the vehicle immediately departs along the computed route to the Target Area shelter. (If 10 minutes have elapsed but `currentOccupancy == 0`, the vehicle remains at the pickup point until at least 1 passenger boards or until no evacuees remain in the Source Area).
 
 ---
 
@@ -100,24 +105,25 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
   - Source Areas: Color-coded polygons (Amber/Orange fill with border).
   - Target Areas: Color-coded polygons (Emerald Green fill with border).
   - No-Go Areas: Cross-hatched Crimson Red polygons.
-  - **Route Pickup Locations (Blue Squares)**: Marked with a distinct **blue square** (`#2563eb` with crisp white border) on each Source Area. Displays live waiting queue counts (`Waiting: N people`) and active vehicle boarding status (`Boarding: X/Y - Z%`) during simulation.
+  - **Route Pickup Locations (Blue Squares)**: Marked with a distinct **blue square** (`#2563eb` with crisp white border) on each Source Area. Displays live waiting queue counts (`Waiting: N people`) and active vehicle boarding status including both **occupancy %** and **waiting time (`MM:SS / 10:00`)**.
   - Computed Routes: Styled polylines connecting staging depots, Blue Square pickup points, and Target Shelters while avoiding No-Go zones.
   - **Dynamic Heatmap Overlay**:
     - Shows crowd movement inside Source Areas (`obedient` heading to closest pickup, `autonomous` along perimeter limits, `random` wandering until within 50m).
     - **Hotter around Pickup Locations**: As evacuees reach Pickup Locations and wait for vehicles, thermal density concentrates intensely around the Blue Squares.
-    - **Progressive Cooling of Source Areas**: As vehicles reach 80% occupancy and depart with evacuees, the remaining population inside the Source Area drops and the Source Area heatmap steadily cools down until empty.
-  - Vehicle Markers: Animated vehicle icons showing current passenger load and state (`To Pickup`, `Waiting/Boarding >=80%`, `En Route to Shelter`).
+    - **Progressive Cooling of Source Areas**: As vehicles depart (upon hitting 80% occupancy or 10 minutes wait with $\ge 1$ passenger), the remaining population inside the Source Area drops and the Source Area heatmap steadily cools down until empty.
+  - Vehicle Markers: Animated vehicle icons showing current passenger load, waiting timer, and state (`To Pickup`, `Waiting/Boarding [80% or 10m]`, `En Route to Shelter`).
 
 ### 4.3 Bottom Panel: System & Simulation Console (`50% Width × 25% Height`)
 - Timestamped log stream displaying:
   - Routing engine requests, established pickup location coordinates, and detour warnings around No-Go zones.
-  - Simulation events: Pickup queue growth, vehicle arrivals at Blue Squares, boarding progress up to 80% occupancy departure threshold, and shelter offload confirmations.
+  - Simulation events: Pickup queue growth, vehicle arrivals at Blue Squares, boarding progress, explicit trigger reason upon departure (`80% occupancy rule` vs. `10-min timeout rule`), and shelter offload confirmations.
 - Filterable by log level (`INFO`, `WARN`, `ROUTING`, `SIMULATION`).
 
 ### 4.4 Right Panel: Telemetry & KPI Dashboard (`25% Width × 100% Height`)
 - **Evacuation Progress Summary**:
-  - `Safe at Shelter` vs. `In Transit (On Vehicles)` vs. `Remaining in Source Area` (broken down by `Wandering in Zone` vs. `Waiting at Pickup Squares`).
+  - `Safe at Shelter` vs. `On Vehicles` vs. `In Source Area` (broken down by `Waiting at Pickup Squares` vs. `Moving Inside Source Zones`).
   - Overall progress bar and elapsed simulation clock (`MM:SS`).
+- **Blue Square Pickup Queues Card**: Live queue count, vehicle boarding occupancy, and 10-minute countdown/elapsed timer for each pickup location.
 - **Target Area Occupancy Cards**: Real-time fill bars (`Current / Capacity`) for each shelter.
 - **Population Behavior Breakdown**: Live status of Obedient, Autonomous, and Random populations.
 
@@ -133,15 +139,17 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 ### 5.2 Micro-Simulation & Thermal Heatmap Engine
 - **Internal Source Area Crowd Dynamics**:
   - Source Area populations are modeled as spatial micro-clusters distributed inside the polygon at `t = 0`:
-    1. **Obedient clusters**: Compute Euclidean/geodesic vector to the nearest Pickup Location in their Source Area and walk directly to it (`~1.5 m/s`).
+    1. **Obedient clusters**: Compute geodesic vector to the nearest Pickup Location in their Source Area and walk directly to it (`~1.5 m/s`).
     2. **Autonomous clusters**: Navigate to the nearest polygon boundary edge and traverse along the perimeter limits of the Source Area until they encounter a Pickup Location.
     3. **Random clusters**: Perform a bounded random walk inside the Source Area polygon. At each step, if their distance to any Pickup Location falls $\le 50\text{ meters}$, they transition to direct approach and walk straight to that Pickup Location.
   - Upon reaching a Pickup Location, clusters join that Blue Square's waiting queue (`waitingPopulation`).
-- **Vehicle Boarding & 80% Occupancy Departure**:
+- **Vehicle Boarding & Dual Departure Rule (80% Occupancy or 10 Minutes Wait)**:
   - Vehicles dispatch from depots to assigned Pickup Locations.
-  - At a Pickup Location, a vehicle boards waiting evacuees from the queue.
-  - The vehicle remains at the Pickup Location until `currentOccupancy >= 0.80 * capacity` (or until no further evacuees remain in the Source Area).
-  - Once $\ge 80\%$ full, the vehicle departs for the Target Area shelter, removing those evacuees from the Source Area.
+  - At a Pickup Location, a vehicle boards waiting evacuees from the queue and increments its `waitingAtPickupSeconds` counter.
+  - The vehicle departs for the Target Area shelter as soon as **either**:
+    - `currentOccupancy >= 0.80 * maxCapacity` (80% occupancy reached), **OR**
+    - `waitingAtPickupSeconds >= 600` (10 minutes waiting time elapsed),
+    **whichever happens first, provided `currentOccupancy >= 1`** (at least 1 passenger is onboard).
 - **Heatmap Thermal Dynamics**:
   - Heatmap intensity at any coordinate is proportional to local evacuee headcount.
   - As evacuees converge on Blue Squares and wait, thermal intensity peaks sharply at the Pickup Locations (`Hotter around pickup locations`).
@@ -154,7 +162,7 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 - **Frontend Framework**: React 18+ with TypeScript and Vite.
 - **UI Styling & Layout**: Vanilla CSS with custom tactical HSL design tokens + Lucide Icons.
 - **Map & Geospatial Engine**:
-  - **Leaflet** (`leaflet`) with custom HTML5 Canvas thermal heatmap overlay and custom divIcons for polygons, depot pins, moving vehicles, and **blue square pickup markers with live queue/boarding badges**.
+  - **Leaflet** (`leaflet`) with custom HTML5 Canvas thermal heatmap overlay and custom divIcons for polygons, depot pins, moving vehicles, and **blue square pickup markers with live queue/boarding/timer badges**.
   - **Turf.js** (`@turf/turf`) for polygon containment, perimeter traversal, 50m proximity detection, and No-Go detour waypoint generation.
 - **Routing Services**: OSRM HTTP API (`router.project-osrm.org`) paired with client-side Turf.js obstacle-avoidance waypoint routing.
 
@@ -201,3 +209,4 @@ This specification is maintained as a living document. Every functional addition
 | **v1.0** | 2026-09-17 | Initial restructured specification & full React/TypeScript/Leaflet implementation of the 4-panel cockpit UI, Brussels & Paris presets, OSRM + Turf.js obstacle-avoiding routing engine, and 60 FPS thermal heatmap simulation. |
 | **v1.1** | 2026-09-17 | Added requirement and implementation for **Route Pickup Locations**: once route computation completes, specific pickup/assembly points are established inside each Source Area for every route and marked with **blue squares** on the map (with interactive tooltips and legend entry). |
 | **v1.2** | 2026-09-17 | Refined **Population Behavior & Vehicle Boarding Mechanics**: (1) Evacuees remain inside their Source Area until picked up by a vehicle; (2) `Obedient` evacuees head immediately to the closest pickup location, `Random` evacuees wander inside the zone until within **50m** of a pickup location, and `Autonomous` evacuees circulate along the **limits (perimeter)** of the Source Area until encountering a pickup location; (3) Evacuees wait at pickup locations until vehicles arrive, making the heatmap **hotter around pickup locations**; (4) Vehicles wait at pickup locations until reaching **80% occupancy** before departing to Target Shelters, progressively **cooling down the Source Area heatmap** as people are evacuated. |
+| **v1.3** | 2026-09-17 | Updated **Vehicle Departure Condition**: Vehicles waiting at a Pickup Location now depart for the Target Area when **either** they reach **80% occupancy** **OR** they have been waiting **10 minutes** (`600` simulation seconds), **whichever happens first, provided there is at least 1 passenger onboard**. Added live waiting timer (`MM:SS / 10:00`) tracking to vehicle state, map tooltips, and telemetry cards. |

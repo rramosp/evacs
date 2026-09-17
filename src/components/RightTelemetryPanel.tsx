@@ -182,7 +182,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
               <div className="telemetry-card-header">
                 <div className="header-with-icon">
                   <MapPin size={14} style={{ color: '#3b82f6' }} />
-                  <span>BLUE SQUARE PICKUP QUEUES (80% RULE)</span>
+                  <span>BLUE SQUARE PICKUPS (80% OR 10M RULE)</span>
                 </div>
               </div>
 

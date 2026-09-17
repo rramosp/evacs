@@ -14,6 +14,7 @@ import {
   ActiveDrawMode,
 } from '../types/evacuation';
 import { getPolygonCentroid } from '../services/routingEngine';
+import { formatMMSS } from '../services/simulationEngine';
 import { Layers, Check, X, Compass, Eye, EyeOff } from 'lucide-react';
 
 interface EvacuationMapProps {
@@ -438,6 +439,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       const boardingPct = boardingVeh
         ? Math.round((boardingVeh.currentOccupancy / Math.max(1, boardingVeh.maxCapacity)) * 100)
         : 0;
+      const waitFormatted = boardingVeh ? formatMMSS(boardingVeh.waitingAtPickupSeconds) : "00:00";
 
       const squareHtml = `
         <div class="pickup-square-wrapper">
@@ -447,7 +449,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
                   <span>⏳ ${waitingCount} waiting</span>
                   ${
                     boardingVeh
-                      ? `<span class="boarding-sub-pill">🚌 ${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} (${boardingPct}%)</span>`
+                      ? `<span class="boarding-sub-pill">🚌 ${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} (${boardingPct}%) · ⏱️ ${waitFormatted}/10:00</span>`
                       : ''
                   }
                 </div>`
@@ -477,7 +479,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           Waiting in Queue: <b>${waitingCount.toLocaleString()} evacuees</b><br/>
           ${
             boardingVeh
-              ? `Active Vehicle Boarding: <b>${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} seats (${boardingPct}% — departs at 80%)</b><br/>`
+              ? `Active Vehicle Boarding: <b>${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} seats (${boardingPct}%)</b><br/>Wait Timer: <b>${waitFormatted} / 10:00 min</b> (departs at 80% or 10:00 with &ge;1 passenger)<br/>`
               : 'Vehicle Status: <b>En route to pickup</b><br/>'
           }
           Coordinates: <code>[${route.pickupLocation[0]}, ${route.pickupLocation[1]}]</code>
@@ -566,7 +568,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             <strong>${veh.fleetName}</strong> (${veh.unitCount}x ${veh.vehicleType})<br/>
             Status: <b>${
               veh.status === 'waiting_for_80_pct'
-                ? `Boarding at Pickup (${occPct}% — Waiting for 80%)`
+                ? `Boarding at Pickup (${occPct}% | Wait ${formatMMSS(veh.waitingAtPickupSeconds)}/10:00)`
                 : veh.status === 'to_target'
                 ? `Departed (>=80% Full) -> En Route to ${veh.targetName}`
                 : 'Approaching Blue Square Pickup Point'

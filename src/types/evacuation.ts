@@ -80,7 +80,7 @@ export interface PickupLocationState {
   location: [number, number];
   waitingPopulation: number;
   totalBoardedCount: number;
-  boardingVehicleInfo?: string; // e.g., "STIB Bus #1 (38/50 - 76%)"
+  boardingVehicleInfo?: string; // e.g., "STIB Bus #1 (64% | Wait 06:15/10:00)"
 }
 
 export interface SourceInternalCluster {
@@ -111,6 +111,7 @@ export interface ActiveVehicleUnit {
   targetId: string;
   targetName: string;
   status: 'to_pickup' | 'waiting_for_80_pct' | 'to_target' | 'completed';
+  waitingAtPickupSeconds: number; // Elapsed seconds waiting at pickup location (departs at 600s if >=1 passenger)
   currentPosition: [number, number];
   progressMeters: number;
   speedMps: number;
