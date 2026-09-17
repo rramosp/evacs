@@ -46,6 +46,8 @@ export interface ComputedRoute {
   targetId: string;
   targetName: string;
   behaviorType: PopulationBehaviorType | 'vehicle_dispatch';
+  pickupLocation: [number, number]; // Specific [lat, lng] pickup point on the Source Area
+  pickupLabel: string;              // Descriptive label for the pickup location
   coordinates: [number, number][]; // [lat, lng] path
   distanceMeters: number;
   estimatedDurationSeconds: number;

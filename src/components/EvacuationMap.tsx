@@ -58,6 +58,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   // Layer groups
   const polygonsLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const routesLayerGroupRef = useRef<L.LayerGroup | null>(null);
+  const pickupSquaresLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const vehiclesLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const drawPreviewLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -68,7 +69,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   const [showRoutes, setShowRoutes] = useState<boolean>(true);
   const [showZones, setShowZones] = useState<boolean>(true);
 
-  // Keep latest activeDrawMode in a ref for Leaflet click handler
   const activeDrawModeRef = useRef<ActiveDrawMode>(activeDrawMode);
   useEffect(() => {
     activeDrawModeRef.current = activeDrawMode;
@@ -101,10 +101,10 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     tileLayerRef.current = tileLayer;
     polygonsLayerGroupRef.current = L.layerGroup().addTo(map);
     routesLayerGroupRef.current = L.layerGroup().addTo(map);
+    pickupSquaresLayerGroupRef.current = L.layerGroup().addTo(map);
     vehiclesLayerGroupRef.current = L.layerGroup().addTo(map);
     drawPreviewLayerGroupRef.current = L.layerGroup().addTo(map);
 
-    // Map click listener for drawing polygons or placing vehicle depots
     map.on('click', (e: L.LeafletMouseEvent) => {
       const currentMode = activeDrawModeRef.current;
       if (!currentMode) return;
@@ -128,7 +128,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       }
     });
 
-    // Repaint heatmap canvas on map move or zoom
     const handleMapMove = () => {
       renderHeatmapCanvas();
     };
@@ -339,15 +338,18 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     showZones,
   ]);
 
-  // Render Computed Evacuation Routes
+  // Render Computed Evacuation Routes AND Blue Square Pickup Locations
   useEffect(() => {
-    const group = routesLayerGroupRef.current;
-    if (!group) return;
-    group.clearLayers();
+    const routesGroup = routesLayerGroupRef.current;
+    const pickupGroup = pickupSquaresLayerGroupRef.current;
+    if (!routesGroup || !pickupGroup) return;
+
+    routesGroup.clearLayers();
+    pickupGroup.clearLayers();
 
     if (!showRoutes || computedRoutes.length === 0) return;
 
-    computedRoutes.forEach((route) => {
+    computedRoutes.forEach((route, idx) => {
       let color = '#38bdf8'; // Obedient primary cyan-blue
       let weight = 4;
       let dashArray: string | undefined = undefined;
@@ -374,7 +376,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         color: '#090d16',
         weight: weight + 3,
         opacity: 0.65,
-      }).addTo(group);
+      }).addTo(routesGroup);
 
       const polyline = L.polyline(route.coordinates, {
         color,
@@ -396,7 +398,39 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         { sticky: true }
       );
 
-      polyline.addTo(group);
+      polyline.addTo(routesGroup);
+
+      // Establish Blue Square Marker at route.pickupLocation on the Source Area
+      if (route.pickupLocation) {
+        const squareHtml = `
+          <div class="map-pickup-square-marker" title="Route Pickup Location">
+            <span class="pickup-square-inner">${idx + 1}</span>
+          </div>
+        `;
+
+        const pickupMarker = L.marker(route.pickupLocation, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: squareHtml,
+            iconSize: [20, 20],
+            iconAnchor: [10, 10],
+          }),
+          zIndexOffset: 900,
+        });
+
+        pickupMarker.bindTooltip(
+          `<div class="route-tooltip">
+            <strong style="color:#60a5fa">🟦 ROUTE PICKUP LOCATION #${idx + 1}</strong><br/>
+            <b>${route.pickupLabel}</b><br/>
+            Destination: <b>${route.targetName}</b><br/>
+            Assigned Evacuees: <b>${route.assignedPopulation.toLocaleString()} people</b><br/>
+            Coordinates: <code>[${route.pickupLocation[0]}, ${route.pickupLocation[1]}]</code>
+          </div>`,
+          { direction: 'top', offset: [0, -8] }
+        );
+
+        pickupMarker.addTo(pickupGroup);
+      }
     });
   }, [computedRoutes, showRoutes]);
 
@@ -493,14 +527,12 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
     if (!showHeatmap || heatmapPoints.length === 0) return;
 
-    // Scale radius dynamically with zoom level so density looks realistic across zoom levels
     const currentZoom = map.getZoom();
     const baseRadius = Math.max(18, Math.min(58, Math.pow(1.32, currentZoom - 10) * 16));
 
     heatmapPoints.forEach((pt) => {
       const containerPt = map.latLngToContainerPoint([pt.lat, pt.lng]);
 
-      // Skip offscreen points
       if (
         containerPt.x < -baseRadius ||
         containerPt.y < -baseRadius ||
@@ -530,7 +562,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         grad.addColorStop(0.5, `rgba(52, 211, 153, ${alpha * 0.6})`);
         grad.addColorStop(1, 'rgba(52, 211, 153, 0)');
       } else {
-        // Thermal spectrum: Hot Red/Yellow core -> Emerald/Cyan outer aura
         grad.addColorStop(0, `rgba(239, 68, 68, ${alpha})`);
         grad.addColorStop(0.35, `rgba(245, 158, 11, ${alpha * 0.8})`);
         grad.addColorStop(0.7, `rgba(6, 182, 212, ${alpha * 0.45})`);
@@ -544,17 +575,14 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     });
   };
 
-  // Trigger heatmap repaint whenever heatmapPoints or showHeatmap changes
   useEffect(() => {
     renderHeatmapCanvas();
   }, [heatmapPoints, showHeatmap]);
 
   return (
     <div className="map-viewport-wrapper">
-      {/* Leaflet DOM Container */}
       <div ref={mapContainerRef} className="leaflet-map-container" />
 
-      {/* Synchronized HTML5 Heatmap Overlay Canvas */}
       <canvas
         ref={heatmapCanvasRef}
         className="heatmap-overlay-canvas"
@@ -587,10 +615,10 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           type="button"
           className={`map-tool-btn ${showRoutes ? 'active' : ''}`}
           onClick={() => setShowRoutes(!showRoutes)}
-          title="Toggle Computed Routes"
+          title="Toggle Computed Routes & Pickup Squares"
         >
           {showRoutes ? <Eye size={15} /> : <EyeOff size={15} />}
-          <span>Routes ({computedRoutes.length})</span>
+          <span>Routes & Pickups ({computedRoutes.length})</span>
         </button>
 
         <button
@@ -619,6 +647,10 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           <div className="legend-item">
             <span className="legend-swatch nogo-swatch" />
             <span>No-Go Hazard</span>
+          </div>
+          <div className="legend-item">
+            <span className="legend-swatch pickup-square-swatch" />
+            <span>Route Pickup Point</span>
           </div>
           <div className="legend-item">
             <span className="legend-line obedient-line" />

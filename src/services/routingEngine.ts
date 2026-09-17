@@ -19,6 +19,46 @@ export function getPolygonCentroid(polygonCoords: [number, number][]): [number, 
 }
 
 /**
+ * Compute a specific, distinct Pickup Location ([lat, lng]) inside/on the Source Area polygon
+ * for a given route slot index so each route has its own dedicated assembly square.
+ */
+export function computeSpecificPickupPoint(
+  source: SourceArea,
+  targetCenter: [number, number],
+  slotIndex: number
+): [number, number] {
+  const poly = source.polygon;
+  const centroid = getPolygonCentroid(poly);
+  if (!poly || poly.length < 3) return centroid;
+
+  // Generate candidate perimeter anchor points (vertices + edge midpoints)
+  const anchors: [number, number][] = [];
+  for (let i = 0; i < poly.length; i++) {
+    const p1 = poly[i];
+    const p2 = poly[(i + 1) % poly.length];
+    anchors.push(p1);
+    anchors.push([(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2]);
+  }
+
+  // Sort anchors by proximity to the target direction
+  const sortedByTarget = [...anchors].sort((a, b) => {
+    const dA = turf.distance([a[1], a[0]], [targetCenter[1], targetCenter[0]]);
+    const dB = turf.distance([b[1], b[0]], [targetCenter[1], targetCenter[0]]);
+    return dA - dB;
+  });
+
+  // Select a distinct anchor based on slotIndex (spreading across the perimeter)
+  const chosenAnchor = sortedByTarget[(slotIndex * 2) % sortedByTarget.length] || centroid;
+
+  // Interpolate 72% from centroid toward the chosen boundary anchor so it sits clearly inside/at the edge of the source polygon
+  const t = 0.72;
+  const lat = Number((centroid[0] + (chosenAnchor[0] - centroid[0]) * t).toFixed(5));
+  const lng = Number((centroid[1] + (chosenAnchor[1] - centroid[1]) * t).toFixed(5));
+
+  return [lat, lng];
+}
+
+/**
  * Convert our [lat, lng][] polygon to a closed GeoJSON Polygon (lng, lat order for Turf)
  */
 function toTurfPolygon(coords: [number, number][]) {
@@ -68,7 +108,6 @@ function computeDetourWaypoints(
   const latPad = (maxLat - minLat) * 0.45 + 0.0035;
   const lngPad = (maxLng - minLng) * 0.45 + 0.0045;
 
-  // Candidate bypass corners around the No-Go bounding box
   const candidates: [number, number][] = [
     [maxLat + latPad, (minLng + maxLng) / 2], // North bypass
     [minLat - latPad, (minLng + maxLng) / 2], // South bypass
@@ -78,12 +117,10 @@ function computeDetourWaypoints(
     [minLat - latPad, maxLng + lngPad * 0.6], // SE corner
   ];
 
-  // Score each candidate by total distance start -> candidate -> end
   const scored = candidates
     .map((pt) => {
       const d1 = turf.distance([start[1], start[0]], [pt[1], pt[0]]);
       const d2 = turf.distance([pt[1], pt[0]], [end[1], end[0]]);
-      // Check if direct segments still intersect the polygon
       const seg1Intersects = doesRouteIntersectNoGo([start, pt], noGo);
       const seg2Intersects = doesRouteIntersectNoGo([pt, end], noGo);
       const penalty = (seg1Intersects ? 25 : 0) + (seg2Intersects ? 25 : 0);
@@ -99,7 +136,6 @@ function computeDetourWaypoints(
 
 /**
  * Geometrically push any remaining route vertices outside all No-Go polygons
- * so that the final polyline strictly avoids restricted areas even if street geometry clips a corner.
  */
 function sanitizePolylineAgainstNoGo(
   coords: [number, number][],
@@ -107,7 +143,6 @@ function sanitizePolylineAgainstNoGo(
 ): [number, number][] {
   if (noGoAreas.length === 0 || coords.length < 2) return coords;
 
-  // Subdivide long segments first so we can smoothly bend around polygons
   const densified: [number, number][] = [];
   for (let i = 0; i < coords.length - 1; i++) {
     const p1 = coords[i];
@@ -147,7 +182,6 @@ function sanitizePolylineAgainstNoGo(
 
 /**
  * Query OSRM HTTP API for a driving/walking route through waypoints.
- * Falls back to realistic urban road-grid interpolation if OSRM is unreachable.
  */
 async function fetchOSRMRoute(
   waypoints: [number, number][]
@@ -168,6 +202,10 @@ async function fetchOSRMRoute(
         const coordinates: [number, number][] = route.geometry.coordinates.map(
           (c: [number, number]) => [c[1], c[0]]
         );
+        // Ensure exact start point matches our established pickup coordinate
+        if (coordinates.length > 0) {
+          coordinates[0] = waypoints[0];
+        }
         return {
           coordinates,
           distanceMeters: route.distance || calculatePathDistanceMeters(coordinates),
@@ -182,9 +220,6 @@ async function fetchOSRMRoute(
   return synthesizeUrbanRoadPath(waypoints);
 }
 
-/**
- * Deterministic fallback road-grid synthesizer when offline or OSRM rate-limited
- */
 function synthesizeUrbanRoadPath(waypoints: [number, number][]): {
   coordinates: [number, number][];
   distanceMeters: number;
@@ -200,7 +235,6 @@ function synthesizeUrbanRoadPath(waypoints: [number, number][]): {
     const dLat = end[0] - start[0];
     const dLng = end[1] - start[1];
 
-    // Add realistic Manhattan-like street turns + slight curvature
     for (let s = 1; s < segments; s++) {
       const t = s / segments;
       const curveOffset = Math.sin(t * Math.PI * 2) * 0.0008;
@@ -231,12 +265,13 @@ export function calculatePathDistanceMeters(coords: [number, number][]): number 
   return Math.round(totalKm * 1000);
 }
 
-/**
- * Perturb a route slightly to simulate random/non-compliant crowd paths
- */
-function createRandomPerturbedRoute(baseCoords: [number, number][], noGoAreas: NoGoArea[]): [number, number][] {
-  if (baseCoords.length <= 2) return baseCoords;
-  const perturbed: [number, number][] = [baseCoords[0]];
+function createRandomPerturbedRoute(
+  pickupPt: [number, number],
+  baseCoords: [number, number][],
+  noGoAreas: NoGoArea[]
+): [number, number][] {
+  if (baseCoords.length <= 2) return [pickupPt, ...baseCoords.slice(1)];
+  const perturbed: [number, number][] = [pickupPt];
   for (let i = 1; i < baseCoords.length - 1; i++) {
     const [lat, lng] = baseCoords[i];
     const jitterLat = Math.sin(i * 1.9) * 0.0018;
@@ -253,7 +288,8 @@ export interface RoutingComputationResult {
 }
 
 /**
- * Main entry point: Compute obstacle-avoiding evacuation routes for all Source Areas and Vehicle Fleets
+ * Main entry point: Compute obstacle-avoiding evacuation routes and establish specific
+ * Blue Square pickup locations on each Source Area.
  */
 export async function computeAllEvacuationRoutes(
   sourceAreas: SourceArea[],
@@ -277,17 +313,12 @@ export async function computeAllEvacuationRoutes(
 
   pushLog(
     'ROUTING',
-    `Initiating OSRM routing engine across ${sourceAreas.length} source zones, ${targetAreas.length} shelters, and ${noGoAreas.length} no-go areas.`
+    `Initiating OSRM routing & pickup point establishment across ${sourceAreas.length} source zones, ${targetAreas.length} shelters, and ${noGoAreas.length} no-go areas.`
   );
-
-  // Track remaining target capacities during allocation
-  const targetRemainingCap = new Map<string, number>();
-  targetAreas.forEach((t) => targetRemainingCap.set(t.id, t.capacity));
 
   for (const source of sourceAreas) {
     const srcCenter = getPolygonCentroid(source.polygon);
 
-    // Sort targets by straight-line distance from this source area
     const sortedTargets = [...targetAreas].sort((a, b) => {
       const cA = getPolygonCentroid(a.polygon);
       const cB = getPolygonCentroid(b.polygon);
@@ -307,8 +338,13 @@ export async function computeAllEvacuationRoutes(
     const tgtCenter = getPolygonCentroid(primaryTarget.polygon);
     const secTgtCenter = getPolygonCentroid(secondaryTarget.polygon);
 
-    // 1. Check initial OSRM route between source and primary target
-    let initialRoute = await fetchOSRMRoute([srcCenter, tgtCenter]);
+    // Establish specific Blue Square Pickup Locations for Obedient, Autonomous, and Random routes
+    const obedientPickup = computeSpecificPickupPoint(source, tgtCenter, 0);
+    const autonomousPickup = computeSpecificPickupPoint(source, secTgtCenter, 1);
+    const randomPickup = computeSpecificPickupPoint(source, tgtCenter, 2);
+
+    // 1. Check initial OSRM route between Obedient Pickup and Primary Target
+    let initialRoute = await fetchOSRMRoute([obedientPickup, tgtCenter]);
     const intersectedNoGos: NoGoArea[] = [];
 
     for (const nogo of noGoAreas) {
@@ -328,16 +364,16 @@ export async function computeAllEvacuationRoutes(
         `Direct OSRM route [${source.name} -> ${primaryTarget.name}] intersects No-Go zone(s): ${nogoNames}. Computing obstacle detour waypoints...`
       );
 
-      // Compute detour waypoints around each intersecting No-Go zone
-      let waypoints: [number, number][] = [srcCenter];
+      let waypoints: [number, number][] = [obedientPickup];
       for (const nogo of intersectedNoGos) {
-        const detours = computeDetourWaypoints(srcCenter, tgtCenter, nogo, 'primary');
+        const detours = computeDetourWaypoints(obedientPickup, tgtCenter, nogo, 'primary');
         waypoints.push(...detours);
       }
       waypoints.push(tgtCenter);
 
       const detouredRoute = await fetchOSRMRoute(waypoints);
       finalPrimaryCoords = sanitizePolylineAgainstNoGo(detouredRoute.coordinates, noGoAreas);
+      finalPrimaryCoords[0] = obedientPickup;
 
       const newDistKm = (calculatePathDistanceMeters(finalPrimaryCoords) / 1000).toFixed(2);
       pushLog(
@@ -346,6 +382,7 @@ export async function computeAllEvacuationRoutes(
       );
     } else {
       finalPrimaryCoords = sanitizePolylineAgainstNoGo(finalPrimaryCoords, noGoAreas);
+      finalPrimaryCoords[0] = obedientPickup;
       const distKm = (calculatePathDistanceMeters(finalPrimaryCoords) / 1000).toFixed(2);
       pushLog(
         'ROUTING',
@@ -353,14 +390,13 @@ export async function computeAllEvacuationRoutes(
       );
     }
 
-    // Calculate headcount split by behavior
     const obedientPop = Math.round((source.population * source.behavior.obedient) / 100);
     const autonomousPop = Math.round((source.population * source.behavior.autonomous) / 100);
     const randomPop = Math.max(0, source.population - obedientPop - autonomousPop);
 
     const primaryDist = calculatePathDistanceMeters(finalPrimaryCoords);
 
-    // Route A: OBEDIENT population route (Primary Optimal Route)
+    // Route A: OBEDIENT population route
     if (obedientPop > 0) {
       routes.push({
         id: `route-${source.id}-obedient`,
@@ -369,6 +405,8 @@ export async function computeAllEvacuationRoutes(
         targetId: primaryTarget.id,
         targetName: primaryTarget.name,
         behaviorType: 'obedient',
+        pickupLocation: obedientPickup,
+        pickupLabel: `${source.name} — Pickup Bay Alpha (Obedient)`,
         coordinates: finalPrimaryCoords,
         distanceMeters: primaryDist,
         estimatedDurationSeconds: Math.round(primaryDist / 1.45),
@@ -376,26 +414,31 @@ export async function computeAllEvacuationRoutes(
         avoidedNoGoNames: intersectedNoGos.map((n) => n.name),
         isDetour,
       });
+
+      pushLog(
+        'ROUTING',
+        `Established Pickup Location [Blue Square] at [${obedientPickup[0]}, ${obedientPickup[1]}] in ${source.name} for Obedient route (${obedientPop} evacuees).`
+      );
     }
 
-    // Route B: AUTONOMOUS population route (Secondary corridor or alternate detour to avoid congestion)
+    // Route B: AUTONOMOUS population route
     if (autonomousPop > 0) {
-      let autoWaypoints: [number, number][] = [srcCenter];
+      let autoWaypoints: [number, number][] = [autonomousPickup];
       if (intersectedNoGos.length > 0) {
         for (const nogo of intersectedNoGos) {
-          const altDetours = computeDetourWaypoints(srcCenter, secTgtCenter, nogo, 'alternate');
+          const altDetours = computeDetourWaypoints(autonomousPickup, secTgtCenter, nogo, 'alternate');
           autoWaypoints.push(...altDetours);
         }
       } else {
-        // Create slight parallel boulevard offset so autonomous agents take a secondary arterial road
-        const midLat = (srcCenter[0] + secTgtCenter[0]) / 2 + 0.0038;
-        const midLng = (srcCenter[1] + secTgtCenter[1]) / 2 - 0.0035;
+        const midLat = (autonomousPickup[0] + secTgtCenter[0]) / 2 + 0.0038;
+        const midLng = (autonomousPickup[1] + secTgtCenter[1]) / 2 - 0.0035;
         autoWaypoints.push([midLat, midLng]);
       }
       autoWaypoints.push(secTgtCenter);
 
       const autoRouteRaw = await fetchOSRMRoute(autoWaypoints);
       const autoCoords = sanitizePolylineAgainstNoGo(autoRouteRaw.coordinates, noGoAreas);
+      autoCoords[0] = autonomousPickup;
       const autoDist = calculatePathDistanceMeters(autoCoords);
 
       routes.push({
@@ -405,6 +448,8 @@ export async function computeAllEvacuationRoutes(
         targetId: secondaryTarget.id,
         targetName: secondaryTarget.name,
         behaviorType: 'autonomous',
+        pickupLocation: autonomousPickup,
+        pickupLabel: `${source.name} — Pickup Bay Bravo (Autonomous)`,
         coordinates: autoCoords,
         distanceMeters: autoDist,
         estimatedDurationSeconds: Math.round(autoDist / 1.35),
@@ -412,11 +457,16 @@ export async function computeAllEvacuationRoutes(
         avoidedNoGoNames: intersectedNoGos.map((n) => n.name),
         isDetour: true,
       });
+
+      pushLog(
+        'ROUTING',
+        `Established Pickup Location [Blue Square] at [${autonomousPickup[0]}, ${autonomousPickup[1]}] in ${source.name} for Autonomous route (${autonomousPop} evacuees).`
+      );
     }
 
-    // Route C: RANDOM population route (Perturbed / non-optimal exit path)
+    // Route C: RANDOM population route
     if (randomPop > 0) {
-      const randomCoords = createRandomPerturbedRoute(finalPrimaryCoords, noGoAreas);
+      const randomCoords = createRandomPerturbedRoute(randomPickup, finalPrimaryCoords, noGoAreas);
       const randomDist = calculatePathDistanceMeters(randomCoords);
       routes.push({
         id: `route-${source.id}-random`,
@@ -425,6 +475,8 @@ export async function computeAllEvacuationRoutes(
         targetId: primaryTarget.id,
         targetName: primaryTarget.name,
         behaviorType: 'random',
+        pickupLocation: randomPickup,
+        pickupLabel: `${source.name} — Pickup Bay Charlie (Random Exit)`,
         coordinates: randomCoords,
         distanceMeters: randomDist,
         estimatedDurationSeconds: Math.round(randomDist / 1.15),
@@ -432,10 +484,15 @@ export async function computeAllEvacuationRoutes(
         avoidedNoGoNames: intersectedNoGos.map((n) => n.name),
         isDetour,
       });
+
+      pushLog(
+        'ROUTING',
+        `Established Pickup Location [Blue Square] at [${randomPickup[0]}, ${randomPickup[1]}] in ${source.name} for Random exit path (${randomPop} evacuees).`
+      );
     }
   }
 
-  // 2. Compute Vehicle Fleet Dispatch & Transport Routes
+  // 2. Compute Vehicle Fleet Dispatch & Transport Routes with dedicated Fleet Pickup Point on Source Area
   for (let i = 0; i < vehicleFleets.length; i++) {
     const fleet = vehicleFleets[i];
     const assignedSource = sourceAreas[i % sourceAreas.length];
@@ -443,18 +500,19 @@ export async function computeAllEvacuationRoutes(
 
     if (!assignedSource || !assignedTarget) continue;
 
-    const srcCenter = getPolygonCentroid(assignedSource.polygon);
     const tgtCenter = getPolygonCentroid(assignedTarget.polygon);
+    // Establish a dedicated fleet pickup location (slot 3 + i) on the Source Area polygon
+    const fleetPickup = computeSpecificPickupPoint(assignedSource, tgtCenter, 3 + i);
 
-    // Depot -> Source -> Target
-    const leg1Raw = await fetchOSRMRoute([fleet.location, srcCenter]);
+    // Leg 1: Depot -> Fleet Pickup Square on Source Area
+    const leg1Raw = await fetchOSRMRoute([fleet.location, fleetPickup]);
     const leg1Coords = sanitizePolylineAgainstNoGo(leg1Raw.coordinates, noGoAreas);
 
-    // Check if Source -> Target needs detour around No-Go
-    let leg2Waypoints: [number, number][] = [srcCenter];
+    // Leg 2: Fleet Pickup Square -> Target Shelter
+    let leg2Waypoints: [number, number][] = [fleetPickup];
     for (const nogo of noGoAreas) {
-      if (doesRouteIntersectNoGo([srcCenter, tgtCenter], nogo)) {
-        leg2Waypoints.push(...computeDetourWaypoints(srcCenter, tgtCenter, nogo, 'primary'));
+      if (doesRouteIntersectNoGo([fleetPickup, tgtCenter], nogo)) {
+        leg2Waypoints.push(...computeDetourWaypoints(fleetPickup, tgtCenter, nogo, 'primary'));
       }
     }
     leg2Waypoints.push(tgtCenter);
@@ -473,9 +531,11 @@ export async function computeAllEvacuationRoutes(
       targetId: assignedTarget.id,
       targetName: assignedTarget.name,
       behaviorType: 'vehicle_dispatch',
+      pickupLocation: fleetPickup,
+      pickupLabel: `${assignedSource.name} — ${fleet.name} Boarding Point`,
       coordinates: combinedCoords,
       distanceMeters: totalDist,
-      estimatedDurationSeconds: Math.round(totalDist / 8.5), // ~30 km/h urban emergency vehicle speed
+      estimatedDurationSeconds: Math.round(totalDist / 8.5),
       assignedPopulation: transportedPop,
       avoidedNoGoNames: [],
       isDetour: false,
@@ -485,13 +545,13 @@ export async function computeAllEvacuationRoutes(
 
     pushLog(
       'INFO',
-      `Assigned ${fleet.count}x ${fleet.type}s (${fleet.name}, total cap: ${fleetCapacity.toLocaleString()}) -> pickup at ${assignedSource.name} -> shelter ${assignedTarget.name}.`
+      `Established Transit Pickup Location [Blue Square] at [${fleetPickup[0]}, ${fleetPickup[1]}] in ${assignedSource.name} for ${fleet.name} (${fleet.count}x ${fleet.type}s).`
     );
   }
 
   pushLog(
     'ROUTING',
-    `Route computation complete: ${routes.length} active corridors generated across road network.`
+    `Route computation complete: ${routes.length} active corridors and ${routes.length} Blue Square pickup locations established.`
   );
 
   return { routes, logs };

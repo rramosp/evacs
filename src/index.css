@@ -1472,3 +1472,41 @@ body,
   color: var(--text-muted);
   margin-top: 2px;
 }
+
+/* ==========================================================================
+   ROUTE PICKUP LOCATION BLUE SQUARE MARKER & LEGEND SWATCH
+   ========================================================================== */
+.map-pickup-square-marker {
+  width: 20px;
+  height: 20px;
+  background-color: #2563eb;
+  border: 2px solid #ffffff;
+  border-radius: 2px;
+  box-shadow: 0 0 10px rgba(37, 99, 235, 0.9), 0 2px 6px rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.map-pickup-square-marker:hover {
+  transform: scale(1.22);
+  background-color: #3b82f6;
+  box-shadow: 0 0 14px rgba(59, 130, 246, 1);
+}
+
+.pickup-square-inner {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1;
+}
+
+.pickup-square-swatch {
+  background-color: #2563eb;
+  border: 1.5px solid #ffffff;
+  border-radius: 2px;
+  box-shadow: 0 0 4px rgba(37, 99, 235, 0.8);
+}
