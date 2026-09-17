@@ -4,6 +4,8 @@ An interactive emergency management User Interface (UI) built on OpenStreetMap (
 
 For full functional and technical specifications, see **[spec.md](./spec.md)**.
 
+![EVAC-OPS UI](imgs/ui.png)
+
 ---
 
 ## Quick Start
