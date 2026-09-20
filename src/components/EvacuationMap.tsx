@@ -14,6 +14,7 @@ import {
   ActiveDrawMode,
   Sentinel2LayerState,
   Sentinel1LayerState,
+  GlofasForecastState,
 } from '../types/evacuation';
 import { getPolygonCentroid } from '../services/routingEngine';
 import { formatMMSS } from '../services/simulationEngine';
@@ -66,6 +67,7 @@ interface EvacuationMapProps {
   onSelectEntity: (id: string | null) => void;
   sentinel2Layer?: Sentinel2LayerState;
   sentinel1Layer?: Sentinel1LayerState;
+  glofasForecast?: GlofasForecastState;
   onMapViewportChange?: (center: [number, number]) => void;
 }
 
@@ -90,6 +92,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   onSelectEntity,
   sentinel2Layer,
   sentinel1Layer,
+  glofasForecast,
   onMapViewportChange,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -97,6 +100,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const sentinel2TileLayerRef = useRef<L.TileLayer | null>(null);
   const sentinel1TileLayerRef = useRef<L.TileLayer | null>(null);
+  const glofasLayerGroupRef = useRef<L.LayerGroup | null>(null);
 
   // Layer groups
   const polygonsLayerGroupRef = useRef<L.LayerGroup | null>(null);
@@ -148,6 +152,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     }).addTo(map);
 
     tileLayerRef.current = tileLayer;
+    glofasLayerGroupRef.current = L.layerGroup().addTo(map);
     polygonsLayerGroupRef.current = L.layerGroup().addTo(map);
     routesLayerGroupRef.current = L.layerGroup().addTo(map);
     pickupSquaresLayerGroupRef.current = L.layerGroup().addTo(map);
@@ -250,6 +255,24 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       sentinel1TileLayerRef.current = null;
     }
   }, [sentinel1Layer?.active, sentinel1Layer?.visible, sentinel1Layer?.tileUrl, sentinel1Layer?.opacity]);
+
+  // Synchronize CEMS Early Warning River Discharge Prediction Overlays (24h, 48h, 72h bands)
+  useEffect(() => {
+    const layerGroup = glofasLayerGroupRef.current;
+    if (!layerGroup) return;
+
+    layerGroup.clearLayers();
+    if (!glofasForecast?.active || !glofasForecast.overlays?.length) return;
+
+    for (const ov of glofasForecast.overlays) {
+      if (!ov.visible || !ov.dataUrl || !ov.bounds) continue;
+      L.imageOverlay(ov.dataUrl, ov.bounds, {
+        opacity: ov.opacity,
+        zIndex: 10 + ov.band,
+        attribution: `CEMS GloFAS River Discharge Forecast (${ov.label}, clipped at 80 m³/s)`,
+      }).addTo(layerGroup);
+    }
+  }, [glofasForecast]);
 
   // Fly to new center/zoom when preset changes
   const prevCenterRef = useRef<[number, number]>(center);
@@ -878,6 +901,96 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           </div>
         </div>
       </div>
+
+      {/* CEMS GloFAS River Discharge Forecast Color Map Legend (White 0 -> Red 80, clipped at 80) */}
+      {glofasForecast?.active && (
+        <div
+          id="glofas-map-colorbar-legend"
+          style={{
+            position: 'absolute',
+            bottom: '16px',
+            left: '215px',
+            zIndex: 1000,
+            background: 'rgba(15, 23, 42, 0.92)',
+            border: '1px solid rgba(248, 113, 113, 0.45)',
+            borderRadius: '8px',
+            padding: '8px 12px',
+            color: '#f8fafc',
+            fontSize: '0.72rem',
+            minWidth: '215px',
+            boxShadow: '0 6px 20px rgba(0, 0, 0, 0.45)',
+            backdropFilter: 'blur(6px)',
+          }}
+        >
+          <div
+            style={{
+              fontWeight: 700,
+              color: '#fca5a5',
+              marginBottom: '5px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <span>CEMS River Discharge (m&sup3;/s)</span>
+            <span style={{ fontSize: '0.64rem', color: '#94a3b8' }}>Clipped &le; 80</span>
+          </div>
+          <div
+            style={{
+              height: '12px',
+              width: '100%',
+              borderRadius: '4px',
+              background:
+                'linear-gradient(to right, #ffffff 0%, #fecaca 25%, #f87171 50%, #ef4444 75%, #ff0000 100%)',
+              border: '1px solid rgba(255, 255, 255, 0.35)',
+            }}
+          />
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              marginTop: '4px',
+              fontSize: '0.65rem',
+              color: '#e2e8f0',
+              fontFamily: 'monospace',
+            }}
+          >
+            <span>0</span>
+            <span>20</span>
+            <span>40</span>
+            <span>60</span>
+            <span>&ge;80</span>
+          </div>
+          <div
+            style={{
+              marginTop: '5px',
+              fontSize: '0.64rem',
+              color: '#cbd5e1',
+              display: 'flex',
+              gap: '6px',
+              flexWrap: 'wrap',
+            }}
+          >
+            {glofasForecast.overlays.map((ov) => (
+              <span
+                key={ov.band}
+                style={{
+                  padding: '1px 5px',
+                  borderRadius: '3px',
+                  background: ov.visible ? 'rgba(239, 68, 68, 0.28)' : 'rgba(51, 65, 85, 0.5)',
+                  border: ov.visible
+                    ? '1px solid rgba(248, 113, 113, 0.6)'
+                    : '1px solid rgba(100, 116, 139, 0.3)',
+                  color: ov.visible ? '#fecaca' : '#64748b',
+                }}
+              >
+                {ov.label}: {ov.visible ? 'ON' : 'OFF'}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Floating Drawing Mode Banner */}
       {activeDrawMode && (

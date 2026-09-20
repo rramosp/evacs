@@ -10,6 +10,7 @@ import {
   Sentinel2LayerState,
   Sentinel1LayerState,
   Sentinel2AggregationPeriod,
+  GlofasForecastState,
 } from '../types/evacuation';
 import {
   Route,
@@ -82,6 +83,11 @@ interface LeftControlPanelProps {
   onFetchSentinel1Data: () => void;
   onToggleSentinel1Visibility: () => void;
   onChangeSentinel1Opacity: (opacity: number) => void;
+  glofasForecast: GlofasForecastState;
+  isLoadingGlofas: boolean;
+  onFetchGlofasForecast: () => void;
+  onToggleGlofasOverlayVisibility: (band: number) => void;
+  onChangeGlofasOverlayOpacity: (band: number, opacity: number) => void;
 }
 
 export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
@@ -132,6 +138,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onFetchSentinel1Data,
   onToggleSentinel1Visibility,
   onChangeSentinel1Opacity,
+  glofasForecast,
+  isLoadingGlofas,
+  onFetchGlofasForecast,
+  onToggleGlofasOverlayVisibility,
+  onChangeGlofasOverlayOpacity,
 }) => {
   const [activeTab, setActiveTab] = useState<'sources' | 'targets' | 'nogos' | 'vehicles'>('sources');
 
@@ -1535,6 +1546,209 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             </div>
           </div>
         )}
+
+        {/* CEMS Early Warning River Discharge Prediction Section under Space Data */}
+        <div
+          id="cems-glofas-section"
+          style={{
+            marginTop: '12px',
+            paddingTop: '10px',
+            borderTop: '1px solid rgba(148, 163, 184, 0.25)',
+          }}
+        >
+          <div
+            style={{
+              fontSize: '0.75rem',
+              fontWeight: 700,
+              color: '#fca5a5',
+              marginBottom: '6px',
+              letterSpacing: '0.02em',
+            }}
+          >
+            CEMS Early Warning River Discharge Prediction
+          </div>
+
+          <button
+            id="btn-cems-glofas-forecast"
+            type="button"
+            className="btn-primary-action"
+            style={{
+              padding: '6px 10px',
+              fontSize: '0.75rem',
+              minHeight: '30px',
+              background: glofasForecast.active
+                ? 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)'
+                : 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+              border: glofasForecast.active
+                ? '1px solid #f87171'
+                : '1px solid rgba(248, 113, 113, 0.4)',
+              color: '#f8fafc',
+            }}
+            onClick={onFetchGlofasForecast}
+            disabled={isLoadingGlofas}
+          >
+            <Satellite size={14} style={{ color: '#f87171' }} />
+            <span>
+              {isLoadingGlofas
+                ? 'Downloading CEMS GloFAS Forecast...'
+                : 'Load 24h / 48h / 72h River Discharge (100 km)'}
+            </span>
+          </button>
+
+          {glofasForecast.active && (
+            <div
+              style={{
+                marginTop: '8px',
+                padding: '8px 9px',
+                borderRadius: '6px',
+                background: 'rgba(15, 23, 42, 0.78)',
+                border: '1px solid rgba(248, 113, 113, 0.35)',
+                fontSize: '0.7rem',
+                color: '#cbd5e1',
+              }}
+            >
+              <div style={{ marginBottom: '6px', fontSize: '0.67rem', color: '#e2e8f0' }}>
+                <div>
+                  <strong>Date:</strong> {glofasForecast.date} &bull;{' '}
+                  <strong>Radius:</strong> {glofasForecast.radiusKm} km
+                </div>
+                <div>
+                  <strong>Storage:</strong>{' '}
+                  <code style={{ fontSize: '0.63rem', color: '#fca5a5' }}>
+                    {glofasForecast.geotiffPath || 'tmp_downloads/'}
+                  </code>{' '}
+                  ({glofasForecast.cached ? 'Cached today' : 'Downloaded today'})
+                </div>
+              </div>
+
+              {/* Red Scale Color Map Legend: White (0) -> Red (80), Clipped at 80 */}
+              <div
+                style={{
+                  marginBottom: '8px',
+                  padding: '6px 8px',
+                  borderRadius: '5px',
+                  background: 'rgba(30, 41, 59, 0.75)',
+                  border: '1px solid rgba(248, 113, 113, 0.25)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    fontSize: '0.65rem',
+                    fontWeight: 600,
+                    color: '#fecaca',
+                    marginBottom: '4px',
+                  }}
+                >
+                  <span>Color Map: White (0) &rarr; Red (80)</span>
+                  <span>Clipped &le; 80 m&sup3;/s</span>
+                </div>
+                <div
+                  style={{
+                    height: '10px',
+                    width: '100%',
+                    borderRadius: '3px',
+                    background:
+                      'linear-gradient(to right, #ffffff 0%, #fecaca 25%, #f87171 50%, #ef4444 75%, #ff0000 100%)',
+                    border: '1px solid rgba(255,255,255,0.35)',
+                  }}
+                />
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    marginTop: '3px',
+                    fontSize: '0.62rem',
+                    fontFamily: 'monospace',
+                    color: '#cbd5e1',
+                  }}
+                >
+                  <span>0</span>
+                  <span>20</span>
+                  <span>40</span>
+                  <span>60</span>
+                  <span>80</span>
+                </div>
+              </div>
+
+              {/* Three Overlays: 24h, 48h, 72h Forecast */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {glofasForecast.overlays.map((ov) => (
+                  <div
+                    key={ov.band}
+                    style={{
+                      padding: '5px 7px',
+                      borderRadius: '5px',
+                      background: 'rgba(15, 23, 42, 0.85)',
+                      border: ov.visible
+                        ? '1px solid rgba(248, 113, 113, 0.45)'
+                        : '1px solid rgba(100, 116, 139, 0.3)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '3px',
+                      }}
+                    >
+                      <span style={{ fontWeight: 600, color: '#fca5a5', fontSize: '0.68rem' }}>
+                        Band {ov.band}: {ov.label}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onToggleGlofasOverlayVisibility(ov.band)}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          padding: '2px 6px',
+                          borderRadius: '4px',
+                          border: '1px solid rgba(148, 163, 184, 0.3)',
+                          background: ov.visible
+                            ? 'rgba(239, 68, 68, 0.25)'
+                            : 'rgba(51, 65, 85, 0.5)',
+                          color: ov.visible ? '#fecaca' : '#94a3b8',
+                          fontSize: '0.64rem',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {ov.visible ? <Eye size={11} /> : <EyeOff size={11} />}
+                        <span>{ov.visible ? 'Visible' : 'Hidden'}</span>
+                      </button>
+                    </div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        fontSize: '0.63rem',
+                      }}
+                    >
+                      <span>Opacity:</span>
+                      <input
+                        type="range"
+                        min={0.15}
+                        max={1}
+                        step={0.05}
+                        value={ov.opacity}
+                        onChange={(e) =>
+                          onChangeGlofasOverlayOpacity(ov.band, Number(e.target.value))
+                        }
+                        style={{ flex: 1, accentColor: '#ef4444', cursor: 'pointer' }}
+                      />
+                      <span style={{ minWidth: '28px', textAlign: 'right' }}>
+                        {Math.round(ov.opacity * 100)}%
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </section>
     </aside>
   );

@@ -195,3 +195,28 @@ export interface Sentinel1LayerState {
   dateRange: [string, string];
   opacity: number;
 }
+
+export interface GlofasForecastOverlay {
+  band: number;
+  leadtimeHours: number;
+  label: string;
+  description: string;
+  rawMin: number;
+  rawMax: number;
+  clippedMax: number;
+  dataUrl: string;
+  bounds: [[number, number], [number, number]];
+  visible: boolean;
+  opacity: number;
+}
+
+export interface GlofasForecastState {
+  active: boolean;
+  cached: boolean;
+  date: string;
+  center: [number, number] | null;
+  radiusKm: number;
+  geotiffPath: string | null;
+  clipMax: number;
+  overlays: GlofasForecastOverlay[];
+}

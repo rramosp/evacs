@@ -15,6 +15,8 @@ import {
   Sentinel2LayerState,
   Sentinel1LayerState,
   Sentinel2AggregationPeriod,
+  GlofasForecastState,
+  GlofasForecastOverlay,
 } from './types/evacuation';
 import { PRESET_SCENARIOS } from './data/presets';
 import {
@@ -978,6 +980,131 @@ export function App() {
     }
   };
 
+  const [glofasForecast, setGlofasForecast] = useState<GlofasForecastState>({
+    active: false,
+    cached: false,
+    date: initialCurrentDate,
+    center: null,
+    radiusKm: 100,
+    geotiffPath: null,
+    clipMax: 80,
+    overlays: [],
+  });
+  const [isLoadingGlofas, setIsLoadingGlofas] = useState<boolean>(false);
+
+  // On application startup, delete every file from previous days in tmp_downloads
+  useEffect(() => {
+    fetch('/api/cems-glofas/cleanup')
+      .then((r) => r.json())
+      .then((res) => {
+        if (res?.deletedFiles?.length > 0) {
+          appendLog(
+            'INFO',
+            `CEMS GloFAS Startup Cleanup: Deleted ${res.deletedFiles.length} file(s) from previous days in tmp_downloads (${res.deletedFiles.join(', ')}).`,
+            0
+          );
+        }
+      })
+      .catch(() => {
+        // Non-fatal if running static build without dev server middleware
+      });
+  }, []);
+
+  const handleFetchGlofasForecast = async () => {
+    const poi = liveViewportPoiRef.current || mapCenter;
+    const targetDate = sentinel2Layer.currentDate;
+
+    setIsLoadingGlofas(true);
+    appendLog(
+      'INFO',
+      `CEMS Early Warning River Discharge Prediction: Requesting 24h, 48h, and 72h forecasts for date ${targetDate} (100 km radius around [${poi[0].toFixed(4)}, ${poi[1].toFixed(4)}]) via scripts/download_glofas.py...`,
+      elapsedSimSeconds
+    );
+
+    try {
+      const response = await fetch('/api/cems-glofas/forecast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lat: poi[0],
+          lng: poi[1],
+          date: targetDate,
+          radius: 100000,
+        }),
+      });
+      const data = await response.json();
+
+      if (data.ok && Array.isArray(data.overlays)) {
+        const mappedOverlays: GlofasForecastOverlay[] = data.overlays.map(
+          (ov: Omit<GlofasForecastOverlay, 'visible' | 'opacity'>) => ({
+            ...ov,
+            visible: true,
+            opacity: 0.85,
+          })
+        );
+
+        setGlofasForecast({
+          active: true,
+          cached: Boolean(data.cached),
+          date: data.date || targetDate,
+          center: data.center || poi,
+          radiusKm: data.radiusKm || 100,
+          geotiffPath: data.geotiffPath || 'tmp_downloads/',
+          clipMax: data.clipMax ?? 80,
+          overlays: mappedOverlays,
+        });
+
+        if (data.deletedFiles?.length > 0) {
+          appendLog(
+            'INFO',
+            `CEMS GloFAS Cleanup: Deleted ${data.deletedFiles.length} file(s) from previous days in tmp_downloads.`,
+            elapsedSimSeconds
+          );
+        }
+
+        appendLog(
+          'INFO',
+          `CEMS Early Warning River Discharge Prediction: ${
+            data.cached
+              ? `Reused existing GeoTIFF for today (${data.geotiffPath}) to spare download time.`
+              : `Downloaded GRIB2 & converted to 3-band GeoTIFF (${data.geotiffPath}).`
+          } Added 3 map overlays (24h, 48h, 72h forecasts, values > 80 clipped to 80, White [0] -> Red [80] color map).`,
+          elapsedSimSeconds
+        );
+      } else {
+        appendLog(
+          'WARN',
+          `CEMS GloFAS forecast download failed: ${data.error || 'Unknown error'}`,
+          elapsedSimSeconds
+        );
+      }
+    } catch (err) {
+      appendLog(
+        'WARN',
+        `Failed to execute CEMS GloFAS forecast endpoint: ${String(err)}`,
+        elapsedSimSeconds
+      );
+    } finally {
+      setIsLoadingGlofas(false);
+    }
+  };
+
+  const handleToggleGlofasOverlayVisibility = (band: number) => {
+    setGlofasForecast((prev) => ({
+      ...prev,
+      overlays: prev.overlays.map((ov) =>
+        ov.band === band ? { ...ov, visible: !ov.visible } : ov
+      ),
+    }));
+  };
+
+  const handleChangeGlofasOverlayOpacity = (band: number, opacity: number) => {
+    setGlofasForecast((prev) => ({
+      ...prev,
+      overlays: prev.overlays.map((ov) => (ov.band === band ? { ...ov, opacity } : ov)),
+    }));
+  };
+
   const handleToggleSentinel2Visibility = () => {
     setSentinel2Layer((prev) => ({ ...prev, visible: !prev.visible }));
   };
@@ -1045,6 +1172,11 @@ export function App() {
         onFetchSentinel1Data={handleFetchSentinel1Data}
         onToggleSentinel1Visibility={handleToggleSentinel1Visibility}
         onChangeSentinel1Opacity={handleChangeSentinel1Opacity}
+        glofasForecast={glofasForecast}
+        isLoadingGlofas={isLoadingGlofas}
+        onFetchGlofasForecast={handleFetchGlofasForecast}
+        onToggleGlofasOverlayVisibility={handleToggleGlofasOverlayVisibility}
+        onChangeGlofasOverlayOpacity={handleChangeGlofasOverlayOpacity}
       />
 
       {/* 2. CENTER AREA COLUMN (50% Width) -> TOP 75% MAP + BOTTOM 25% LOGS */}
@@ -1071,6 +1203,7 @@ export function App() {
             onSelectEntity={setSelectedEntityId}
             sentinel2Layer={sentinel2Layer}
             sentinel1Layer={sentinel1Layer}
+            glofasForecast={glofasForecast}
             onMapViewportChange={(c) => {
               liveViewportPoiRef.current = c;
             }}
