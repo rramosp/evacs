@@ -17,6 +17,32 @@ import { getPolygonCentroid } from '../services/routingEngine';
 import { formatMMSS } from '../services/simulationEngine';
 import { Layers, Check, X, Compass, Eye, EyeOff } from 'lucide-react';
 
+type OsmLayerStyle = 'standard' | 'hot' | 'cyclosm';
+
+const OSM_TILE_PROVIDERS: Record<
+  OsmLayerStyle,
+  { label: string; url: string; attribution: string }
+> = {
+  standard: {
+    label: 'Standard OSM',
+    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  },
+  hot: {
+    label: 'Humanitarian OSM',
+    url: 'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, Tiles style by <a href="https://www.hotosm.org/" target="_blank">Humanitarian OpenStreetMap Team</a>',
+  },
+  cyclosm: {
+    label: 'CyclOSM',
+    url: 'https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png',
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="https://github.com/cyclosm/cyclosm-cartocss-style/releases">CyclOSM</a>',
+  },
+};
+
 interface EvacuationMapProps {
   center: [number, number];
   zoom: number;
@@ -70,18 +96,24 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   const drawPreviewLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Map visual toggles
-  const [mapTheme, setMapTheme] = useState<'dark' | 'standard'>('dark');
+  // Map visual toggles — default is official Standard OpenStreetMap (no API key required)
+  const [osmStyle, setOsmStyle] = useState<OsmLayerStyle>('standard');
   const [showHeatmap, setShowHeatmap] = useState<boolean>(true);
   const [showRoutes, setShowRoutes] = useState<boolean>(true);
   const [showZones, setShowZones] = useState<boolean>(true);
+
+  const cycleOsmStyle = () => {
+    setOsmStyle((prev) =>
+      prev === 'standard' ? 'hot' : prev === 'hot' ? 'cyclosm' : 'standard'
+    );
+  };
 
   const activeDrawModeRef = useRef<ActiveDrawMode>(activeDrawMode);
   useEffect(() => {
     activeDrawModeRef.current = activeDrawMode;
   }, [activeDrawMode]);
 
-  // Initialize Leaflet Map once
+  // Initialize Leaflet Map once with official OpenStreetMap tiles (zero API key)
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
@@ -94,15 +126,10 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-    const tileUrl =
-      mapTheme === 'dark'
-        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-        : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-
-    const tileLayer = L.tileLayer(tileUrl, {
+    const provider = OSM_TILE_PROVIDERS[osmStyle];
+    const tileLayer = L.tileLayer(provider.url, {
       maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      attribution: provider.attribution,
     }).addTo(map);
 
     tileLayerRef.current = tileLayer;
@@ -150,15 +177,12 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     };
   }, []);
 
-  // Switch tile theme
+  // Switch between public zero-API-key OpenStreetMap tile layers
   useEffect(() => {
     if (!tileLayerRef.current) return;
-    const tileUrl =
-      mapTheme === 'dark'
-        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-        : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-    tileLayerRef.current.setUrl(tileUrl);
-  }, [mapTheme]);
+    const provider = OSM_TILE_PROVIDERS[osmStyle];
+    tileLayerRef.current.setUrl(provider.url);
+  }, [osmStyle]);
 
   // Fly to new center/zoom when preset changes
   const prevCenterRef = useRef<[number, number]>(center);
@@ -384,21 +408,20 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (!showRoutes || computedRoutes.length === 0) return;
 
     computedRoutes.forEach((route) => {
-      const color = route.behaviorType === 'obedient' ? '#38bdf8' : '#fbbf24';
-      const weight = 3.5;
-
+      const color = route.behaviorType === 'obedient' ? '#0284c7' : '#d97706';
+      const weight = 4;
 
       // Outer casing for main evacuation route
       L.polyline(route.coordinates, {
         color: '#090d16',
         weight: weight + 3,
-        opacity: 0.65,
+        opacity: 0.72,
       }).addTo(routesGroup);
 
       const polyline = L.polyline(route.coordinates, {
         color,
         weight,
-        opacity: 0.88,
+        opacity: 0.92,
       });
 
       const distKm = (route.distanceMeters / 1000).toFixed(2);
@@ -504,17 +527,17 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       .forEach((c) => {
         const dotColor =
           c.behavior === 'obedient'
-            ? '#38bdf8'
+            ? '#0284c7'
             : c.behavior === 'autonomous'
-            ? '#fbbf24'
-            : '#fb7185';
+            ? '#d97706'
+            : '#e11d48';
 
         L.circleMarker(c.position, {
-          radius: 3.5,
+          radius: 4,
           color: '#090d16',
-          weight: 1,
+          weight: 1.2,
           fillColor: dotColor,
-          fillOpacity: 0.9,
+          fillOpacity: 0.92,
         })
           .bindTooltip(
             `<b>${c.behavior.toUpperCase()} Cluster</b> (${c.headcount} evacuees)<br/>Moving toward Blue Square pickup`,
@@ -719,12 +742,12 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       <div className="map-floating-toolbar">
         <button
           type="button"
-          className={`map-tool-btn ${mapTheme === 'dark' ? 'active' : ''}`}
-          onClick={() => setMapTheme(mapTheme === 'dark' ? 'standard' : 'dark')}
-          title="Toggle Tactical Dark / Standard OSM Tiles"
+          className="map-tool-btn active"
+          onClick={cycleOsmStyle}
+          title="Switch between free OpenStreetMap layers (no API key required)"
         >
           <Compass size={15} />
-          <span>{mapTheme === 'dark' ? 'Tactical OSM' : 'Standard OSM'}</span>
+          <span>{OSM_TILE_PROVIDERS[osmStyle].label}</span>
         </button>
 
         <button
