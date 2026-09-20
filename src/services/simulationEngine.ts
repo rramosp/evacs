@@ -117,6 +117,44 @@ function samplePointInsidePolygon(
 }
 
 /**
+ * Compute remaining unboarded population per Source Area ID
+ */
+export function getRemainingPopulationBySource(
+  sourceAreas: SourceArea[],
+  clusters: SourceInternalCluster[],
+  pickupStates: PickupLocationState[],
+  hasSimulationStarted: boolean
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  sourceAreas.forEach((src) => {
+    if (!hasSimulationStarted) {
+      result[src.id] = src.population;
+      return;
+    }
+
+    const hasClustersOrPickups =
+      clusters.some((c) => c.sourceId === src.id) ||
+      pickupStates.some((p) => p.sourceId === src.id);
+
+    if (!hasClustersOrPickups) {
+      // Newly added Source Area while paused
+      result[src.id] = src.population;
+      return;
+    }
+
+    const moving = clusters
+      .filter((c) => c.sourceId === src.id && c.status === 'moving_in_zone')
+      .reduce((acc, c) => acc + c.headcount, 0);
+    const waiting = pickupStates
+      .filter((p) => p.sourceId === src.id)
+      .reduce((acc, p) => acc + p.waitingPopulation, 0);
+
+    result[src.id] = moving + waiting;
+  });
+  return result;
+}
+
+/**
  * Generate dynamic heatmap points from clusters and pickup states
  */
 export function generateHeatmapFromState(
@@ -205,7 +243,60 @@ export function generateHeatmapFromState(
 }
 
 /**
- * Initialize full simulation state
+ * Helper to generate internal clusters for a list of Source Areas
+ */
+function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalCluster[] {
+  const clusters: SourceInternalCluster[] = [];
+
+  sourceAreas.forEach((src) => {
+    const totalPop = Math.max(0, src.population);
+    if (totalPop === 0) return;
+
+    const numClusters = Math.min(75, Math.max(1, totalPop));
+    const obCount = Math.round((numClusters * src.behavior.obedient) / 100);
+    const auCount = Math.round((numClusters * src.behavior.autonomous) / 100);
+
+    let popAllocated = 0;
+
+    for (let i = 0; i < numClusters; i++) {
+      const isLast = i === numClusters - 1;
+      const headcount = isLast
+        ? Math.max(0, totalPop - popAllocated)
+        : Math.round(totalPop / numClusters);
+      popAllocated += headcount;
+
+      if (headcount <= 0) continue;
+
+      let behavior: PopulationBehaviorType = 'random';
+      if (i < obCount) {
+        behavior = 'obedient';
+      } else if (i < obCount + auCount) {
+        behavior = 'autonomous';
+      }
+
+      const startPos = samplePointInsidePolygon(src.polygon, i);
+      const nearestEdgeIdx = i % Math.max(1, src.polygon.length);
+
+      clusters.push({
+        id: `cluster-${src.id}-${i}-${Date.now()}`,
+        sourceId: src.id,
+        behavior,
+        headcount,
+        position: startPos,
+        targetPickupId: null,
+        perimeterEdgeIndex: nearestEdgeIdx,
+        perimeterProgress: 0,
+        randomHeadingRad: ((i * 73) % 360) * (Math.PI / 180),
+        status: 'moving_in_zone',
+      });
+    }
+  });
+
+  return clusters;
+}
+
+/**
+ * Initialize full simulation state from scratch
  */
 export function initializeSimulationState(
   routes: ComputedRoute[],
@@ -226,47 +317,7 @@ export function initializeSimulationState(
     totalBoardedCount: 0,
   }));
 
-  const clusters: SourceInternalCluster[] = [];
-
-  sourceAreas.forEach((src) => {
-    const numClusters = 75;
-    const totalPop = src.population;
-    const obCount = Math.round((numClusters * src.behavior.obedient) / 100);
-    const auCount = Math.round((numClusters * src.behavior.autonomous) / 100);
-
-    let popAllocated = 0;
-
-    for (let i = 0; i < numClusters; i++) {
-      const isLast = i === numClusters - 1;
-      const headcount = isLast
-        ? Math.max(1, totalPop - popAllocated)
-        : Math.round(totalPop / numClusters);
-      popAllocated += headcount;
-
-      let behavior: PopulationBehaviorType = 'random';
-      if (i < obCount) {
-        behavior = 'obedient';
-      } else if (i < obCount + auCount) {
-        behavior = 'autonomous';
-      }
-
-      const startPos = samplePointInsidePolygon(src.polygon, i);
-      const nearestEdgeIdx = i % Math.max(1, src.polygon.length);
-
-      clusters.push({
-        id: `cluster-${src.id}-${i}`,
-        sourceId: src.id,
-        behavior,
-        headcount,
-        position: startPos,
-        targetPickupId: null,
-        perimeterEdgeIndex: nearestEdgeIdx,
-        perimeterProgress: 0,
-        randomHeadingRad: ((i * 73) % 360) * (Math.PI / 180),
-        status: 'moving_in_zone',
-      });
-    }
-  });
+  const clusters = buildClustersForSources(sourceAreas);
 
   // Initialize Vehicle Units cycling to Pickups and Targets
   const vehicles: ActiveVehicleUnit[] = [];
@@ -351,6 +402,203 @@ export function initializeSimulationState(
     newLogs: [],
     totalEvacuated: 0,
     totalInTransit: 0,
+    totalRemainingAtSource,
+    totalWaitingAtPickups: 0,
+  };
+}
+
+/**
+ * Reconcile simulation state upon restarting after mid-simulation pause & topology/fleet edits:
+ * - Rebuilds pickup states & internal clusters for remaining/modified/new Source Area populations
+ * - Routes running vehicles with passengers (`currentOccupancy > 0`) immediately to the CLOSEST active Target Area,
+ *   and configures them to follow the newly recomputed routes right after offloading
+ * - Assigns empty vehicles & newly added vehicle fleets to the newly recomputed routes
+ */
+export function reconcileSimulationOnRestart(
+  newRoutes: ComputedRoute[],
+  sourceAreas: SourceArea[],
+  targetAreas: TargetArea[],
+  vehicleFleets: VehicleFleet[],
+  existingVehicles: ActiveVehicleUnit[],
+  existingTargetOccupancies: Record<string, number>,
+  directRoutesToClosestTarget: Record<
+    string,
+    { target: TargetArea; coordinates: [number, number][] }
+  >
+): SimulationStateSnapshot {
+  const newLogs: string[] = [];
+
+  // 1. Establish new Pickup Location states from recomputed routes
+  const pickupStates: PickupLocationState[] = newRoutes.map((r, idx) => ({
+    id: `pickup-${r.id}`,
+    routeId: r.id,
+    sourceId: r.sourceId,
+    sourceName: r.sourceName,
+    targetId: r.targetId,
+    targetName: r.targetName,
+    label: r.pickupLabel || `Pickup Point #${idx + 1}`,
+    location: r.pickupLocation,
+    waitingPopulation: 0,
+    totalBoardedCount: 0,
+  }));
+
+  // 2. Build clusters for each Source Area using its current (remaining/edited/new) population
+  const clusters = buildClustersForSources(sourceAreas);
+
+  // 3. Reconcile vehicles:
+  // Filter existing vehicles whose fleet still exists in `vehicleFleets`
+  const activeFleetIds = new Set(vehicleFleets.map((f) => f.id));
+  const survivingVehicles = existingVehicles.filter((v) => activeFleetIds.has(v.fleetId));
+
+  const updatedVehicles: ActiveVehicleUnit[] = [];
+
+  survivingVehicles.forEach((veh, idx) => {
+    const nextRoute = newRoutes[idx % Math.max(1, newRoutes.length)];
+    const nextPickup = nextRoute
+      ? pickupStates.find((p) => p.routeId === nextRoute.id)
+      : undefined;
+
+    if (!nextRoute || !nextPickup) return;
+
+    // CASE A: Running or waiting vehicle carrying passengers (`currentOccupancy > 0`)
+    // -> Immediately route from its current position to the CLOSEST active Target Area,
+    //    then follow the newly recomputed route after offloading!
+    if (veh.currentOccupancy > 0) {
+      const direct = directRoutesToClosestTarget[veh.id];
+      const closestTarget = direct?.target || targetAreas.find((t) => !t.disabled) || targetAreas[0];
+      const directCoords =
+        direct && direct.coordinates.length >= 2
+          ? direct.coordinates
+          : [veh.currentPosition, getPolygonCentroid(closestTarget.polygon)];
+      const directDist = buildCumulativeDistances(directCoords);
+
+      newLogs.push(
+        `Mid-sim reroute: ${veh.fleetName} (${veh.currentOccupancy} pax onboard) diverted from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest active shelter "${closestTarget.name}", then joining ${nextRoute.pickupLabel}.`
+      );
+
+      updatedVehicles.push({
+        ...veh,
+        status: 'to_target',
+        waitingAtPickupSeconds: 0,
+        progressMeters: 0,
+        targetId: closestTarget.id,
+        targetName: closestTarget.name,
+        evacCoords: directCoords,
+        evacCumulative: directDist.cumulative,
+        assignedRouteId: nextRoute.id,
+        assignedPickupId: nextPickup.id,
+        sourceId: nextRoute.sourceId,
+        postOffloadEvacCoords: nextRoute.coordinates,
+        postOffloadTargetId: nextRoute.targetId,
+        postOffloadTargetName: nextRoute.targetName,
+        departureDelaySeconds: 0,
+      });
+    } else {
+      // CASE B: Empty vehicle (`currentOccupancy === 0`) -> dispatch from current position to newly assigned Pickup Location
+      const approachCoords: [number, number][] = [veh.currentPosition, nextPickup.location];
+      const approachDist = buildCumulativeDistances(approachCoords);
+      const evacDist = buildCumulativeDistances(nextRoute.coordinates);
+
+      updatedVehicles.push({
+        ...veh,
+        status: 'to_pickup',
+        waitingAtPickupSeconds: 0,
+        progressMeters: 0,
+        assignedRouteId: nextRoute.id,
+        assignedPickupId: nextPickup.id,
+        sourceId: nextRoute.sourceId,
+        targetId: nextRoute.targetId,
+        targetName: nextRoute.targetName,
+        approachCoords,
+        approachCumulative: approachDist.cumulative,
+        evacCoords: nextRoute.coordinates,
+        evacCumulative: evacDist.cumulative,
+        postOffloadEvacCoords: undefined,
+        postOffloadTargetId: undefined,
+        postOffloadTargetName: undefined,
+        departureDelaySeconds: 0,
+      });
+    }
+  });
+
+  // 4. Spawn vehicles for any NEWLY ADDED fleets not yet represented in `survivingVehicles`
+  const representedFleetIds = new Set(survivingVehicles.map((v) => v.fleetId));
+  const newFleets = vehicleFleets.filter((f) => !representedFleetIds.has(f.id));
+
+  newFleets.forEach((fleet, fIdx) => {
+    const route = newRoutes[fIdx % Math.max(1, newRoutes.length)];
+    const pickup = route ? pickupStates.find((p) => p.routeId === route.id) : undefined;
+    if (!route || !pickup) return;
+
+    const approachCoords: [number, number][] = [fleet.location, pickup.location];
+    const approachDist = buildCumulativeDistances(approachCoords);
+    const evacDist = buildCumulativeDistances(route.coordinates);
+
+    const numWaves = 3;
+    const unitsPerWave = Math.max(2, Math.round(fleet.count / numWaves));
+    const maxCapPerWave = unitsPerWave * fleet.capacityPerUnit;
+
+    for (let w = 0; w < numWaves; w++) {
+      updatedVehicles.push({
+        id: `veh-new-${fleet.id}-wave-${w}-${Date.now()}`,
+        fleetId: fleet.id,
+        fleetName: `${fleet.name} Convoy #${w + 1}`,
+        vehicleType: fleet.type,
+        unitCount: unitsPerWave,
+        capacityPerUnit: fleet.capacityPerUnit,
+        maxCapacity: maxCapPerWave,
+        currentOccupancy: 0,
+        assignedRouteId: route.id,
+        assignedPickupId: pickup.id,
+        sourceId: route.sourceId,
+        targetId: route.targetId,
+        targetName: route.targetName,
+        status: 'to_pickup',
+        waitingAtPickupSeconds: 0,
+        currentPosition: fleet.location,
+        progressMeters: 0,
+        speedMps: 18.0,
+        approachCoords,
+        approachCumulative: approachDist.cumulative,
+        evacCoords: route.coordinates,
+        evacCumulative: evacDist.cumulative,
+        departureDelaySeconds: w * 15,
+      });
+    }
+
+    newLogs.push(
+      `Deployed new fleet "${fleet.name}" (${fleet.count} × ${fleet.type}) to corridor ${route.pickupLabel} -> ${route.targetName}.`
+    );
+  });
+
+  const targetOccupancies: Record<string, number> = {};
+  targetAreas.forEach((t) => {
+    targetOccupancies[t.id] = existingTargetOccupancies[t.id] || 0;
+  });
+
+  const totalEvacuated = Object.values(targetOccupancies).reduce((acc, v) => acc + v, 0);
+  const totalInTransit = updatedVehicles
+    .filter((v) => v.status === 'to_target')
+    .reduce((acc, v) => acc + v.currentOccupancy, 0);
+  const totalRemainingAtSource = clusters.reduce((acc, c) => acc + c.headcount, 0);
+
+  const heatmapPoints = generateHeatmapFromState(
+    clusters,
+    pickupStates,
+    updatedVehicles,
+    targetAreas,
+    targetOccupancies
+  );
+
+  return {
+    clusters,
+    pickupStates,
+    vehicles: updatedVehicles,
+    heatmapPoints,
+    targetOccupancies,
+    newLogs,
+    totalEvacuated,
+    totalInTransit,
     totalRemainingAtSource,
     totalWaitingAtPickups: 0,
   };
@@ -671,7 +919,7 @@ export function stepSimulationState(
       }
     }
 
-    // STATE C: Driving from Pickup Location TO Target Shelter
+    // STATE C: Driving from Pickup Location (or mid-transit diversion) TO Target Shelter
     if (veh.status === 'to_target') {
       const totalEvacDist = veh.evacCumulative[veh.evacCumulative.length - 1] || 1;
       const nextProgress = veh.progressMeters + veh.speedMps * deltaSimSeconds;
@@ -684,17 +932,33 @@ export function stepSimulationState(
           `${veh.fleetName} arrived at ${veh.targetName}, offloading ${veh.currentOccupancy.toLocaleString()} evacuees safely.`
         );
 
-        const offloadedVeh = {
+        const arrivalPos = veh.evacCoords[veh.evacCoords.length - 1];
+
+        // If this vehicle was diverted mid-simulation to the closest Target Area and has a post-offload recomputed route,
+        // transition it now to follow the newly recomputed route!
+        const nextEvacCoords = veh.postOffloadEvacCoords || veh.evacCoords;
+        const nextTargetId = veh.postOffloadTargetId || veh.targetId;
+        const nextTargetName = veh.postOffloadTargetName || veh.targetName;
+        const nextEvacDist = buildCumulativeDistances(nextEvacCoords);
+
+        const offloadedVeh: ActiveVehicleUnit = {
           ...veh,
           currentOccupancy: 0,
           waitingAtPickupSeconds: 0,
           progressMeters: 0,
-          currentPosition: veh.evacCoords[veh.evacCoords.length - 1],
+          currentPosition: arrivalPos,
+          evacCoords: nextEvacCoords,
+          evacCumulative: nextEvacDist.cumulative,
+          targetId: nextTargetId,
+          targetName: nextTargetName,
+          postOffloadEvacCoords: undefined,
+          postOffloadTargetId: undefined,
+          postOffloadTargetName: undefined,
         };
 
         const remainingInSource = getUnboardedInSource(veh.sourceId);
         if (remainingInSource > 0) {
-          const returnCoords = [...veh.evacCoords].reverse();
+          const returnCoords: [number, number][] = [arrivalPos, pickup.location];
           const returnDist = buildCumulativeDistances(returnCoords);
           return {
             ...offloadedVeh,

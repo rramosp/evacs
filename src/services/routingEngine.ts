@@ -265,6 +265,47 @@ export function calculatePathDistanceMeters(coords: [number, number][]): number 
   return Math.round(totalKm * 1000);
 }
 
+/**
+ * Compute an immediate obstacle-avoiding route from a running vehicle's current position
+ * to the closest active (non-disabled) Target Area.
+ */
+export async function computeDirectRouteToClosestTarget(
+  currentPos: [number, number],
+  targetAreas: TargetArea[],
+  noGoAreas: NoGoArea[]
+): Promise<{ target: TargetArea; coordinates: [number, number][] }> {
+  const activeTargets = targetAreas.filter((t) => !t.disabled);
+  const candidates = activeTargets.length > 0 ? activeTargets : targetAreas;
+
+  const sorted = [...candidates].sort((a, b) => {
+    const cA = getPolygonCentroid(a.polygon);
+    const cB = getPolygonCentroid(b.polygon);
+    const dA = turf.distance([currentPos[1], currentPos[0]], [cA[1], cA[0]]);
+    const dB = turf.distance([currentPos[1], currentPos[0]], [cB[1], cB[0]]);
+    return dA - dB;
+  });
+
+  const closestTarget = sorted[0];
+  const tgtCenter = getPolygonCentroid(closestTarget.polygon);
+
+  const waypoints: [number, number][] = [currentPos];
+  for (const nogo of noGoAreas) {
+    if (doesRouteIntersectNoGo([currentPos, tgtCenter], nogo)) {
+      waypoints.push(...computeDetourWaypoints(currentPos, tgtCenter, nogo, 'primary'));
+    }
+  }
+  waypoints.push(tgtCenter);
+
+  const raw = await fetchOSRMRoute(waypoints);
+  const sanitized = sanitizePolylineAgainstNoGo(raw.coordinates, noGoAreas);
+  if (sanitized.length > 0) {
+    sanitized[0] = currentPos;
+    sanitized[sanitized.length - 1] = tgtCenter;
+  }
+
+  return { target: closestTarget, coordinates: sanitized };
+}
+
 export interface RoutingComputationResult {
   routes: ComputedRoute[];
   logs: LogEntry[];
@@ -272,7 +313,7 @@ export interface RoutingComputationResult {
 
 /**
  * Compute obstacle-avoiding vehicle evacuation routes and establish specific
- * Blue Square Pickup Locations on each Source Area.
+ * Blue Square Pickup Locations on each Source Area for all enabled Target Areas.
  */
 export async function computeAllEvacuationRoutes(
   sourceAreas: SourceArea[],
@@ -283,6 +324,8 @@ export async function computeAllEvacuationRoutes(
   const routes: ComputedRoute[] = [];
   const logs: LogEntry[] = [];
   const nowStr = () => new Date().toLocaleTimeString();
+
+  const activeTargets = targetAreas.filter((t) => !t.disabled);
 
   const pushLog = (level: LogEntry['level'], message: string) => {
     logs.push({
@@ -296,8 +339,13 @@ export async function computeAllEvacuationRoutes(
 
   pushLog(
     'ROUTING',
-    `Initiating OSRM routing & pickup location establishment across ${sourceAreas.length} source zones, ${targetAreas.length} shelters, and ${noGoAreas.length} no-go areas.`
+    `Initiating OSRM routing & pickup location establishment across ${sourceAreas.length} source zones, ${activeTargets.length} active shelters (${targetAreas.length - activeTargets.length} disabled), and ${noGoAreas.length} no-go areas.`
   );
+
+  if (activeTargets.length === 0) {
+    pushLog('WARN', 'No active (enabled) Target Shelters available! Enable at least one Target Shelter to compute routes.');
+    return { routes, logs };
+  }
 
   const defaultDepot: [number, number] =
     vehicleFleets.length > 0
@@ -310,7 +358,7 @@ export async function computeAllEvacuationRoutes(
     const source = sourceAreas[sIdx];
     const srcCenter = getPolygonCentroid(source.polygon);
 
-    const sortedTargets = [...targetAreas].sort((a, b) => {
+    const sortedTargets = [...activeTargets].sort((a, b) => {
       const cA = getPolygonCentroid(a.polygon);
       const cB = getPolygonCentroid(b.polygon);
       const dA = turf.distance([srcCenter[1], srcCenter[0]], [cA[1], cA[0]]);

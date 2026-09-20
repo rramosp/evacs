@@ -243,14 +243,16 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       marker.addTo(group);
     });
 
-    // 2. Target Areas (Emerald Green)
+    // 2. Target Areas (Emerald Green when Active, Slate Gray when Disabled)
     targetAreas.forEach((tgt) => {
       const isSelected = selectedEntityId === tgt.id;
+      const isDisabled = Boolean(tgt.disabled);
       const poly = L.polygon(tgt.polygon, {
-        color: isSelected ? '#34d399' : '#10b981',
+        color: isDisabled ? '#94a3b8' : isSelected ? '#34d399' : '#10b981',
         weight: isSelected ? 3 : 2,
-        fillColor: '#10b981',
-        fillOpacity: isSelected ? 0.36 : 0.22,
+        fillColor: isDisabled ? '#64748b' : '#10b981',
+        fillOpacity: isDisabled ? 0.16 : isSelected ? 0.36 : 0.22,
+        dashArray: isDisabled ? '5, 5' : undefined,
       });
 
       poly.on('click', (e) => {
@@ -264,8 +266,14 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         Math.round((tgt.currentOccupancy / Math.max(1, tgt.capacity)) * 100)
       );
       const labelHtml = `
-        <div class="map-zone-badge map-zone-target ${isSelected ? 'selected' : ''}">
-          <div class="zone-badge-title">SHELTER: ${tgt.name}</div>
+        <div class="map-zone-badge map-zone-target ${isSelected ? 'selected' : ''}" style="${
+        isDisabled ? 'border-color: #64748b; background: rgba(15, 23, 42, 0.92);' : ''
+      }">
+          <div class="zone-badge-title">
+            SHELTER: ${tgt.name} ${
+        isDisabled ? '<span style="color:#f87171">[DISABLED]</span>' : ''
+      }
+          </div>
           <div class="zone-badge-sub">${tgt.currentOccupancy.toLocaleString()} / ${tgt.capacity.toLocaleString()} (${occPercent}%)</div>
           <div class="zone-progress-track">
             <div class="zone-progress-fill" style="width: ${occPercent}%"></div>
@@ -277,8 +285,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         icon: L.divIcon({
           className: 'custom-div-icon',
           html: labelHtml,
-          iconSize: [175, 52],
-          iconAnchor: [87, 26],
+          iconSize: [185, 52],
+          iconAnchor: [92, 26],
         }),
       });
       marker.on('click', () => onSelectEntity(tgt.id));
@@ -570,7 +578,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
               veh.status === 'waiting_for_80_pct'
                 ? `Boarding at Pickup (${occPct}% | Wait ${formatMMSS(veh.waitingAtPickupSeconds)}/10:00)`
                 : veh.status === 'to_target'
-                ? `Departed (>=80% Full) -> En Route to ${veh.targetName}`
+                ? `En Route to ${veh.targetName}`
                 : 'Approaching Blue Square Pickup Point'
             }</b><br/>
             Occupancy: <b>${veh.currentOccupancy} / ${veh.maxCapacity} evacuees (${occPct}%)</b>

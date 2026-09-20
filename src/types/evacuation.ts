@@ -20,6 +20,7 @@ export interface TargetArea {
   polygon: [number, number][]; // Array of [lat, lng]
   capacity: number;
   currentOccupancy: number;
+  disabled?: boolean; // When true, receives no more people and is excluded from route computation
 }
 
 export interface NoGoArea {
@@ -120,6 +121,9 @@ export interface ActiveVehicleUnit {
   evacCoords: [number, number][];
   evacCumulative: number[];
   departureDelaySeconds: number;
+  postOffloadEvacCoords?: [number, number][];
+  postOffloadTargetId?: string;
+  postOffloadTargetName?: string;
 }
 
 export interface SimulationStateSnapshot {

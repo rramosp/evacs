@@ -11,7 +11,7 @@ import {
 import {
   Route,
   Play,
-  Square,
+  Pause,
   RotateCcw,
   Plus,
   Pencil,
@@ -23,6 +23,9 @@ import {
   Check,
   X,
   MapPin,
+  Ban,
+  CheckCircle2,
+  Lock,
 } from 'lucide-react';
 
 interface LeftControlPanelProps {
@@ -32,12 +35,13 @@ interface LeftControlPanelProps {
   targetAreas: TargetArea[];
   noGoAreas: NoGoArea[];
   vehicleFleets: VehicleFleet[];
+  remainingBySource: Record<string, number>;
   onAddSourceArea: (src: Omit<SourceArea, 'id'>) => void;
   onUpdateSourceArea: (src: SourceArea) => void;
   onDeleteSourceArea: (id: string) => void;
   onAddTargetArea: (tgt: Omit<TargetArea, 'id' | 'currentOccupancy'>) => void;
   onUpdateTargetArea: (tgt: TargetArea) => void;
-  onDeleteTargetArea: (id: string) => void;
+  onToggleDisableTargetArea: (id: string) => void;
   onAddNoGoArea: (nogo: Omit<NoGoArea, 'id'>) => void;
   onUpdateNoGoArea: (nogo: NoGoArea) => void;
   onDeleteNoGoArea: (id: string) => void;
@@ -69,12 +73,13 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   targetAreas,
   noGoAreas,
   vehicleFleets,
+  remainingBySource,
   onAddSourceArea,
   onUpdateSourceArea,
   onDeleteSourceArea,
   onAddTargetArea,
   onUpdateTargetArea,
-  onDeleteTargetArea,
+  onToggleDisableTargetArea,
   onAddNoGoArea,
   onUpdateNoGoArea,
   onDeleteNoGoArea,
@@ -136,10 +141,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
   const handleSaveNewEntity = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSimulating) return;
     if (pendingDrawnPolygon && activeDrawMode?.type === 'source') {
       onAddSourceArea({
         name: srcForm.name || `Evacuation Zone #${sourceAreas.length + 1}`,
-        population: Number(srcForm.population) || 500,
+        population: Math.max(0, Number(srcForm.population) || 0),
         polygon: pendingDrawnPolygon,
         behavior: {
           obedient: Number(srcForm.obedient),
@@ -152,6 +158,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         name: tgtForm.name || `Shelter Zone #${targetAreas.length + 1}`,
         capacity: Number(tgtForm.capacity) || 10000,
         polygon: pendingDrawnPolygon,
+        disabled: false,
       });
     } else if (pendingDrawnPolygon && activeDrawMode?.type === 'nogo') {
       onAddNoGoArea({
@@ -170,12 +177,13 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     onClearPendingGeometry();
   };
 
-  // Start editing an existing Source Area
-  const startEditSource = (src: SourceArea) => {
+  // Start editing an existing Source Area (only when paused)
+  const startEditSource = (src: SourceArea, currentRemaining: number) => {
+    if (isSimulating) return;
     setEditingSourceId(src.id);
     setSrcForm({
       name: src.name,
-      population: src.population,
+      population: currentRemaining,
       obedient: src.behavior.obedient,
       autonomous: src.behavior.autonomous,
       random: src.behavior.random,
@@ -183,10 +191,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   };
 
   const saveEditSource = (src: SourceArea) => {
+    if (isSimulating) return;
     onUpdateSourceArea({
       ...src,
       name: srcForm.name,
-      population: Number(srcForm.population),
+      population: Math.max(0, Number(srcForm.population)),
       behavior: {
         obedient: Number(srcForm.obedient),
         autonomous: Number(srcForm.autonomous),
@@ -196,8 +205,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     setEditingSourceId(null);
   };
 
-  // Start editing an existing Target Area
+  // Start editing an existing Target Area (only when paused)
   const startEditTarget = (tgt: TargetArea) => {
+    if (isSimulating) return;
     setEditingTargetId(tgt.id);
     setTgtForm({
       name: tgt.name,
@@ -206,6 +216,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   };
 
   const saveEditTarget = (tgt: TargetArea) => {
+    if (isSimulating) return;
     onUpdateTargetArea({
       ...tgt,
       name: tgtForm.name,
@@ -214,13 +225,15 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     setEditingTargetId(null);
   };
 
-  // Start editing an existing No-Go Area
+  // Start editing an existing No-Go Area (only when paused)
   const startEditNoGo = (nogo: NoGoArea) => {
+    if (isSimulating) return;
     setEditingNoGoId(nogo.id);
     setNogoForm({ name: nogo.name });
   };
 
   const saveEditNoGo = (nogo: NoGoArea) => {
+    if (isSimulating) return;
     onUpdateNoGoArea({
       ...nogo,
       name: nogoForm.name,
@@ -228,8 +241,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     setEditingNoGoId(null);
   };
 
-  // Start editing an existing Vehicle Fleet
+  // Start editing an existing Vehicle Fleet (only when paused)
   const startEditVehicle = (veh: VehicleFleet) => {
+    if (isSimulating) return;
     setEditingVehicleId(veh.id);
     setVehForm({
       name: veh.name,
@@ -240,6 +254,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   };
 
   const saveEditVehicle = (veh: VehicleFleet) => {
+    if (isSimulating) return;
     onUpdateVehicleFleet({
       ...veh,
       name: vehForm.name,
@@ -270,6 +285,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           id="preset-scenario-select"
           className="tactical-select"
           value={selectedPreset}
+          disabled={isSimulating}
           onChange={(e) => onSelectPreset(e.target.value as PresetScenarioId)}
         >
           <option value="brussels">Brussels — Capital Region Evacuation</option>
@@ -287,7 +303,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           type="button"
           className="btn-primary-action compute-btn"
           onClick={onComputeRoutes}
-          disabled={isComputingRoutes || sourceAreas.length === 0 || targetAreas.length === 0}
+          disabled={isComputingRoutes || isSimulating || sourceAreas.length === 0 || targetAreas.length === 0}
         >
           <Route size={16} />
           <span>
@@ -301,8 +317,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             type="button"
             className={`btn-sim-action run-btn ${isSimulating ? 'active-running' : ''}`}
             onClick={onRunSimulation}
-            disabled={!hasComputedRoutes && !isSimulating}
-            title={!hasComputedRoutes ? 'Compute evacuation routes first' : 'Run animated simulation'}
+            disabled={(!hasComputedRoutes && !isSimulating) || isComputingRoutes}
+            title={!hasComputedRoutes ? 'Compute evacuation routes first' : 'Run / Resume simulation'}
           >
             <Play size={15} />
             <span>Run simulation</span>
@@ -315,8 +331,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             onClick={onStopSimulation}
             disabled={!isSimulating}
           >
-            <Square size={15} />
-            <span>Stop simulation</span>
+            <Pause size={15} />
+            <span>Pause simulation</span>
           </button>
 
           <button
@@ -346,6 +362,30 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           </div>
         </div>
       </section>
+
+      {/* Pause Requirement Notice Banner when Simulation is Active */}
+      {isSimulating && (
+        <div
+          style={{
+            margin: '0 14px 8px 14px',
+            padding: '8px 10px',
+            borderRadius: '6px',
+            background: 'rgba(245, 158, 11, 0.14)',
+            border: '1px solid rgba(245, 158, 11, 0.45)',
+            color: '#fbbf24',
+            fontSize: '0.74rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '7px',
+            lineHeight: 1.35,
+          }}
+        >
+          <Lock size={14} style={{ flexShrink: 0 }} />
+          <span>
+            <strong>Editing Locked:</strong> Pause simulation first to add, modify, disable, or delete areas and vehicles.
+          </span>
+        </div>
+      )}
 
       {/* Modal Form when finishing Map Polygon Drawing or Point Placement */}
       {isCreatingNewEntity && (
@@ -382,7 +422,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                   <label>Population to Evacuate</label>
                   <input
                     type="number"
-                    min={10}
+                    min={0}
                     max={500000}
                     required
                     value={srcForm.population}
@@ -592,6 +632,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               <button
                 type="button"
                 className="btn-add-entity source-add"
+                disabled={isSimulating}
+                title={isSimulating ? 'Pause simulation to add a Source Area' : 'Draw new Source Area on map'}
                 onClick={() => {
                   setSrcForm({
                     name: `Source Zone #${sourceAreas.length + 1}`,
@@ -611,6 +653,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             {sourceAreas.map((src) => {
               const isEditing = editingSourceId === src.id;
               const isSelected = selectedEntityId === src.id;
+              const remainingPeople = remainingBySource[src.id] ?? src.population;
+              const canDeleteSource = !isSimulating && remainingPeople === 0;
 
               return (
                 <div
@@ -627,12 +671,13 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         placeholder="Zone Name"
                       />
                       <div className="edit-row">
-                        <label>Pop:</label>
+                        <label>People in Area:</label>
                         <input
                           type="number"
+                          min={0}
                           value={srcForm.population}
                           onChange={(e) =>
-                            setSrcForm({ ...srcForm, population: Number(e.target.value) })
+                            setSrcForm({ ...srcForm, population: Math.max(0, Number(e.target.value)) })
                           }
                         />
                       </div>
@@ -690,10 +735,15 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon"
-                            title="Modify Source Area"
+                            disabled={isSimulating}
+                            title={
+                              isSimulating
+                                ? 'Pause simulation to modify Source Area or people count'
+                                : 'Modify Source Area & People Count'
+                            }
                             onClick={(e) => {
                               e.stopPropagation();
-                              startEditSource(src);
+                              startEditSource(src, remainingPeople);
                             }}
                           >
                             <Pencil size={13} />
@@ -701,10 +751,23 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon delete"
-                            title="Delete Source Area"
+                            disabled={!canDeleteSource}
+                            style={{
+                              opacity: canDeleteSource ? 1 : 0.35,
+                              cursor: canDeleteSource ? 'pointer' : 'not-allowed',
+                            }}
+                            title={
+                              isSimulating
+                                ? 'Pause simulation to modify or delete areas'
+                                : remainingPeople > 0
+                                ? `Cannot remove Source Area while ${remainingPeople.toLocaleString()} people remain inside`
+                                : 'Delete Source Area (0 people remaining)'
+                            }
                             onClick={(e) => {
                               e.stopPropagation();
-                              onDeleteSourceArea(src.id);
+                              if (canDeleteSource) {
+                                onDeleteSourceArea(src.id);
+                              }
                             }}
                           >
                             <Trash2 size={13} />
@@ -713,13 +776,24 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                       </div>
                       <div className="entity-card-metrics">
                         <span className="metric-pill">
-                          <strong>{src.population.toLocaleString()}</strong> people
+                          Remaining: <strong>{remainingPeople.toLocaleString()}</strong> people
                         </span>
                         <span className="metric-pill behavior-pill">
                           Ob {src.behavior.obedient}% · Au {src.behavior.autonomous}% · Rd{' '}
                           {src.behavior.random}%
                         </span>
                       </div>
+                      {remainingPeople > 0 && !isSimulating && (
+                        <div
+                          style={{
+                            marginTop: '4px',
+                            fontSize: '0.68rem',
+                            color: '#94a3b8',
+                          }}
+                        >
+                          🔒 Deletion disabled while people remain inside (click ✏️ to edit count)
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -732,10 +806,12 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         {activeTab === 'targets' && (
           <div className="entity-tab-content">
             <div className="tab-header-action">
-              <span className="tab-desc">Safe Shelters (Polygons)</span>
+              <span className="tab-desc">Safe Shelters (Cannot be removed; can be disabled)</span>
               <button
                 type="button"
                 className="btn-add-entity target-add"
+                disabled={isSimulating}
+                title={isSimulating ? 'Pause simulation to add a Target Area' : 'Draw new Target Area on map'}
                 onClick={() => {
                   setTgtForm({
                     name: `Shelter Zone #${targetAreas.length + 1}`,
@@ -752,11 +828,16 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             {targetAreas.map((tgt) => {
               const isEditing = editingTargetId === tgt.id;
               const isSelected = selectedEntityId === tgt.id;
+              const isDisabled = Boolean(tgt.disabled);
 
               return (
                 <div
                   key={tgt.id}
                   className={`entity-item-card target-card ${isSelected ? 'selected' : ''}`}
+                  style={{
+                    opacity: isDisabled ? 0.72 : 1,
+                    borderColor: isDisabled ? '#64748b' : undefined,
+                  }}
                   onClick={() => onSelectEntity(tgt.id)}
                 >
                   {isEditing ? (
@@ -798,14 +879,32 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     <>
                       <div className="entity-card-top">
                         <div className="entity-title-group">
-                          <span className="entity-dot target-dot" />
-                          <span className="entity-name">{tgt.name}</span>
+                          <span
+                            className="entity-dot target-dot"
+                            style={{ background: isDisabled ? '#64748b' : undefined }}
+                          />
+                          <span className="entity-name">
+                            {tgt.name}
+                            {isDisabled && (
+                              <span
+                                style={{
+                                  marginLeft: '6px',
+                                  fontSize: '0.68rem',
+                                  color: '#f87171',
+                                  fontWeight: 700,
+                                }}
+                              >
+                                [DISABLED]
+                              </span>
+                            )}
+                          </span>
                         </div>
                         <div className="entity-actions">
                           <button
                             type="button"
                             className="btn-entity-icon"
-                            title="Modify Target Shelter"
+                            disabled={isSimulating}
+                            title={isSimulating ? 'Pause simulation to modify Target Area' : 'Modify Target Shelter'}
                             onClick={(e) => {
                               e.stopPropagation();
                               startEditTarget(tgt);
@@ -815,14 +914,45 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           </button>
                           <button
                             type="button"
-                            className="btn-entity-icon delete"
-                            title="Delete Target Shelter"
+                            className="btn-entity-icon"
+                            disabled={isSimulating}
+                            title={
+                              isSimulating
+                                ? 'Pause simulation to disable/enable Target Area'
+                                : isDisabled
+                                ? 'Enable Target Area to receive evacuees'
+                                : 'Disable Target Area (will receive no more people)'
+                            }
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: '4px',
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              background: isDisabled
+                                ? 'rgba(16, 185, 129, 0.18)'
+                                : 'rgba(239, 68, 68, 0.16)',
+                              color: isDisabled ? '#34d399' : '#f87171',
+                              border: isDisabled
+                                ? '1px solid rgba(16, 185, 129, 0.4)'
+                                : '1px solid rgba(239, 68, 68, 0.4)',
+                            }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              onDeleteTargetArea(tgt.id);
+                              onToggleDisableTargetArea(tgt.id);
                             }}
                           >
-                            <Trash2 size={13} />
+                            {isDisabled ? (
+                              <>
+                                <CheckCircle2 size={12} /> Enable
+                              </>
+                            ) : (
+                              <>
+                                <Ban size={12} /> Disable
+                              </>
+                            )}
                           </button>
                         </div>
                       </div>
@@ -833,6 +963,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         <span className="metric-pill">
                           Occupied: <strong>{tgt.currentOccupancy.toLocaleString()}</strong>
                         </span>
+                        {isDisabled && (
+                          <span className="metric-pill hazard-pill">
+                            🚫 Receives No More People
+                          </span>
+                        )}
                       </div>
                     </>
                   )}
@@ -850,6 +985,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               <button
                 type="button"
                 className="btn-add-entity nogo-add"
+                disabled={isSimulating}
+                title={isSimulating ? 'Pause simulation to add a No-Go Area' : 'Draw new No-Go Area on map'}
                 onClick={() => {
                   setNogoForm({
                     name: `Hazard Sector #${noGoAreas.length + 1}`,
@@ -907,7 +1044,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon"
-                            title="Modify No-Go Area"
+                            disabled={isSimulating}
+                            title={isSimulating ? 'Pause simulation to modify No-Go Area' : 'Modify No-Go Area'}
                             onClick={(e) => {
                               e.stopPropagation();
                               startEditNoGo(nogo);
@@ -918,7 +1056,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon delete"
-                            title="Delete No-Go Area"
+                            disabled={isSimulating}
+                            title={isSimulating ? 'Pause simulation to delete No-Go Area' : 'Delete No-Go Area'}
                             onClick={(e) => {
                               e.stopPropagation();
                               onDeleteNoGoArea(nogo.id);
@@ -949,6 +1088,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               <button
                 type="button"
                 className="btn-add-entity vehicle-add"
+                disabled={isSimulating}
+                title={isSimulating ? 'Pause simulation to add a Vehicle Fleet' : 'Place new Vehicle Fleet on map'}
                 onClick={() => {
                   setVehForm({
                     name: `Bus Fleet #${vehicleFleets.length + 1}`,
@@ -1028,7 +1169,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon"
-                            title="Modify Vehicle Fleet"
+                            disabled={isSimulating}
+                            title={isSimulating ? 'Pause simulation to modify Vehicle Fleet' : 'Modify Vehicle Fleet'}
                             onClick={(e) => {
                               e.stopPropagation();
                               startEditVehicle(veh);
@@ -1039,7 +1181,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon delete"
-                            title="Delete Vehicle Fleet"
+                            disabled={isSimulating}
+                            title={isSimulating ? 'Pause simulation to delete Vehicle Fleet' : 'Delete Vehicle Fleet'}
                             onClick={(e) => {
                               e.stopPropagation();
                               onDeleteVehicleFleet(veh.id);
