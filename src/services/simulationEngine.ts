@@ -79,8 +79,32 @@ export function interpolateAlongPolyline(
 }
 
 /**
- * Build an empty approach path that strictly follows an existing route polyline
- * from the vehicle's starting/current position along the route to the Pickup Location.
+ * Build the initial approach path from a Vehicle Fleet's designated staging depot (`fleet.location`)
+ * to the Pickup Location (`route.pickupLocation`) using the precomputed obstacle-avoiding `route.approachCoordinates`.
+ */
+function getDepotToPickupApproachCoords(
+  route: ComputedRoute,
+  fleet?: VehicleFleet
+): [number, number][] {
+  const startDepot =
+    fleet?.location ||
+    (route.approachCoordinates && route.approachCoordinates.length > 0
+      ? route.approachCoordinates[0]
+      : route.pickupLocation);
+
+  if (route.approachCoordinates && route.approachCoordinates.length >= 2) {
+    const coords = [...route.approachCoordinates];
+    coords[0] = startDepot;
+    coords[coords.length - 1] = route.pickupLocation;
+    return coords;
+  }
+
+  return [startDepot, route.pickupLocation];
+}
+
+/**
+ * Build an empty return path along an existing route polyline
+ * from the vehicle's current position along the route to the Pickup Location.
  */
 function getEmptyApproachAlongExistingRoute(
   route: ComputedRoute,
@@ -292,14 +316,11 @@ function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalClust
     const obCount = Math.round((numClusters * src.behavior.obedient) / 100);
     const auCount = Math.round((numClusters * src.behavior.autonomous) / 100);
 
-    let popAllocated = 0;
+    const baseHeadcount = Math.floor(totalPop / numClusters);
+    const remainder = totalPop % numClusters;
 
     for (let i = 0; i < numClusters; i++) {
-      const isLast = i === numClusters - 1;
-      const headcount = isLast
-        ? Math.max(0, totalPop - popAllocated)
-        : Math.round(totalPop / numClusters);
-      popAllocated += headcount;
+      const headcount = baseHeadcount + (i < remainder ? 1 : 0);
 
       if (headcount <= 0) continue;
 
@@ -367,8 +388,8 @@ export function initializeSimulationState(
       vehicleFleets.find((f) => f.id === route.vehicleFleetId) ||
       vehicleFleets[rIdx % Math.max(1, vehicleFleets.length)];
 
-    // Empty vehicles departing to pick up population ALWAYS follow the existing route polyline!
-    const approachCoords = getEmptyApproachAlongExistingRoute(route);
+    // Initial dispatch at t = 0 starts from the designated Vehicle Fleet staging depot location
+    const approachCoords = getDepotToPickupApproachCoords(route, fleet);
     const evacCoords =
       route.coordinates && route.coordinates.length >= 2
         ? route.coordinates
@@ -533,14 +554,22 @@ export function reconcileSimulationOnRestart(
         departureDelaySeconds: 0,
       });
     } else {
-      // CASE B: Empty vehicle (`currentOccupancy === 0`) -> MUST follow an existing route to pick up population!
+      // CASE B: Empty vehicle (`currentOccupancy === 0`)
       const nextPickup = pickupStates.find((p) => p.routeId === defaultNextRoute.id);
       if (!nextPickup) return;
 
-      const approachCoords = getEmptyApproachAlongExistingRoute(
-        defaultNextRoute,
-        veh.currentPosition
-      );
+      const fleet = vehicleFleets.find((f) => f.id === veh.fleetId);
+      const isStillAtDepot =
+        veh.progressMeters === 0 &&
+        fleet &&
+        turf.distance(
+          [veh.currentPosition[1], veh.currentPosition[0]],
+          [fleet.location[1], fleet.location[0]]
+        ) < 0.15;
+
+      const approachCoords = isStillAtDepot
+        ? getDepotToPickupApproachCoords(defaultNextRoute, fleet)
+        : getEmptyApproachAlongExistingRoute(defaultNextRoute, veh.currentPosition);
       const approachDist = buildCumulativeDistances(approachCoords);
       const evacDist = buildCumulativeDistances(defaultNextRoute.coordinates);
 
@@ -567,7 +596,7 @@ export function reconcileSimulationOnRestart(
     }
   });
 
-  // 4. Spawn vehicles for any NEWLY ADDED fleets — following existing routes to pick up population
+  // 4. Spawn vehicles for any NEWLY ADDED fleets — departing from their designated fleet staging location
   const representedFleetIds = new Set(survivingVehicles.map((v) => v.fleetId));
   const newFleets = vehicleFleets.filter((f) => !representedFleetIds.has(f.id));
 
@@ -576,7 +605,7 @@ export function reconcileSimulationOnRestart(
     const pickup = route ? pickupStates.find((p) => p.routeId === route.id) : undefined;
     if (!route || !pickup) return;
 
-    const approachCoords = getEmptyApproachAlongExistingRoute(route);
+    const approachCoords = getDepotToPickupApproachCoords(route, fleet);
     const approachDist = buildCumulativeDistances(approachCoords);
     const evacDist = buildCumulativeDistances(route.coordinates);
 

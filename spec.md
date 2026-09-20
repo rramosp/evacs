@@ -56,7 +56,11 @@ Restricted or hazardous areas impassable for evacuation routing.
 - **Name**: String identifier (e.g., `"Pont d'Iéna"`).
 - **Geometry**: Polygon (`GeoJSON Polygon`) drawn on the map.
 - **CRUD Rules**: Can be freely added, modified, or removed while the simulation is paused.
-- **Routing Effect**: Any road network edge or segment intersecting a No-Go polygon is marked impassable (infinite weight / removed from routing graph).
+- **Strict Non-Intersection Guarantee (Zero Crossings)**:
+  - **Evacuation routes, vehicle approach routes, and mid-simulation vehicle redirection routes must never cross or touch any No-Go polygon** (`turf.booleanIntersects(routeSegment, noGoPolygon) === false` across every polyline segment).
+  - The routing engine enforces this invariant using a **2D Obstacle Visibility Graph + Dijkstra Shortest-Path Solver** over multi-tier buffered exterior vertices around all No-Go polygons:
+    1. Collision-free detour waypoints are computed around all No-Go polygons and passed to OSRM for road-network routing.
+    2. Whenever any segment or sub-path returned by OSRM enters or crosses a No-Go polygon, surgical segment-level repair replaces that sub-path with the shortest collision-free exterior visibility-graph detour around the obstacle.
 
 ### 3.4 Evacuation Vehicle Fleets, Empty Return Routing & Dual Departure Condition
 Available public or private transport units managed by authorities, modeled as **Fleets / Staging Depots**:
@@ -66,8 +70,9 @@ Available public or private transport units managed by authorities, modeled as *
 - **Unit Count**: Number of vehicles in this fleet (`Integer`).
 - **Capacity per Unit**: Passenger occupancy per vehicle (e.g., `50` for buses, `4` for cars).
 - **CRUD Rules**: Vehicles can be freely added, modified, or removed while the simulation is paused.
-- **Strict Empty Return / Approach Routing Rule**:
-  - Whenever a vehicle departs empty (`currentOccupancy === 0`) to pick up population — whether after offloading passengers at a Target Area, departing from a staging depot, or resuming after a mid-simulation edit — **it must always travel along one of the existing computed routes** (reversing the existing route polyline from Target Area back to Pickup Location), never cutting across straight-line chords.
+- **Initial Depot Dispatch vs. Subsequent Empty Return Routing**:
+  - **Initial Dispatch from Designated Fleet Depots ($t = 0$ and Newly Added Fleets)**: When the simulation starts (or when a newly added Vehicle Fleet is deployed), vehicles originate at their designated **Vehicle Fleet staging location (`fleet.location`)** and travel along the computed obstacle-avoiding approach route (`route.approachCoordinates`) to their assigned Pickup Location (`route.pickupLocation`).
+  - **Subsequent Empty Return Trips (Post-Offload)**: After offloading passengers at a Target Area shelter, empty vehicles return to pick up additional population by reversing the existing computed evacuation route polyline (`Target Area -> Pickup Location`).
 - **Dual Departure Rule (80% Occupancy OR 10 Minutes Waiting Time)**:
   - When a vehicle arrives at a Source Area Pickup Location (Blue Square), a waiting timer (`waitingAtPickupSeconds`) starts at `00:00` and the vehicle boards any waiting evacuees.
   - The vehicle waits at the Pickup Location until **whichever of the following two events happens first**:
@@ -147,6 +152,10 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 
 ### 5.4 Right Panel: Telemetry & KPI Dashboard (`25% Width × 100% Height`)
 - Live evacuation progress KPIs, Blue Square pickup queues, Target Shelter occupancy meters (with `DISABLED` indicators), and behavioral breakdowns.
+- **Exact Population Conservation & Progress Invariant**:
+  - Total population across the system satisfies exact conservation: $\text{Total Population} = \text{Safe at Shelter } (\text{totalEvacuated}) + \text{On Vehicles } (\text{totalInTransit}) + \text{In Source Area } (\text{totalRemainingAtSource})$.
+  - Source Area cluster headcounts are partitioned via exact integer Euclidean division ($\lfloor N/k \rfloor$ plus remainder distribution) so the sum of cluster headcounts equals `source.population` with zero over-allocation.
+  - The **Overall Evacuation Progress** bar is strictly bounded below `100%` (`Math.min(99, Math.floor((totalEvacuated / totalPopulation) * 100))`) whenever any evacuees remain in Source Areas (`totalRemainingAtSource > 0`) or on vehicles (`totalInTransit > 0`), reaching `100%` **if and only if** `totalRemainingAtSource === 0 && totalInTransit === 0 && totalEvacuated > 0`.
 
 ---
 
@@ -202,3 +211,6 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 | **v1.4** | 2026-09-19 | Added **Mid-Simulation Pause, Entity Modification Rules & Smart Restart Re-Routing**: (1) All area/vehicle edits require simulation to be paused; (2) Source Areas cannot be deleted if people still remain inside them; (3) Target Areas cannot be deleted, only **disabled** (`disabled: true`) so they receive no more people; (4) No-Go areas and vehicles can be added/removed while paused; (5) Restarting after modifications recomputes routes for all remaining and new people into enabled Target Areas, and routes any **running vehicles with passengers onboard directly to the closest enabled Target Area** before they follow the newly recomputed routes. |
 | **v1.5** | 2026-09-19 | Fixed two simulation dynamics: (1) **Empty Vehicle Return/Approach Routing**: Whenever vehicles depart empty to pick up population, they **always follow one of the existing computed routes** (reversing the existing route polyline from Target Area back to Pickup Location) rather than straight lines; (2) **2D Brownian Motion for `random` Population**: Replaced straight/smooth-drift movement for `random` population clusters with true stochastic **2D Brownian motion** (independent Gaussian random walk steps $d\mathbf{X}_t = \sigma \, d\mathbf{W}_t$ at every simulation tick) until coming within `50m` of a Pickup Location. |
 | **v1.6** | 2026-09-19 | Updated **Center Map Panel Base Layers**: Configured map viewport to exclusively use public, open-source **OpenStreetMap** tile layers that require **no API key** (`https://tile.openstreetmap.org/{z}/{x}/{y}.png` Standard OpenStreetMap by default, plus Humanitarian OSM and CyclOSM open-source options). |
+| **v1.7** | 2026-09-19 | Overhauled **No-Go Zone Route Avoidance Algorithm**: Replaced radial vertex pushing with a **2D Obstacle Visibility Graph + Dijkstra Shortest-Path Solver** (`computeShortestCollisionFreePath` & `enforceStrictNoGoAvoidance`) over multi-tier buffered exterior vertices around all No-Go polygons. Every segment of every evacuation, approach, and mid-simulation redirection route is strictly verified via `turf.booleanIntersects(segment, noGoPolygon) === false` so routes **never cross No-Go zones**. |
+| **v1.8** | 2026-09-19 | Fixed **Initial Vehicle Fleet Departure Origin**: Updated `initializeSimulationState` and `reconcileSimulationOnRestart` (`getDepotToPickupApproachCoords`) so that at simulation start ($t = 0$) and when newly added fleets are deployed, vehicles depart from their designated **Vehicle Fleet staging depot location (`fleet.location`)** along `route.approachCoordinates` to the Pickup Location, rather than starting from the Target Area. Subsequent post-offload empty return trips continue to reverse the existing evacuation route from Target Area back to Pickup Location. |
+| **v1.9** | 2026-09-19 | Fixed **Overall Evacuation Progress Bar & Exact Population Conservation**: (1) Replaced `Math.round(totalPop / numClusters)` over-allocation in `buildClustersForSources` with exact integer Euclidean division so cluster headcounts sum identically to `source.population`; (2) Updated `RightTelemetryPanel` to compute total population from exact conservation (`totalEvacuated + totalInTransit + totalRemainingAtSource`) and strictly cap progress at $\le 99\%$ while any evacuees remain in Source Areas or on vehicles, reaching `100%` if and only if `totalRemainingAtSource === 0 && totalInTransit === 0`. |

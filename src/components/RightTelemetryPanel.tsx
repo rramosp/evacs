@@ -48,11 +48,25 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
 }) => {
   const [minimalMode, setMinimalMode] = useState<boolean>(false);
 
-  const totalPopulation = sourceAreas.reduce((acc, s) => acc + s.population, 0);
+  const accountedTotalPopulation =
+    totalEvacuated + totalInTransit + totalRemainingAtSource;
+  const totalPopulation =
+    accountedTotalPopulation > 0
+      ? accountedTotalPopulation
+      : sourceAreas.reduce((acc, s) => acc + s.population, 0);
+
+  const isCompletelyEvacuated =
+    totalPopulation > 0 &&
+    totalRemainingAtSource === 0 &&
+    totalInTransit === 0 &&
+    totalEvacuated > 0;
+
   const progressPercent =
-    totalPopulation > 0
-      ? Math.min(100, Math.round((totalEvacuated / totalPopulation) * 100))
-      : 0;
+    totalPopulation === 0
+      ? 0
+      : isCompletelyEvacuated
+      ? 100
+      : Math.min(99, Math.floor((totalEvacuated / totalPopulation) * 100));
 
   const formatSimTime = (sec: number) => {
     const mins = Math.floor(sec / 60);
