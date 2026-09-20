@@ -17,11 +17,12 @@ Build a responsive, high-usability web User Interface (UI) backed by OpenStreetM
   2. Draw or edit **Source Areas** (evacuation zones), **Target Areas** (safe shelters/assembly points), **No-Go Areas** (hazards/blocked zones), and **Vehicle Fleets** (staging depots).
   3. Trigger **Compute Evacuation Routes** to calculate optimal paths from sources to targets while avoiding No-Go zones, respecting shelter capacities, and establishing specific **Pickup Locations (marked with blue squares)** on each Source Area for every route.
   4. Trigger **Run Simulation** to animate:
-     - Evacuees moving *within* each Source Area toward established Pickup Locations according to their behavioral profile (`obedient`, `autonomous`, `random`), causing the heatmap to become hotter around Pickup Locations as queues form.
+     - Evacuees moving *within* each Source Area toward established Pickup Locations according to their behavioral profile (`obedient`, `autonomous`, `random` via 2D Brownian motion), causing the heatmap to become hotter around Pickup Locations as queues form.
      - Vehicles arriving at Pickup Locations, boarding waiting evacuees, and departing for Target Shelters when **either 80% occupancy is reached OR 10 minutes of waiting time have elapsed** (whichever happens first, provided there is **at least 1 passenger** onboard).
+     - Whenever vehicles depart empty to pick up population, they **always follow one of the existing computed routes** (reversing the existing route polyline from Target Shelter to Pickup Location or following the computed approach corridor).
      - Progressive cooling of the Source Area heatmap over time as vehicles evacuate the population.
   5. **Pause & Dynamic Mid-Simulation Editing**:
-     - Operators may pause (`Stop simulation`) at any point to modify areas and vehicles (including changing population counts in Source Areas, disabling Target Areas, adding/removing No-Go zones, or adding/removing vehicles) under strict operational safety constraints.
+     - Operators may pause (`Pause simulation`) at any point to modify areas and vehicles (including changing population counts in Source Areas, disabling Target Areas, adding/removing No-Go zones, or adding/removing vehicles) under strict operational safety constraints.
      - Upon restarting (`Run simulation`), routes are dynamically recomputed for all remaining and new evacuees into enabled Target Areas, and any running vehicles currently carrying passengers are immediately routed to the **closest enabled Target Area** before transitioning to the newly recomputed routes.
 
 ---
@@ -37,7 +38,7 @@ Geographic zones requiring evacuation. The population within a Source Area **rem
 - **Behavioral Profile Distribution** (percentages summing to 100%):
   - **Obedient (`%`)**: Immediately head directly to the **closest Pickup Location** within the Source Area at `t = 0`.
   - **Autonomous (`%`)**: Wander along the **limits (perimeter boundary)** of the Source Area polygon until they stumble upon a Pickup Location.
-  - **Random (`%`)**: Wander randomly throughout the interior of the Source Area polygon until they come within **50 meters** of any Pickup Location, at which point they direct themselves straight to it.
+  - **Random (`%`)**: Diffuse inside the Source Area polygon following a true **2D Brownian motion (Wiener process)** with independent Gaussian displacements $(\Delta x, \Delta y) \sim \mathcal{N}(0, \sigma^2 \Delta t)$ at every simulation tick (reflecting off polygon boundaries) until they come within **50 meters** of any Pickup Location, at which point they direct themselves straight to it.
 - **Route Pickup Locations (Blue Squares)**: Specific `[lat, lng]` assembly points established on/within the Source Area polygon once routes are computed. Any evacuees arriving at a Pickup Location wait there in queue (`waitingPopulation`) until a vehicle boards them.
 
 ### 3.2 Evacuation Target Areas (Safe Zones)
@@ -57,7 +58,7 @@ Restricted or hazardous areas impassable for evacuation routing.
 - **CRUD Rules**: Can be freely added, modified, or removed while the simulation is paused.
 - **Routing Effect**: Any road network edge or segment intersecting a No-Go polygon is marked impassable (infinite weight / removed from routing graph).
 
-### 3.4 Evacuation Vehicle Fleets & Dual Departure Condition (80% Occupancy or 10-Minute Timeout)
+### 3.4 Evacuation Vehicle Fleets, Empty Return Routing & Dual Departure Condition
 Available public or private transport units managed by authorities, modeled as **Fleets / Staging Depots**:
 - **Name**: String identifier (e.g., `"STIB Bus Fleet Alpha"`).
 - **Vehicle Type**: Category (`Bus`, `Private Car`, `Shuttle`, etc.).
@@ -65,6 +66,8 @@ Available public or private transport units managed by authorities, modeled as *
 - **Unit Count**: Number of vehicles in this fleet (`Integer`).
 - **Capacity per Unit**: Passenger occupancy per vehicle (e.g., `50` for buses, `4` for cars).
 - **CRUD Rules**: Vehicles can be freely added, modified, or removed while the simulation is paused.
+- **Strict Empty Return / Approach Routing Rule**:
+  - Whenever a vehicle departs empty (`currentOccupancy === 0`) to pick up population — whether after offloading passengers at a Target Area, departing from a staging depot, or resuming after a mid-simulation edit — **it must always travel along one of the existing computed routes** (reversing the existing route polyline from Target Area back to Pickup Location, or following the computed road approach corridor), never cutting across straight-line chords.
 - **Dual Departure Rule (80% Occupancy OR 10 Minutes Waiting Time)**:
   - When a vehicle arrives at a Source Area Pickup Location (Blue Square), a waiting timer (`waitingAtPickupSeconds`) starts at `00:00` and the vehicle boards any waiting evacuees.
   - The vehicle waits at the Pickup Location until **whichever of the following two events happens first**:
@@ -88,7 +91,7 @@ When the user restarts (`Run simulation`) a paused simulation after modifying or
    - The routing engine automatically recomputes obstacle-avoiding evacuation routes to evacuate all remaining and newly added people in Source Areas into all active (non-disabled) Target Areas (including any newly added Target Areas).
 2. **Mid-Transit Loaded Vehicle Redirection**:
    - Any running vehicle that currently holds passengers (`currentOccupancy > 0`) is immediately routed from its current geographic position to the **closest active (non-disabled) Target Area** (avoiding all No-Go areas).
-   - Once that vehicle reaches the closest Target Area and offloads its passengers, it seamlessly transitions to follow the **newly recomputed evacuation routes** for all subsequent pickup/drop-off cycles.
+   - Once that vehicle reaches the closest Target Area and offloads its passengers, it seamlessly transitions to follow the **newly recomputed evacuation routes** (traveling empty along the existing route polyline back to its assigned Pickup Location).
 
 ---
 
@@ -123,7 +126,7 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 - **Execution Toolbar**:
   - `Compute Evacuation Routes`
   - `Run Simulation` / `Resume Simulation`
-  - `Stop Simulation` (Pauses simulation and unlocks entity editing)
+  - `Pause Simulation` (Pauses simulation and unlocks entity editing)
   - `Reset Simulation` (Resets time to `t = 0` and restores initial source area population)
   - Simulation Speed Selector (`1x`, `2x`, `5x`, `10x`)
 
@@ -194,3 +197,4 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 | **v1.2** | 2026-09-17 | Refined **Population Behavior & Vehicle Boarding Mechanics**: Evacuees remain inside their Source Area until picked up by a vehicle (`obedient` to closest pickup, `random` within 50m, `autonomous` along perimeter limits); heatmap glows hotter around pickup locations and cools down as vehicles evacuate people. |
 | **v1.3** | 2026-09-17 | Updated **Vehicle Departure Condition**: Vehicles waiting at a Pickup Location depart when **either** they reach **80% occupancy** **OR** they have been waiting **10 minutes** (`600` simulation seconds), **whichever happens first, provided there is at least 1 passenger onboard**. |
 | **v1.4** | 2026-09-19 | Added **Mid-Simulation Pause, Entity Modification Rules & Smart Restart Re-Routing**: (1) All area/vehicle edits require simulation to be paused; (2) Source Areas cannot be deleted if people still remain inside them; (3) Target Areas cannot be deleted, only **disabled** (`disabled: true`) so they receive no more people; (4) No-Go areas and vehicles can be added/removed while paused; (5) Restarting after modifications recomputes routes for all remaining and new people into enabled Target Areas, and routes any **running vehicles with passengers onboard directly to the closest enabled Target Area** before they follow the newly recomputed routes. |
+| **v1.5** | 2026-09-19 | Fixed two simulation dynamics: (1) **Empty Vehicle Return/Approach Routing**: Whenever vehicles depart empty to pick up population, they **always follow one of the existing computed routes** (reversing the existing route polyline from Target Area back to Pickup Location or following the computed approach corridor) rather than straight lines; (2) **2D Brownian Motion for `random` Population**: Replaced straight/smooth-drift movement for `random` population clusters with true stochastic **2D Brownian motion** (independent Gaussian random walk steps $d\mathbf{X}_t = \sigma \, d\mathbf{W}_t$ at every simulation tick) until coming within `50m` of a Pickup Location. |

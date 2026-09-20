@@ -79,6 +79,42 @@ export function interpolateAlongPolyline(
 }
 
 /**
+ * Build an empty approach path that strictly follows an existing route polyline
+ * from the vehicle's starting/current position along the route to the Pickup Location.
+ */
+function getEmptyApproachAlongExistingRoute(
+  route: ComputedRoute,
+  currentPos?: [number, number]
+): [number, number][] {
+  // Reversing route.coordinates goes from Target Area -> ... -> Pickup Location along the exact existing route
+  const reversedRoute = [...route.coordinates].reverse();
+  if (reversedRoute.length < 2) {
+    return [route.pickupLocation, route.pickupLocation];
+  }
+
+  if (!currentPos) {
+    return reversedRoute;
+  }
+
+  // Find the vertex on reversedRoute closest to currentPos so the vehicle stays strictly on the existing route
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < reversedRoute.length; i++) {
+    const d = turf.distance(
+      [currentPos[1], currentPos[0]],
+      [reversedRoute[i][1], reversedRoute[i][0]]
+    );
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+
+  const sliced = reversedRoute.slice(bestIdx);
+  return sliced.length >= 2 ? sliced : reversedRoute;
+}
+
+/**
  * Sample a point inside a polygon deterministically using Halton-like sequence
  */
 function samplePointInsidePolygon(
@@ -296,7 +332,8 @@ function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalClust
 }
 
 /**
- * Initialize full simulation state from scratch
+ * Initialize full simulation state from scratch.
+ * Every empty vehicle departing to pick up population strictly follows the existing route polyline!
  */
 export function initializeSimulationState(
   routes: ComputedRoute[],
@@ -319,7 +356,7 @@ export function initializeSimulationState(
 
   const clusters = buildClustersForSources(sourceAreas);
 
-  // Initialize Vehicle Units cycling to Pickups and Targets
+  // Initialize Vehicle Units cycling along the existing computed routes to Pickups and Targets
   const vehicles: ActiveVehicleUnit[] = [];
 
   routes.forEach((route, rIdx) => {
@@ -330,11 +367,8 @@ export function initializeSimulationState(
       vehicleFleets.find((f) => f.id === route.vehicleFleetId) ||
       vehicleFleets[rIdx % Math.max(1, vehicleFleets.length)];
 
-    const approachCoords =
-      route.approachCoordinates && route.approachCoordinates.length >= 2
-        ? route.approachCoordinates
-        : [fleet ? fleet.location : route.pickupLocation, route.pickupLocation];
-
+    // Empty vehicles departing to pick up population ALWAYS follow the existing route polyline!
+    const approachCoords = getEmptyApproachAlongExistingRoute(route);
     const evacCoords =
       route.coordinates && route.coordinates.length >= 2
         ? route.coordinates
@@ -411,8 +445,8 @@ export function initializeSimulationState(
  * Reconcile simulation state upon restarting after mid-simulation pause & topology/fleet edits:
  * - Rebuilds pickup states & internal clusters for remaining/modified/new Source Area populations
  * - Routes running vehicles with passengers (`currentOccupancy > 0`) immediately to the CLOSEST active Target Area,
- *   and configures them to follow the newly recomputed routes right after offloading
- * - Assigns empty vehicles & newly added vehicle fleets to the newly recomputed routes
+ *   and configures them to follow an existing route connected to that Target Area right after offloading
+ * - Ensures all empty vehicles (`currentOccupancy === 0`) & newly added fleets strictly follow existing routes to pick up population
  */
 export function reconcileSimulationOnRestart(
   newRoutes: ComputedRoute[],
@@ -446,23 +480,18 @@ export function reconcileSimulationOnRestart(
   const clusters = buildClustersForSources(sourceAreas);
 
   // 3. Reconcile vehicles:
-  // Filter existing vehicles whose fleet still exists in `vehicleFleets`
   const activeFleetIds = new Set(vehicleFleets.map((f) => f.id));
   const survivingVehicles = existingVehicles.filter((v) => activeFleetIds.has(v.fleetId));
 
   const updatedVehicles: ActiveVehicleUnit[] = [];
 
   survivingVehicles.forEach((veh, idx) => {
-    const nextRoute = newRoutes[idx % Math.max(1, newRoutes.length)];
-    const nextPickup = nextRoute
-      ? pickupStates.find((p) => p.routeId === nextRoute.id)
-      : undefined;
-
-    if (!nextRoute || !nextPickup) return;
+    const defaultNextRoute = newRoutes[idx % Math.max(1, newRoutes.length)];
+    if (!defaultNextRoute) return;
 
     // CASE A: Running or waiting vehicle carrying passengers (`currentOccupancy > 0`)
     // -> Immediately route from its current position to the CLOSEST active Target Area,
-    //    then follow the newly recomputed route after offloading!
+    //    then follow an existing route connected to that Target Area right after offloading!
     if (veh.currentOccupancy > 0) {
       const direct = directRoutesToClosestTarget[veh.id];
       const closestTarget = direct?.target || targetAreas.find((t) => !t.disabled) || targetAreas[0];
@@ -472,8 +501,18 @@ export function reconcileSimulationOnRestart(
           : [veh.currentPosition, getPolygonCentroid(closestTarget.polygon)];
       const directDist = buildCumulativeDistances(directCoords);
 
+      // Select an existing route connected to `closestTarget` so after offloading at `closestTarget`,
+      // the empty vehicle follows that existing route polyline straight back to its Pickup Location!
+      const connectedRoute =
+        newRoutes.find((r) => r.targetId === closestTarget.id) || defaultNextRoute;
+      const connectedPickup =
+        pickupStates.find((p) => p.routeId === connectedRoute.id) ||
+        pickupStates.find((p) => p.routeId === defaultNextRoute.id);
+
+      if (!connectedPickup) return;
+
       newLogs.push(
-        `Mid-sim reroute: ${veh.fleetName} (${veh.currentOccupancy} pax onboard) diverted from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest active shelter "${closestTarget.name}", then joining ${nextRoute.pickupLabel}.`
+        `Mid-sim reroute: ${veh.fleetName} (${veh.currentOccupancy} pax onboard) diverted from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest active shelter "${closestTarget.name}", then following existing route ${connectedRoute.pickupLabel}.`
       );
 
       updatedVehicles.push({
@@ -485,33 +524,40 @@ export function reconcileSimulationOnRestart(
         targetName: closestTarget.name,
         evacCoords: directCoords,
         evacCumulative: directDist.cumulative,
-        assignedRouteId: nextRoute.id,
-        assignedPickupId: nextPickup.id,
-        sourceId: nextRoute.sourceId,
-        postOffloadEvacCoords: nextRoute.coordinates,
-        postOffloadTargetId: nextRoute.targetId,
-        postOffloadTargetName: nextRoute.targetName,
+        assignedRouteId: connectedRoute.id,
+        assignedPickupId: connectedPickup.id,
+        sourceId: connectedRoute.sourceId,
+        postOffloadEvacCoords: connectedRoute.coordinates,
+        postOffloadTargetId: connectedRoute.targetId,
+        postOffloadTargetName: connectedRoute.targetName,
         departureDelaySeconds: 0,
       });
     } else {
-      // CASE B: Empty vehicle (`currentOccupancy === 0`) -> dispatch from current position to newly assigned Pickup Location
-      const approachCoords: [number, number][] = [veh.currentPosition, nextPickup.location];
+      // CASE B: Empty vehicle (`currentOccupancy === 0`) -> MUST follow an existing route to pick up population!
+      const nextPickup = pickupStates.find((p) => p.routeId === defaultNextRoute.id);
+      if (!nextPickup) return;
+
+      const approachCoords = getEmptyApproachAlongExistingRoute(
+        defaultNextRoute,
+        veh.currentPosition
+      );
       const approachDist = buildCumulativeDistances(approachCoords);
-      const evacDist = buildCumulativeDistances(nextRoute.coordinates);
+      const evacDist = buildCumulativeDistances(defaultNextRoute.coordinates);
 
       updatedVehicles.push({
         ...veh,
         status: 'to_pickup',
         waitingAtPickupSeconds: 0,
         progressMeters: 0,
-        assignedRouteId: nextRoute.id,
+        currentPosition: approachCoords[0],
+        assignedRouteId: defaultNextRoute.id,
         assignedPickupId: nextPickup.id,
-        sourceId: nextRoute.sourceId,
-        targetId: nextRoute.targetId,
-        targetName: nextRoute.targetName,
+        sourceId: defaultNextRoute.sourceId,
+        targetId: defaultNextRoute.targetId,
+        targetName: defaultNextRoute.targetName,
         approachCoords,
         approachCumulative: approachDist.cumulative,
-        evacCoords: nextRoute.coordinates,
+        evacCoords: defaultNextRoute.coordinates,
         evacCumulative: evacDist.cumulative,
         postOffloadEvacCoords: undefined,
         postOffloadTargetId: undefined,
@@ -521,7 +567,7 @@ export function reconcileSimulationOnRestart(
     }
   });
 
-  // 4. Spawn vehicles for any NEWLY ADDED fleets not yet represented in `survivingVehicles`
+  // 4. Spawn vehicles for any NEWLY ADDED fleets — following existing routes to pick up population
   const representedFleetIds = new Set(survivingVehicles.map((v) => v.fleetId));
   const newFleets = vehicleFleets.filter((f) => !representedFleetIds.has(f.id));
 
@@ -530,7 +576,7 @@ export function reconcileSimulationOnRestart(
     const pickup = route ? pickupStates.find((p) => p.routeId === route.id) : undefined;
     if (!route || !pickup) return;
 
-    const approachCoords: [number, number][] = [fleet.location, pickup.location];
+    const approachCoords = getEmptyApproachAlongExistingRoute(route);
     const approachDist = buildCumulativeDistances(approachCoords);
     const evacDist = buildCumulativeDistances(route.coordinates);
 
@@ -555,7 +601,7 @@ export function reconcileSimulationOnRestart(
         targetName: route.targetName,
         status: 'to_pickup',
         waitingAtPickupSeconds: 0,
-        currentPosition: fleet.location,
+        currentPosition: approachCoords[0],
         progressMeters: 0,
         speedMps: 18.0,
         approachCoords,
@@ -567,7 +613,7 @@ export function reconcileSimulationOnRestart(
     }
 
     newLogs.push(
-      `Deployed new fleet "${fleet.name}" (${fleet.count} × ${fleet.type}) to corridor ${route.pickupLabel} -> ${route.targetName}.`
+      `Deployed new fleet "${fleet.name}" (${fleet.count} × ${fleet.type}) along existing corridor ${route.pickupLabel} -> ${route.targetName}.`
     );
   });
 
@@ -607,13 +653,15 @@ export function reconcileSimulationOnRestart(
 /**
  * Step simulation forward by `deltaSimSeconds` implementing:
  * 1. Obedient population moving immediately to closest pickup location
- * 2. Random population wandering inside Source Area until within 50m of a pickup location
+ * 2. Random population diffusing inside Source Area via true 2D Brownian motion (independent Gaussian random walk)
+ *    until within 50m of a pickup location, at which point they direct themselves straight to it
  * 3. Autonomous population wandering along Source Area perimeter limits until stumbling on a pickup location
  * 4. Vehicles waiting at pickup locations until EITHER:
  *    - Occupancy reaches >= 80%, OR
  *    - Waiting time reaches 10 minutes (600s)
  *    Whichever happens first, departing to Target Area provided there is at least 1 passenger onboard!
- * 5. Dynamic heatmap updating (hotter around pickup locations as queues build, cooler over time as source empties)
+ * 5. When vehicles depart empty to pick up population, they ALWAYS follow the existing computed route polyline!
+ * 6. Dynamic heatmap updating (hotter around pickup locations as queues build, cooler over time as source empties)
  */
 export function stepSimulationState(
   prevState: SimulationStateSnapshot,
@@ -690,8 +738,9 @@ export function stepSimulationState(
       };
     }
 
-    // --- BEHAVIOR 2: RANDOM ---
-    // Wander around the source area until within 50m of ANY pickup point, then direct straight to it
+    // --- BEHAVIOR 2: RANDOM (2D BROWNIAN MOTION) ---
+    // Diffuse via true stochastic 2D Brownian motion (independent zero-mean Gaussian displacements at every tick)
+    // until within 50m of ANY pickup point, then direct straight to it!
     if (cluster.behavior === 'random') {
       if (closest.distMeters <= 50.0) {
         const stepDist = walkSpeedMetersPerSec * 1.15 * deltaSimSeconds;
@@ -707,22 +756,39 @@ export function stepSimulationState(
           targetPickupId: closest.pickup.id,
         };
       } else {
-        const stepDeg = (walkSpeedMetersPerSec * 0.65 * deltaSimSeconds) / 111000;
-        let heading = cluster.randomHeadingRad + Math.sin(elapsedSimSeconds * 0.4 + cluster.headcount) * 0.28;
-        let candidateLat = cluster.position[0] + Math.sin(heading) * stepDeg;
-        let candidateLng = cluster.position[1] + Math.cos(heading) * stepDeg;
+        // Box-Muller transform for independent standard normal N(0, 1) Gaussian variates
+        const u1 = Math.max(1e-7, Math.random());
+        const u2 = Math.random();
+        const mag = Math.sqrt(-2.0 * Math.log(u1));
+        const zNorth = mag * Math.cos(2.0 * Math.PI * u2);
+        const zEast = mag * Math.sin(2.0 * Math.PI * u2);
 
+        // Wiener process scaling: dX = sigma * sqrt(dt) * Z
+        const sigmaMeters = 10.5;
+        const stepScaleMeters = sigmaMeters * Math.sqrt(Math.max(0.1, deltaSimSeconds));
+        const dNorthMeters = zNorth * stepScaleMeters;
+        const dEastMeters = zEast * stepScaleMeters;
+
+        const metersPerDegLat = 111320;
+        const metersPerDegLng =
+          111320 * Math.cos((cluster.position[0] * Math.PI) / 180);
+
+        const dLat = dNorthMeters / metersPerDegLat;
+        const dLng = dEastMeters / Math.max(1000, metersPerDegLng);
+
+        let candidateLat = cluster.position[0] + dLat;
+        let candidateLng = cluster.position[1] + dLng;
+
+        // Reflect Brownian step back inside polygon if it crosses the boundary (without persistent straight-line drift)
         if (src && src.polygon.length >= 3) {
           try {
             const poly = toTurfPolygon(src.polygon);
             if (!turf.booleanPointInPolygon(turf.point([candidateLng, candidateLat]), poly)) {
               const centroid = getPolygonCentroid(src.polygon);
-              heading = Math.atan2(
-                centroid[0] - cluster.position[0],
-                centroid[1] - cluster.position[1]
-              );
-              candidateLat = cluster.position[0] + Math.sin(heading) * stepDeg;
-              candidateLng = cluster.position[1] + Math.cos(heading) * stepDeg;
+              candidateLat =
+                cluster.position[0] - dLat * 0.65 + (centroid[0] - cluster.position[0]) * 0.08;
+              candidateLng =
+                cluster.position[1] - dLng * 0.65 + (centroid[1] - cluster.position[1]) * 0.08;
             }
           } catch {
             // Ignore turf error
@@ -732,7 +798,6 @@ export function stepSimulationState(
         return {
           ...cluster,
           position: [candidateLat, candidateLng] as [number, number],
-          randomHeadingRad: heading,
         };
       }
     }
@@ -815,7 +880,7 @@ export function stepSimulationState(
     const pickup = pickupMap.get(veh.assignedPickupId);
     if (!pickup) return veh;
 
-    // STATE A: Driving from Depot / Shelter TO Pickup Location (Blue Square)
+    // STATE A: Driving empty along existing route TO Pickup Location (Blue Square)
     if (veh.status === 'to_pickup') {
       const totalApproachDist =
         veh.approachCumulative[veh.approachCumulative.length - 1] || 1;
@@ -932,21 +997,23 @@ export function stepSimulationState(
           `${veh.fleetName} arrived at ${veh.targetName}, offloading ${veh.currentOccupancy.toLocaleString()} evacuees safely.`
         );
 
-        const arrivalPos = veh.evacCoords[veh.evacCoords.length - 1];
-
         // If this vehicle was diverted mid-simulation to the closest Target Area and has a post-offload recomputed route,
-        // transition it now to follow the newly recomputed route!
+        // transition it now to follow that existing route!
         const nextEvacCoords = veh.postOffloadEvacCoords || veh.evacCoords;
         const nextTargetId = veh.postOffloadTargetId || veh.targetId;
         const nextTargetName = veh.postOffloadTargetName || veh.targetName;
         const nextEvacDist = buildCumulativeDistances(nextEvacCoords);
+
+        // Return trip to pick up population ALWAYS follows the existing route polyline in reverse!
+        const returnCoords: [number, number][] = [...nextEvacCoords].reverse();
+        const returnDist = buildCumulativeDistances(returnCoords);
 
         const offloadedVeh: ActiveVehicleUnit = {
           ...veh,
           currentOccupancy: 0,
           waitingAtPickupSeconds: 0,
           progressMeters: 0,
-          currentPosition: arrivalPos,
+          currentPosition: returnCoords[0],
           evacCoords: nextEvacCoords,
           evacCumulative: nextEvacDist.cumulative,
           targetId: nextTargetId,
@@ -958,8 +1025,6 @@ export function stepSimulationState(
 
         const remainingInSource = getUnboardedInSource(veh.sourceId);
         if (remainingInSource > 0) {
-          const returnCoords: [number, number][] = [arrivalPos, pickup.location];
-          const returnDist = buildCumulativeDistances(returnCoords);
           return {
             ...offloadedVeh,
             status: 'to_pickup' as const,

@@ -387,15 +387,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       const color = route.behaviorType === 'obedient' ? '#38bdf8' : '#fbbf24';
       const weight = 3.5;
 
-      // Render approach path from depot to Blue Square Pickup Location (subtle dashed purple)
-      if (route.approachCoordinates && route.approachCoordinates.length >= 2) {
-        L.polyline(route.approachCoordinates, {
-          color: '#a855f7',
-          weight: 2,
-          opacity: 0.65,
-          dashArray: '5, 5',
-        }).addTo(routesGroup);
-      }
 
       // Outer casing for main evacuation route
       L.polyline(route.coordinates, {
