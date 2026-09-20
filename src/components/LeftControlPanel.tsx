@@ -33,6 +33,8 @@ import {
   Satellite,
   Eye,
   EyeOff,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 
 interface LeftControlPanelProps {
@@ -145,6 +147,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onChangeGlofasOverlayOpacity,
 }) => {
   const [activeTab, setActiveTab] = useState<'sources' | 'targets' | 'nogos' | 'vehicles'>('sources');
+  const [isExecutionCollapsed, setIsExecutionCollapsed] = useState<boolean>(false);
+  const [isSpaceDataCollapsed, setIsSpaceDataCollapsed] = useState<boolean>(false);
 
   // Editing state for inline modal/form
   const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
@@ -335,73 +339,103 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         </select>
       </section>
 
-      {/* Primary Action & Simulation Execution Controls */}
+      {/* Primary Action & Simulation Execution Controls (Collapsible) */}
       <section className="panel-section execution-controls-section">
-        <div className="section-label">EXECUTION & SIMULATION</div>
-
         <button
-          id="btn-compute-routes"
+          id="toggle-execution-section"
           type="button"
-          className="btn-primary-action compute-btn"
-          onClick={onComputeRoutes}
-          disabled={isComputingRoutes || isSimulating || sourceAreas.length === 0 || targetAreas.length === 0}
+          aria-expanded={!isExecutionCollapsed}
+          onClick={() => setIsExecutionCollapsed((prev) => !prev)}
+          style={{
+            width: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            marginBottom: isExecutionCollapsed ? 0 : '8px',
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
         >
-          <Route size={16} />
-          <span>
-            {isComputingRoutes ? 'Computing OSRM Routes...' : 'Compute evacuation routes'}
+          <span className="section-label" style={{ marginBottom: 0 }}>
+            EXECUTION & SIMULATION
           </span>
+          {isExecutionCollapsed ? (
+            <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+          ) : (
+            <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+          )}
         </button>
 
-        <div className="sim-buttons-grid">
-          <button
-            id="btn-run-simulation"
-            type="button"
-            className={`btn-sim-action run-btn ${isSimulating ? 'active-running' : ''}`}
-            onClick={onRunSimulation}
-            disabled={(!hasComputedRoutes && !isSimulating) || isComputingRoutes}
-            title={!hasComputedRoutes ? 'Compute evacuation routes first' : 'Run / Resume simulation'}
-          >
-            <Play size={15} />
-            <span>Run simulation</span>
-          </button>
+        {!isExecutionCollapsed && (
+          <>
+            <button
+              id="btn-compute-routes"
+              type="button"
+              className="btn-primary-action compute-btn"
+              onClick={onComputeRoutes}
+              disabled={isComputingRoutes || isSimulating || sourceAreas.length === 0 || targetAreas.length === 0}
+            >
+              <Route size={16} />
+              <span>
+                {isComputingRoutes ? 'Computing OSRM Routes...' : 'Compute evacuation routes'}
+              </span>
+            </button>
 
-          <button
-            id="btn-stop-simulation"
-            type="button"
-            className="btn-sim-action stop-btn"
-            onClick={onStopSimulation}
-            disabled={!isSimulating}
-          >
-            <Pause size={15} />
-            <span>Pause simulation</span>
-          </button>
-
-          <button
-            id="btn-reset-simulation"
-            type="button"
-            className="btn-sim-action reset-btn"
-            onClick={onResetSimulation}
-          >
-            <RotateCcw size={15} />
-            <span>Reset simulation</span>
-          </button>
-        </div>
-
-        <div className="sim-speed-bar">
-          <span className="speed-label">Playback Speed:</span>
-          <div className="speed-pills">
-            {[1, 2, 5, 10].map((spd) => (
+            <div className="sim-buttons-grid">
               <button
-                key={spd}
+                id="btn-run-simulation"
                 type="button"
-                className={`speed-pill ${simSpeed === spd ? 'active' : ''}`}
-                onClick={() => onChangeSimSpeed(spd)}
+                className={`btn-sim-action run-btn ${isSimulating ? 'active-running' : ''}`}
+                onClick={onRunSimulation}
+                disabled={(!hasComputedRoutes && !isSimulating) || isComputingRoutes}
+                title={!hasComputedRoutes ? 'Compute evacuation routes first' : 'Run / Resume simulation'}
               >
-                {spd}x
+                <Play size={15} />
+                <span>Run simulation</span>
               </button>
-            ))}
-          </div>
-        </div>
+
+              <button
+                id="btn-stop-simulation"
+                type="button"
+                className="btn-sim-action stop-btn"
+                onClick={onStopSimulation}
+                disabled={!isSimulating}
+              >
+                <Pause size={15} />
+                <span>Pause simulation</span>
+              </button>
+
+              <button
+                id="btn-reset-simulation"
+                type="button"
+                className="btn-sim-action reset-btn"
+                onClick={onResetSimulation}
+              >
+                <RotateCcw size={15} />
+                <span>Reset simulation</span>
+              </button>
+            </div>
+
+            <div className="sim-speed-bar">
+              <span className="speed-label">Playback Speed:</span>
+              <div className="speed-pills">
+                {[1, 2, 5, 10].map((spd) => (
+                  <button
+                    key={spd}
+                    type="button"
+                    className={`speed-pill ${simSpeed === spd ? 'active' : ''}`}
+                    onClick={() => onChangeSimSpeed(spd)}
+                  >
+                    {spd}x
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
       </section>
 
       {/* Pause Requirement Notice Banner when Simulation is Active */}
@@ -1250,11 +1284,39 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         )}
       </div>
 
-      {/* Space Data Section (Placed below all other sections on the left panel) */}
+      {/* Space Data Section (Placed below all other sections on the left panel; Collapsible) */}
       <section className="panel-section space-data-section">
-        <div className="section-label">SPACE DATA</div>
+        <button
+          id="toggle-space-data-section"
+          type="button"
+          aria-expanded={!isSpaceDataCollapsed}
+          onClick={() => setIsSpaceDataCollapsed((prev) => !prev)}
+          style={{
+            width: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            marginBottom: isSpaceDataCollapsed ? 0 : '8px',
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          <span className="section-label" style={{ marginBottom: 0 }}>
+            SPACE DATA
+          </span>
+          {isSpaceDataCollapsed ? (
+            <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+          ) : (
+            <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+          )}
+        </button>
 
-        {/* Text box at the top of the Space Data panel with the current date */}
+        {!isSpaceDataCollapsed && (
+          <>
+            {/* Text box at the top of the Space Data panel with the current date */}
         <div
           style={{
             display: 'flex',
@@ -1749,6 +1811,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             </div>
           )}
         </div>
+          </>
+        )}
       </section>
     </aside>
   );
