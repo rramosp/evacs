@@ -152,3 +152,46 @@ export type ActiveDrawMode =
   | { type: 'vehicle'; point: [number, number] | null };
 
 export type PresetScenarioId = 'brussels' | 'paris' | 'custom';
+
+export type Sentinel2AggregationPeriod =
+  | 'last week'
+  | 'last 2 weeks'
+  | 'last month'
+  | 'last three months'
+  | 'last six months'
+  | 'last year';
+
+export interface Sentinel2LayerState {
+  active: boolean;
+  visible: boolean;
+  tileUrl: string | null;
+  imageCount: number;
+  poi: [number, number] | null;
+  currentDate: string;
+  aggregationPeriod: Sentinel2AggregationPeriod;
+  visParams: {
+    bands: string[];
+    min: number;
+    max: number;
+    gamma: number;
+  };
+  collection: string;
+  dateRange: [string, string];
+  opacity: number;
+}
+
+export interface Sentinel1LayerState {
+  active: boolean;
+  visible: boolean;
+  tileUrl: string | null;
+  imageCount: number;
+  poi: [number, number] | null;
+  visParams: {
+    bands: string[];
+    min: number[];
+    max: number[];
+  };
+  collection: string;
+  dateRange: [string, string];
+  opacity: number;
+}

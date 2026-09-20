@@ -7,6 +7,9 @@ import {
   PresetScenarioId,
   ActiveDrawMode,
   VehicleType,
+  Sentinel2LayerState,
+  Sentinel1LayerState,
+  Sentinel2AggregationPeriod,
 } from '../types/evacuation';
 import {
   Route,
@@ -26,6 +29,9 @@ import {
   Ban,
   CheckCircle2,
   Lock,
+  Satellite,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 interface LeftControlPanelProps {
@@ -64,6 +70,18 @@ interface LeftControlPanelProps {
   onClearPendingGeometry: () => void;
   selectedEntityId: string | null;
   onSelectEntity: (id: string | null) => void;
+  sentinel2Layer: Sentinel2LayerState;
+  isLoadingSentinel2: boolean;
+  onFetchSentinel2Data: () => void;
+  onChangeSentinel2CurrentDate: (date: string) => void;
+  onChangeSentinel2AggregationPeriod: (period: Sentinel2AggregationPeriod) => void;
+  onToggleSentinel2Visibility: () => void;
+  onChangeSentinel2Opacity: (opacity: number) => void;
+  sentinel1Layer: Sentinel1LayerState;
+  isLoadingSentinel1: boolean;
+  onFetchSentinel1Data: () => void;
+  onToggleSentinel1Visibility: () => void;
+  onChangeSentinel1Opacity: (opacity: number) => void;
 }
 
 export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
@@ -102,6 +120,18 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onClearPendingGeometry,
   selectedEntityId,
   onSelectEntity,
+  sentinel2Layer,
+  isLoadingSentinel2,
+  onFetchSentinel2Data,
+  onChangeSentinel2CurrentDate,
+  onChangeSentinel2AggregationPeriod,
+  onToggleSentinel2Visibility,
+  onChangeSentinel2Opacity,
+  sentinel1Layer,
+  isLoadingSentinel1,
+  onFetchSentinel1Data,
+  onToggleSentinel1Visibility,
+  onChangeSentinel1Opacity,
 }) => {
   const [activeTab, setActiveTab] = useState<'sources' | 'targets' | 'nogos' | 'vehicles'>('sources');
 
@@ -1208,6 +1238,304 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           </div>
         )}
       </div>
+
+      {/* Space Data Section (Placed below all other sections on the left panel) */}
+      <section className="panel-section space-data-section">
+        <div className="section-label">SPACE DATA</div>
+
+        {/* Text box at the top of the Space Data panel with the current date */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '8px',
+            marginBottom: '8px',
+            fontSize: '0.74rem',
+            color: '#cbd5e1',
+          }}
+        >
+          <label htmlFor="space-data-current-date" style={{ fontWeight: 500, whiteSpace: 'nowrap' }}>
+            Current Date:
+          </label>
+          <input
+            id="space-data-current-date"
+            type="text"
+            value={sentinel2Layer.currentDate}
+            onChange={(e) => onChangeSentinel2CurrentDate(e.target.value)}
+            style={{
+              flex: 1,
+              padding: '4px 8px',
+              borderRadius: '5px',
+              border: '1px solid rgba(148, 163, 184, 0.35)',
+              background: 'rgba(15, 23, 42, 0.85)',
+              color: '#f8fafc',
+              fontSize: '0.75rem',
+              fontFamily: 'monospace',
+              textAlign: 'center',
+            }}
+          />
+        </div>
+
+        {/* Aggregation period dropdown selector */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '8px',
+            marginBottom: '8px',
+            fontSize: '0.74rem',
+            color: '#cbd5e1',
+          }}
+        >
+          <label
+            htmlFor="space-data-aggregation-period"
+            style={{ fontWeight: 500, whiteSpace: 'nowrap' }}
+          >
+            aggregation period:
+          </label>
+          <select
+            id="space-data-aggregation-period"
+            className="tactical-select"
+            value={sentinel2Layer.aggregationPeriod}
+            onChange={(e) =>
+              onChangeSentinel2AggregationPeriod(e.target.value as Sentinel2AggregationPeriod)
+            }
+            style={{
+              flex: 1,
+              padding: '4px 6px',
+              fontSize: '0.74rem',
+            }}
+          >
+            <option value="last week">last week</option>
+            <option value="last 2 weeks">last 2 weeks</option>
+            <option value="last month">last month</option>
+            <option value="last three months">last three months</option>
+            <option value="last six months">last six months</option>
+            <option value="last year">last year</option>
+          </select>
+        </div>
+
+        {/* Smaller Sentinel 2 Optical Data button */}
+        <button
+          id="btn-sentinel2-optical-data"
+          type="button"
+          className="btn-primary-action"
+          style={{
+            padding: '6px 10px',
+            fontSize: '0.76rem',
+            minHeight: '30px',
+            background: sentinel2Layer.active && sentinel2Layer.visible
+              ? 'linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%)'
+              : 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+            border: sentinel2Layer.active && sentinel2Layer.visible
+              ? '1px solid #38bdf8'
+              : '1px solid rgba(56, 189, 248, 0.35)',
+            color: '#f8fafc',
+          }}
+          onClick={onFetchSentinel2Data}
+          disabled={isLoadingSentinel2}
+        >
+          <Satellite size={14} style={{ color: '#38bdf8' }} />
+          <span>
+            {isLoadingSentinel2
+              ? 'Calling Google Earth Engine...'
+              : 'Sentinel 2 Optical Data'}
+          </span>
+        </button>
+
+        {/* Sentinel 1 SAR Data button below Sentinel 2 */}
+        <button
+          id="btn-sentinel1-sar-data"
+          type="button"
+          className="btn-primary-action"
+          style={{
+            marginTop: '6px',
+            padding: '6px 10px',
+            fontSize: '0.76rem',
+            minHeight: '30px',
+            background: sentinel1Layer.active && sentinel1Layer.visible
+              ? 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)'
+              : 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+            border: sentinel1Layer.active && sentinel1Layer.visible
+              ? '1px solid #a78bfa'
+              : '1px solid rgba(167, 139, 250, 0.35)',
+            color: '#f8fafc',
+          }}
+          onClick={onFetchSentinel1Data}
+          disabled={isLoadingSentinel1}
+        >
+          <Satellite size={14} style={{ color: '#a78bfa' }} />
+          <span>
+            {isLoadingSentinel1
+              ? 'Calling Google Earth Engine...'
+              : 'Sentinel 1 SAR Data'}
+          </span>
+        </button>
+
+        {sentinel2Layer.active && (
+          <div
+            style={{
+              marginTop: '8px',
+              padding: '7px 9px',
+              borderRadius: '6px',
+              background: 'rgba(15, 23, 42, 0.72)',
+              border: '1px solid rgba(56, 189, 248, 0.28)',
+              fontSize: '0.71rem',
+              color: '#cbd5e1',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '5px',
+              }}
+            >
+              <span style={{ color: '#38bdf8', fontWeight: 600 }}>
+                COPERNICUS/S2_SR_HARMONIZED
+              </span>
+              <button
+                type="button"
+                onClick={onToggleSentinel2Visibility}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  border: '1px solid rgba(148, 163, 184, 0.3)',
+                  background: sentinel2Layer.visible
+                    ? 'rgba(14, 165, 233, 0.2)'
+                    : 'rgba(51, 65, 85, 0.5)',
+                  color: sentinel2Layer.visible ? '#7dd3fc' : '#94a3b8',
+                  fontSize: '0.66rem',
+                  cursor: 'pointer',
+                }}
+              >
+                {sentinel2Layer.visible ? <Eye size={11} /> : <EyeOff size={11} />}
+                <span>{sentinel2Layer.visible ? 'Visible' : 'Hidden'}</span>
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '0.68rem' }}>
+              <div>
+                <strong>Dates:</strong> {sentinel2Layer.dateRange[0]} &rarr; {sentinel2Layer.dateRange[1]}
+              </div>
+              <div>
+                <strong>Composite:</strong> Median ({sentinel2Layer.imageCount} scenes, B4/B3/B2 RGB)
+              </div>
+            </div>
+
+            <div
+              style={{
+                marginTop: '5px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                fontSize: '0.66rem',
+              }}
+            >
+              <span>Opacity:</span>
+              <input
+                type="range"
+                min={0.15}
+                max={1}
+                step={0.05}
+                value={sentinel2Layer.opacity}
+                onChange={(e) => onChangeSentinel2Opacity(Number(e.target.value))}
+                style={{ flex: 1, accentColor: '#38bdf8', cursor: 'pointer' }}
+              />
+              <span style={{ minWidth: '28px', textAlign: 'right' }}>
+                {Math.round(sentinel2Layer.opacity * 100)}%
+              </span>
+            </div>
+          </div>
+        )}
+
+        {sentinel1Layer.active && (
+          <div
+            style={{
+              marginTop: '8px',
+              padding: '7px 9px',
+              borderRadius: '6px',
+              background: 'rgba(15, 23, 42, 0.72)',
+              border: '1px solid rgba(167, 139, 250, 0.3)',
+              fontSize: '0.71rem',
+              color: '#cbd5e1',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '5px',
+              }}
+            >
+              <span style={{ color: '#a78bfa', fontWeight: 600 }}>
+                COPERNICUS/S1_GRD
+              </span>
+              <button
+                type="button"
+                onClick={onToggleSentinel1Visibility}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  border: '1px solid rgba(148, 163, 184, 0.3)',
+                  background: sentinel1Layer.visible
+                    ? 'rgba(139, 92, 246, 0.22)'
+                    : 'rgba(51, 65, 85, 0.5)',
+                  color: sentinel1Layer.visible ? '#c4b5fd' : '#94a3b8',
+                  fontSize: '0.66rem',
+                  cursor: 'pointer',
+                }}
+              >
+                {sentinel1Layer.visible ? <Eye size={11} /> : <EyeOff size={11} />}
+                <span>{sentinel1Layer.visible ? 'Visible' : 'Hidden'}</span>
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '0.68rem' }}>
+              <div>
+                <strong>Dates:</strong> {sentinel1Layer.dateRange[0]} &rarr; {sentinel1Layer.dateRange[1]}
+              </div>
+              <div>
+                <strong>Composite:</strong> False Color ({sentinel1Layer.imageCount} scenes, VV / VH / VV&divide;VH)
+              </div>
+            </div>
+
+            <div
+              style={{
+                marginTop: '5px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                fontSize: '0.66rem',
+              }}
+            >
+              <span>Opacity:</span>
+              <input
+                type="range"
+                min={0.15}
+                max={1}
+                step={0.05}
+                value={sentinel1Layer.opacity}
+                onChange={(e) => onChangeSentinel1Opacity(Number(e.target.value))}
+                style={{ flex: 1, accentColor: '#a78bfa', cursor: 'pointer' }}
+              />
+              <span style={{ minWidth: '28px', textAlign: 'right' }}>
+                {Math.round(sentinel1Layer.opacity * 100)}%
+              </span>
+            </div>
+          </div>
+        )}
+      </section>
     </aside>
   );
 };

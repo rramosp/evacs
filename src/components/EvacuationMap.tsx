@@ -12,6 +12,8 @@ import {
   SourceInternalCluster,
   HeatmapPoint,
   ActiveDrawMode,
+  Sentinel2LayerState,
+  Sentinel1LayerState,
 } from '../types/evacuation';
 import { getPolygonCentroid } from '../services/routingEngine';
 import { formatMMSS } from '../services/simulationEngine';
@@ -62,6 +64,9 @@ interface EvacuationMapProps {
   onFinishPlacingVehiclePoint: (point: [number, number]) => void;
   selectedEntityId: string | null;
   onSelectEntity: (id: string | null) => void;
+  sentinel2Layer?: Sentinel2LayerState;
+  sentinel1Layer?: Sentinel1LayerState;
+  onMapViewportChange?: (center: [number, number]) => void;
 }
 
 export const EvacuationMap: React.FC<EvacuationMapProps> = ({
@@ -83,10 +88,15 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   onFinishPlacingVehiclePoint,
   selectedEntityId,
   onSelectEntity,
+  sentinel2Layer,
+  sentinel1Layer,
+  onMapViewportChange,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const sentinel2TileLayerRef = useRef<L.TileLayer | null>(null);
+  const sentinel1TileLayerRef = useRef<L.TileLayer | null>(null);
 
   // Layer groups
   const polygonsLayerGroupRef = useRef<L.LayerGroup | null>(null);
@@ -112,6 +122,11 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   useEffect(() => {
     activeDrawModeRef.current = activeDrawMode;
   }, [activeDrawMode]);
+
+  const onMapViewportChangeRef = useRef(onMapViewportChange);
+  useEffect(() => {
+    onMapViewportChangeRef.current = onMapViewportChange;
+  }, [onMapViewportChange]);
 
   // Initialize Leaflet Map once with official OpenStreetMap tiles (zero API key)
   useEffect(() => {
@@ -164,6 +179,10 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
     const handleMapMove = () => {
       renderHeatmapCanvas();
+      if (onMapViewportChangeRef.current) {
+        const c = map.getCenter();
+        onMapViewportChangeRef.current([Number(c.lat.toFixed(5)), Number(c.lng.toFixed(5))]);
+      }
     };
     map.on('move', handleMapMove);
     map.on('zoom', handleMapMove);
@@ -183,6 +202,54 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     const provider = OSM_TILE_PROVIDERS[osmStyle];
     tileLayerRef.current.setUrl(provider.url);
   }, [osmStyle]);
+
+  // Synchronize Google Earth Engine Sentinel-2 Optical RGB Tile Layer
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    if (sentinel2Layer?.active && sentinel2Layer?.visible && sentinel2Layer?.tileUrl) {
+      if (sentinel2TileLayerRef.current) {
+        sentinel2TileLayerRef.current.setUrl(sentinel2Layer.tileUrl);
+        sentinel2TileLayerRef.current.setOpacity(sentinel2Layer.opacity);
+      } else {
+        sentinel2TileLayerRef.current = L.tileLayer(sentinel2Layer.tileUrl, {
+          maxZoom: 19,
+          opacity: sentinel2Layer.opacity,
+          zIndex: 5,
+          attribution:
+            'Google Earth Engine &bull; COPERNICUS/S2_SR_HARMONIZED Median Composite (RGB B4/B3/B2)',
+        }).addTo(map);
+      }
+    } else if (sentinel2TileLayerRef.current) {
+      map.removeLayer(sentinel2TileLayerRef.current);
+      sentinel2TileLayerRef.current = null;
+    }
+  }, [sentinel2Layer?.active, sentinel2Layer?.visible, sentinel2Layer?.tileUrl, sentinel2Layer?.opacity]);
+
+  // Synchronize Google Earth Engine Sentinel-1 SAR False-Color Composite Tile Layer (VV, VH, VV/VH)
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    if (sentinel1Layer?.active && sentinel1Layer?.visible && sentinel1Layer?.tileUrl) {
+      if (sentinel1TileLayerRef.current) {
+        sentinel1TileLayerRef.current.setUrl(sentinel1Layer.tileUrl);
+        sentinel1TileLayerRef.current.setOpacity(sentinel1Layer.opacity);
+      } else {
+        sentinel1TileLayerRef.current = L.tileLayer(sentinel1Layer.tileUrl, {
+          maxZoom: 19,
+          opacity: sentinel1Layer.opacity,
+          zIndex: 6,
+          attribution:
+            'Google Earth Engine &bull; COPERNICUS/S1_GRD False-Color Composite (VV, VH, VV/VH)',
+        }).addTo(map);
+      }
+    } else if (sentinel1TileLayerRef.current) {
+      map.removeLayer(sentinel1TileLayerRef.current);
+      sentinel1TileLayerRef.current = null;
+    }
+  }, [sentinel1Layer?.active, sentinel1Layer?.visible, sentinel1Layer?.tileUrl, sentinel1Layer?.opacity]);
 
   // Fly to new center/zoom when preset changes
   const prevCenterRef = useRef<[number, number]>(center);

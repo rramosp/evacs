@@ -134,6 +134,69 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
   - `Pause Simulation` (Pauses simulation and unlocks entity editing)
   - `Reset Simulation` (Resets time to `t = 0` and restores initial source area population)
   - Simulation Speed Selector (`1x`, `2x`, `5x`, `10x`)
+- **Space Data Section (Positioned Below All Other Left Panel Sections)**:
+  - Placed at the very bottom of the Left Control Panel, below all other sections (Scenario Preset Selector, Simulation Execution Toolbar, and Entity Management Accordion / Tabs).
+  - **Current Date Text Box**: Located at the top of the Space Data section (`YYYY-MM-DD`, defaulting to today's date).
+  - **`aggregation period` Dropdown Selector**: Located above the action button with options:
+    - `'last week'`
+    - `'last 2 weeks'`
+    - `'last month'` (default)
+    - `'last three months'`
+    - `'last six months'`
+    - `'last year'`
+  - **Compact `Sentinel 2 Optical Data` Button** (`#btn-sentinel2-optical-data`): Styled as a compact button below the `aggregation period` selector.
+  - **Compact `Sentinel 1 SAR Data` Button** (`#btn-sentinel1-sar-data`): Placed directly below the **`Sentinel 2 Optical Data`** button.
+  - Clicking **`Sentinel 2 Optical Data`** computes the derived date window `[start_date, end_date]` from the **Current Date** text box and selected **`aggregation period`**, logs the actual derived dates (`start_date` to `end_date`) in the Bottom Logging Panel, and invokes `POST /api/space-data/sentinel2`, which executes `server/ee_sentinel2.py` using Google Earth Engine (`ee`) on the server side:
+    ```python
+    ee.Authenticate()
+    ee.Initialize(project='geo-stars')
+
+    # 3. Load the Sentinel-2 Surface Reflectance collection and apply filters
+    s2_collection = (
+        ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+        .filterBounds(poi)                              # Filter by location
+        .filterDate(start_date, end_date)               # Filter by derived date range
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10)) # Keep images with < 10% clouds
+    )
+
+    # 4. Reduce the collection to a single image using the median value per pixel
+    median_image = s2_collection.median()
+
+    # 5. Define visualization parameters for True Color (Red, Green, Blue bands)
+    vis_params = {
+        'bands': ['B4', 'B3', 'B2'], # B4=Red, B3=Green, B2=Blue
+        'min': 0,
+        'max': 3000,
+        'gamma': 1.4
+    }
+    ```
+  - Clicking **`Sentinel 1 SAR Data`** computes the derived date window `[start_date, end_date]` from the **Current Date** text box and selected **`aggregation period`**, logs the actual derived dates (`start_date` to `end_date`) in the Bottom Logging Panel, and invokes `POST /api/space-data/sentinel1`, which executes `server/ee_sentinel1.py` using Google Earth Engine (`ee`) on the server side for collection `COPERNICUS/S1_GRD`, creating a false color composite with bands `VV`, `VH`, and `VV/VH`:
+    ```python
+    ee.Authenticate()
+    ee.Initialize(project='geo-stars')
+
+    s1_collection = (
+        ee.ImageCollection('COPERNICUS/S1_GRD')
+        .filterBounds(poi)
+        .filterDate(start_date, end_date)
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+        .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    )
+
+    median_image = s1_collection.median()
+    vv = median_image.select('VV')
+    vh = median_image.select('VH')
+    vv_vh = vv.divide(vh).rename('VV/VH')
+    composite_image = median_image.addBands(vv_vh)
+
+    vis_params = {
+        'bands': ['VV', 'VH', 'VV/VH'],
+        'min': [-25, -30, 0],
+        'max': [0, -5, 1],
+    }
+    ```
+  - Displays layer metadata, visibility toggle (`Visible`/`Hidden`), and opacity slider for both `COPERNICUS/S2_SR_HARMONIZED` (`B4, B3, B2` RGB) and `COPERNICUS/S1_GRD` (`VV, VH, VV/VH` false color composite).
 
 ### 5.2 Center Area: Interactive OpenStreetMap Viewport (`50% Width × 75% Height`)
 - **Base Layer (Zero API Key Required)**: Exclusively uses public, open-source **OpenStreetMap** tile layers that require **no API key**:
@@ -141,6 +204,8 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
   2. **Humanitarian OSM (HOT)** (`https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png`) — Humanitarian OpenStreetMap Team emergency-response cartography.
   3. **CyclOSM** (`https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png`) — high-contrast open-source OpenStreetMap urban/topographic tiles.
 - **Visual Overlays**:
+  - **Sentinel-2 True Color RGB Satellite Layer**: When loaded via **Space Data -> Sentinel 2 Optical Data**, renders the Google Earth Engine `median_image` tile layer (`vis_params`: `bands: ['B4', 'B3', 'B2']`, `min: 0`, `max: 3000`, `gamma: 1.4`) directly on the center Leaflet map.
+  - **Sentinel-1 SAR False-Color Composite Layer**: When loaded via **Space Data -> Sentinel 1 SAR Data**, renders the Google Earth Engine `COPERNICUS/S1_GRD` false-color composite tile layer (`vis_params`: `bands: ['VV', 'VH', 'VV/VH']`, `min: [-25, -30, 0]`, `max: [0, -5, 1]`) directly on the center Leaflet map.
   - Source Areas: Amber/Orange polygons with live remaining headcount badges.
   - Target Areas: Emerald Green polygons for active shelters; Slate Gray dashed polygons with `🚫 DISABLED` badge for disabled shelters.
   - No-Go Areas: Cross-hatched Crimson Red polygons.
@@ -148,7 +213,7 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
   - **Dynamic Heatmap Overlay**: Hotter around Pickup Locations as queues form; progressively cools down over time as vehicles evacuate people from Source Areas.
 
 ### 5.3 Bottom Panel: System & Simulation Console (`50% Width × 25% Height`)
-- Timestamped log stream displaying routing computations, mid-simulation edits, route recomputations upon restart, loaded vehicle redirections to closest active shelters, and arrival confirmations.
+- Timestamped log stream displaying routing computations, mid-simulation edits, route recomputations upon restart, loaded vehicle redirections to closest active shelters, arrival confirmations, and **Space Data (Sentinel-2 Optical & Sentinel-1 SAR) requests including the actual derived date range (`start_date` to `end_date`) computed from the user's Current Date and `aggregation period` selection**.
 
 ### 5.4 Right Panel: Telemetry & KPI Dashboard (`25% Width × 100% Height`)
 - Live evacuation progress KPIs, Blue Square pickup queues, Target Shelter occupancy meters (with `DISABLED` indicators), and behavioral breakdowns.
@@ -214,3 +279,7 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 | **v1.7** | 2026-09-19 | Overhauled **No-Go Zone Route Avoidance Algorithm**: Replaced radial vertex pushing with a **2D Obstacle Visibility Graph + Dijkstra Shortest-Path Solver** (`computeShortestCollisionFreePath` & `enforceStrictNoGoAvoidance`) over multi-tier buffered exterior vertices around all No-Go polygons. Every segment of every evacuation, approach, and mid-simulation redirection route is strictly verified via `turf.booleanIntersects(segment, noGoPolygon) === false` so routes **never cross No-Go zones**. |
 | **v1.8** | 2026-09-19 | Fixed **Initial Vehicle Fleet Departure Origin**: Updated `initializeSimulationState` and `reconcileSimulationOnRestart` (`getDepotToPickupApproachCoords`) so that at simulation start ($t = 0$) and when newly added fleets are deployed, vehicles depart from their designated **Vehicle Fleet staging depot location (`fleet.location`)** along `route.approachCoordinates` to the Pickup Location, rather than starting from the Target Area. Subsequent post-offload empty return trips continue to reverse the existing evacuation route from Target Area back to Pickup Location. |
 | **v1.9** | 2026-09-19 | Fixed **Overall Evacuation Progress Bar & Exact Population Conservation**: (1) Replaced `Math.round(totalPop / numClusters)` over-allocation in `buildClustersForSources` with exact integer Euclidean division so cluster headcounts sum identically to `source.population`; (2) Updated `RightTelemetryPanel` to compute total population from exact conservation (`totalEvacuated + totalInTransit + totalRemainingAtSource`) and strictly cap progress at $\le 99\%$ while any evacuees remain in Source Areas or on vehicles, reaching `100%` if and only if `totalRemainingAtSource === 0 && totalInTransit === 0`. |
+| **v1.10** | 2026-09-20 | Added **Space Data Section & Server-Side Google Earth Engine Sentinel-2 Optical Data Integration**: (1) Added a **Space Data** section on the Left Panel with a **`Sentinel 2 Optical Data`** button; (2) Implemented server-side Python script [`server/ee_sentinel2.py`](server/ee_sentinel2.py) and Vite server API endpoint (`/api/space-data/sentinel2` in [`vite.config.ts`](vite.config.ts)) executing the exact Google Earth Engine `COPERNICUS/S2_SR_HARMONIZED` median composite query (`2024-06-01` to `2024-08-31`, `<10%` clouds) with True Color RGB `vis_params` (`bands: ['B4', 'B3', 'B2']`, `min: 0`, `max: 3000`, `gamma: 1.4`); (3) Rendered the returned Earth Engine `median_image` tile layer directly on the center map panel with interactive visibility and opacity controls. |
+| **v1.11** | 2026-09-20 | Updated **Server-Side Earth Engine Authentication & Project Initialization**: Configured [`server/ee_sentinel2.py`](server/ee_sentinel2.py) to authenticate and initialize explicitly with `ee.Authenticate()` followed by `ee.Initialize(project='geo-stars')` using pre-existing server-side authorization. |
+| **v1.12** | 2026-09-20 | Updated **Space Data Panel Layout, Date Controls & Dynamic Sentinel-2 Date Aggregation**: (1) Moved the **Space Data** section to the bottom of the Left Panel below all other sections; (2) Added a **Current Date** text box at the top of the Space Data section; (3) Made the **`Sentinel 2 Optical Data`** button more compact and added an **`aggregation period`** dropdown selector (`'last week'`, `'last 2 weeks'`, `'last month'` default, `'last three months'`, `'last six months'`, `'last year'`); (4) Updated [`server/ee_sentinel2.py`](server/ee_sentinel2.py) and `/api/space-data/sentinel2` to filter `COPERNICUS/S2_SR_HARMONIZED` dynamically using the derived `[start_date, end_date]` window; (5) Added log messages in the Bottom Logging Panel displaying the actual derived dates used from the user's selection. |
+| **v1.13** | 2026-09-20 | Added **Sentinel-1 SAR Data (`COPERNICUS/S1_GRD`) False Color Composite (`VV`, `VH`, `VV/VH`)**: (1) Added a **`Sentinel 1 SAR Data`** button directly below **`Sentinel 2 Optical Data`** in the Left Panel **Space Data** section; (2) Created server-side Google Earth Engine script [`server/ee_sentinel1.py`](server/ee_sentinel1.py) (`ee.Authenticate()`, `ee.Initialize(project='geo-stars')`) and `/api/space-data/sentinel1` endpoint to filter `COPERNICUS/S1_GRD` by the derived `[start_date, end_date]` window, reduce to median, compute the `VV/VH` ratio band, and generate a false-color composite with bands `['VV', 'VH', 'VV/VH']`; (3) Added map tile overlay rendering, visibility/opacity controls, and derived date range logging in the Bottom Logging Panel. |

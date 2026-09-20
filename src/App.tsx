@@ -12,6 +12,9 @@ import {
   LogEntry,
   PresetScenarioId,
   ActiveDrawMode,
+  Sentinel2LayerState,
+  Sentinel1LayerState,
+  Sentinel2AggregationPeriod,
 } from './types/evacuation';
 import { PRESET_SCENARIOS } from './data/presets';
 import {
@@ -739,6 +742,258 @@ export function App() {
     setPendingPlacedPoint(null);
   };
 
+  // Space Data: Google Earth Engine Sentinel-2 Optical RGB State & Handlers
+  const computeSentinel2DateRange = (
+    currentDateStr: string,
+    period: Sentinel2AggregationPeriod
+  ): [string, string] => {
+    const parts = currentDateStr.split('-').map(Number);
+    const endDate =
+      parts.length === 3 && !parts.some(isNaN)
+        ? new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]))
+        : new Date();
+
+    const startDate = new Date(endDate.getTime());
+
+    switch (period) {
+      case 'last week':
+        startDate.setUTCDate(startDate.getUTCDate() - 7);
+        break;
+      case 'last 2 weeks':
+        startDate.setUTCDate(startDate.getUTCDate() - 14);
+        break;
+      case 'last month':
+        startDate.setUTCMonth(startDate.getUTCMonth() - 1);
+        break;
+      case 'last three months':
+        startDate.setUTCMonth(startDate.getUTCMonth() - 3);
+        break;
+      case 'last six months':
+        startDate.setUTCMonth(startDate.getUTCMonth() - 6);
+        break;
+      case 'last year':
+        startDate.setUTCFullYear(startDate.getUTCFullYear() - 1);
+        break;
+    }
+
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    return [fmt(startDate), fmt(endDate)];
+  };
+
+  const initialCurrentDate = new Date().toISOString().slice(0, 10);
+  const initialDateRange = computeSentinel2DateRange(initialCurrentDate, 'last month');
+
+  const [sentinel2Layer, setSentinel2Layer] = useState<Sentinel2LayerState>({
+    active: false,
+    visible: true,
+    tileUrl: null,
+    imageCount: 0,
+    poi: null,
+    currentDate: initialCurrentDate,
+    aggregationPeriod: 'last month',
+    visParams: {
+      bands: ['B4', 'B3', 'B2'],
+      min: 0,
+      max: 3000,
+      gamma: 1.4,
+    },
+    collection: 'COPERNICUS/S2_SR_HARMONIZED',
+    dateRange: initialDateRange,
+    opacity: 0.88,
+  });
+  const [isLoadingSentinel2, setIsLoadingSentinel2] = useState<boolean>(false);
+
+  const [sentinel1Layer, setSentinel1Layer] = useState<Sentinel1LayerState>({
+    active: false,
+    visible: true,
+    tileUrl: null,
+    imageCount: 0,
+    poi: null,
+    visParams: {
+      bands: ['VV', 'VH', 'VV/VH'],
+      min: [-25, -30, 0],
+      max: [0, -5, 1],
+    },
+    collection: 'COPERNICUS/S1_GRD',
+    dateRange: initialDateRange,
+    opacity: 0.88,
+  });
+  const [isLoadingSentinel1, setIsLoadingSentinel1] = useState<boolean>(false);
+
+  const liveViewportPoiRef = useRef<[number, number]>(mapCenter);
+
+  useEffect(() => {
+    liveViewportPoiRef.current = mapCenter;
+  }, [mapCenter]);
+
+  const handleChangeSentinel2CurrentDate = (date: string) => {
+    const newRange = computeSentinel2DateRange(date, sentinel2Layer.aggregationPeriod);
+    setSentinel2Layer((prev) => ({
+      ...prev,
+      currentDate: date,
+      dateRange: newRange,
+    }));
+    setSentinel1Layer((prev) => ({
+      ...prev,
+      dateRange: newRange,
+    }));
+  };
+
+  const handleChangeSentinel2AggregationPeriod = (period: Sentinel2AggregationPeriod) => {
+    const newRange = computeSentinel2DateRange(sentinel2Layer.currentDate, period);
+    setSentinel2Layer((prev) => ({
+      ...prev,
+      aggregationPeriod: period,
+      dateRange: newRange,
+    }));
+    setSentinel1Layer((prev) => ({
+      ...prev,
+      dateRange: newRange,
+    }));
+  };
+
+  const handleFetchSentinel2Data = async () => {
+    const poi = liveViewportPoiRef.current || mapCenter;
+    const [startDate, endDate] = computeSentinel2DateRange(
+      sentinel2Layer.currentDate,
+      sentinel2Layer.aggregationPeriod
+    );
+
+    setIsLoadingSentinel2(true);
+    appendLog(
+      'INFO',
+      `Space Data: Selected aggregation period "${sentinel2Layer.aggregationPeriod}" (current date: ${sentinel2Layer.currentDate}) -> Derived Sentinel-2 dates: ${startDate} to ${endDate}. Calling Google Earth Engine...`,
+      elapsedSimSeconds
+    );
+
+    try {
+      const response = await fetch('/api/space-data/sentinel2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lat: poi[0],
+          lng: poi[1],
+          startDate,
+          endDate,
+        }),
+      });
+      const data = await response.json();
+
+      if (data.ok && data.tileUrl) {
+        const usedRange: [string, string] = data.dateRange || [startDate, endDate];
+        setSentinel2Layer((prev) => ({
+          ...prev,
+          active: true,
+          visible: true,
+          tileUrl: data.tileUrl,
+          imageCount: data.imageCount ?? 0,
+          poi: data.poi || poi,
+          visParams: data.visParams || prev.visParams,
+          collection: data.collection || prev.collection,
+          dateRange: usedRange,
+        }));
+        appendLog(
+          'INFO',
+          `Google Earth Engine: Rendered Sentinel-2 Optical RGB median composite for dates ${usedRange[0]} to ${usedRange[1]} (derived from "${sentinel2Layer.aggregationPeriod}", ${data.imageCount} scenes, RGB bands B4/B3/B2).`,
+          elapsedSimSeconds
+        );
+      } else {
+        appendLog(
+          'WARN',
+          `Google Earth Engine Sentinel-2 query failed for dates ${startDate} to ${endDate}: ${data.error || 'Unknown server error'}`,
+          elapsedSimSeconds
+        );
+      }
+    } catch (err) {
+      appendLog(
+        'WARN',
+        `Failed to reach server-side Google Earth Engine endpoint: ${String(err)}`,
+        elapsedSimSeconds
+      );
+    } finally {
+      setIsLoadingSentinel2(false);
+    }
+  };
+
+  const handleFetchSentinel1Data = async () => {
+    const poi = liveViewportPoiRef.current || mapCenter;
+    const [startDate, endDate] = computeSentinel2DateRange(
+      sentinel2Layer.currentDate,
+      sentinel2Layer.aggregationPeriod
+    );
+
+    setIsLoadingSentinel1(true);
+    appendLog(
+      'INFO',
+      `Space Data: Selected aggregation period "${sentinel2Layer.aggregationPeriod}" (current date: ${sentinel2Layer.currentDate}) -> Derived Sentinel-1 SAR dates: ${startDate} to ${endDate}. Calling Google Earth Engine (COPERNICUS/S1_GRD)...`,
+      elapsedSimSeconds
+    );
+
+    try {
+      const response = await fetch('/api/space-data/sentinel1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lat: poi[0],
+          lng: poi[1],
+          startDate,
+          endDate,
+        }),
+      });
+      const data = await response.json();
+
+      if (data.ok && data.tileUrl) {
+        const usedRange: [string, string] = data.dateRange || [startDate, endDate];
+        setSentinel1Layer((prev) => ({
+          ...prev,
+          active: true,
+          visible: true,
+          tileUrl: data.tileUrl,
+          imageCount: data.imageCount ?? 0,
+          poi: data.poi || poi,
+          visParams: data.visParams || prev.visParams,
+          collection: data.collection || prev.collection,
+          dateRange: usedRange,
+        }));
+        appendLog(
+          'INFO',
+          `Google Earth Engine: Rendered Sentinel-1 SAR false-color composite (COPERNICUS/S1_GRD, bands VV, VH, VV/VH) for dates ${usedRange[0]} to ${usedRange[1]} (derived from "${sentinel2Layer.aggregationPeriod}", ${data.imageCount} scenes).`,
+          elapsedSimSeconds
+        );
+      } else {
+        appendLog(
+          'WARN',
+          `Google Earth Engine Sentinel-1 SAR query failed for dates ${startDate} to ${endDate}: ${data.error || 'Unknown server error'}`,
+          elapsedSimSeconds
+        );
+      }
+    } catch (err) {
+      appendLog(
+        'WARN',
+        `Failed to reach server-side Google Earth Engine endpoint: ${String(err)}`,
+        elapsedSimSeconds
+      );
+    } finally {
+      setIsLoadingSentinel1(false);
+    }
+  };
+
+  const handleToggleSentinel2Visibility = () => {
+    setSentinel2Layer((prev) => ({ ...prev, visible: !prev.visible }));
+  };
+
+  const handleChangeSentinel2Opacity = (opacity: number) => {
+    setSentinel2Layer((prev) => ({ ...prev, opacity }));
+  };
+
+  const handleToggleSentinel1Visibility = () => {
+    setSentinel1Layer((prev) => ({ ...prev, visible: !prev.visible }));
+  };
+
+  const handleChangeSentinel1Opacity = (opacity: number) => {
+    setSentinel1Layer((prev) => ({ ...prev, opacity }));
+  };
+
   return (
     <div className="cockpit-grid-layout">
       {/* 1. LEFT SIDE PANEL (25% Width x 100% Height) */}
@@ -778,6 +1033,18 @@ export function App() {
         onClearPendingGeometry={handleClearPendingGeometry}
         selectedEntityId={selectedEntityId}
         onSelectEntity={setSelectedEntityId}
+        sentinel2Layer={sentinel2Layer}
+        isLoadingSentinel2={isLoadingSentinel2}
+        onFetchSentinel2Data={handleFetchSentinel2Data}
+        onChangeSentinel2CurrentDate={handleChangeSentinel2CurrentDate}
+        onChangeSentinel2AggregationPeriod={handleChangeSentinel2AggregationPeriod}
+        onToggleSentinel2Visibility={handleToggleSentinel2Visibility}
+        onChangeSentinel2Opacity={handleChangeSentinel2Opacity}
+        sentinel1Layer={sentinel1Layer}
+        isLoadingSentinel1={isLoadingSentinel1}
+        onFetchSentinel1Data={handleFetchSentinel1Data}
+        onToggleSentinel1Visibility={handleToggleSentinel1Visibility}
+        onChangeSentinel1Opacity={handleChangeSentinel1Opacity}
       />
 
       {/* 2. CENTER AREA COLUMN (50% Width) -> TOP 75% MAP + BOTTOM 25% LOGS */}
@@ -802,6 +1069,11 @@ export function App() {
             onFinishPlacingVehiclePoint={handleFinishPlacingVehiclePoint}
             selectedEntityId={selectedEntityId}
             onSelectEntity={setSelectedEntityId}
+            sentinel2Layer={sentinel2Layer}
+            sentinel1Layer={sentinel1Layer}
+            onMapViewportChange={(c) => {
+              liveViewportPoiRef.current = c;
+            }}
           />
         </div>
 
