@@ -193,9 +193,21 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     map.on('zoom', handleMapMove);
     map.on('resize', handleMapMove);
 
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && mapContainerRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        map.invalidateSize({ animate: false });
+        renderHeatmapCanvas();
+      });
+      resizeObserver.observe(mapContainerRef.current);
+    }
+
     mapInstanceRef.current = map;
 
     return () => {
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
       map.remove();
       mapInstanceRef.current = null;
     };
@@ -257,6 +269,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   }, [sentinel1Layer?.active, sentinel1Layer?.visible, sentinel1Layer?.tileUrl, sentinel1Layer?.opacity]);
 
   // Synchronize CEMS Early Warning River Discharge Prediction Overlays (24h, 48h, 72h bands)
+  // Any pixel value below 10 m³/s is rendered as fully transparent (alpha = 0);
+  // only pixel values above 10 m³/s are visible and subject to the corresponding transparency slider (ov.opacity).
   useEffect(() => {
     const layerGroup = glofasLayerGroupRef.current;
     if (!layerGroup) return;
@@ -264,14 +278,49 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     layerGroup.clearLayers();
     if (!glofasForecast?.active || !glofasForecast.overlays?.length) return;
 
+    let cancelled = false;
+
     for (const ov of glofasForecast.overlays) {
       if (!ov.visible || !ov.dataUrl || !ov.bounds) continue;
-      L.imageOverlay(ov.dataUrl, ov.bounds, {
+
+      const imgOverlay = L.imageOverlay(ov.dataUrl, ov.bounds, {
         opacity: ov.opacity,
         zIndex: 10 + ov.band,
-        attribution: `CEMS GloFAS River Discharge Forecast (${ov.label}, clipped at 80 m³/s)`,
+        attribution: `CEMS GloFAS River Discharge Forecast (${ov.label}, <10 m³/s transparent, clipped at 80 m³/s)`,
       }).addTo(layerGroup);
+
+      // Ensure client-side enforcement that any pixel with discharge <= 10 (g >= 223 in White->Red 0..80 LUT)
+      // has alpha = 0 and any pixel > 10 has alpha = 255 (controlled by ov.opacity slider)
+      const img = new Image();
+      img.onload = () => {
+        if (cancelled) return;
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0);
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imgData.data;
+        // Threshold at 10 m³/s on [0, 80] scale: norm = 10 / 80 = 0.125 -> g = round(255 * 0.875) = 223
+        for (let i = 0; i < data.length; i += 4) {
+          const g = data[i + 1];
+          const a = data[i + 3];
+          if (a === 0 || g >= 223) {
+            data[i + 3] = 0; // < 10 m³/s: fully transparent
+          } else {
+            data[i + 3] = 255; // > 10 m³/s: full base alpha, opacity controlled by ov.opacity slider
+          }
+        }
+        ctx.putImageData(imgData, 0, 0);
+        imgOverlay.setUrl(canvas.toDataURL('image/png'));
+      };
+      img.src = ov.dataUrl;
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [glofasForecast]);
 
   // Fly to new center/zoom when preset changes
@@ -934,7 +983,9 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             }}
           >
             <span>CEMS River Discharge (m&sup3;/s)</span>
-            <span style={{ fontSize: '0.64rem', color: '#94a3b8' }}>Clipped &le; 80</span>
+            <span style={{ fontSize: '0.62rem', color: '#94a3b8' }}>
+              &lt;10 Transparent &bull; Clipped &le;80
+            </span>
           </div>
           <div
             style={{
@@ -942,7 +993,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
               width: '100%',
               borderRadius: '4px',
               background:
-                'linear-gradient(to right, #ffffff 0%, #fecaca 25%, #f87171 50%, #ef4444 75%, #ff0000 100%)',
+                'linear-gradient(to right, rgba(255,255,255,0) 0%, rgba(255,255,255,0) 12.5%, #ffe4e6 12.5%, #fecaca 25%, #f87171 50%, #ef4444 75%, #ff0000 100%)',
               border: '1px solid rgba(255, 255, 255, 0.35)',
             }}
           />
@@ -956,7 +1007,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
               fontFamily: 'monospace',
             }}
           >
-            <span>0</span>
+            <span>&lt;10 (Transp.)</span>
+            <span>10</span>
             <span>20</span>
             <span>40</span>
             <span>60</span>

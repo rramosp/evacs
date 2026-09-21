@@ -35,9 +35,15 @@ import {
   EyeOff,
   ChevronDown,
   ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
+  FileBarChart2,
 } from 'lucide-react';
+import evacLogoUrl from '../../imgs/evac-logo.png';
 
 interface LeftControlPanelProps {
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
   selectedPreset: PresetScenarioId;
   onSelectPreset: (preset: PresetScenarioId) => void;
   sourceAreas: SourceArea[];
@@ -63,6 +69,7 @@ interface LeftControlPanelProps {
   onRunSimulation: () => void;
   onStopSimulation: () => void;
   onResetSimulation: () => void;
+  onOpenSimulationReport: () => void;
   isSimulating: boolean;
   simSpeed: number;
   onChangeSimSpeed: (speed: number) => void;
@@ -93,6 +100,8 @@ interface LeftControlPanelProps {
 }
 
 export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
+  isCollapsed = false,
+  onToggleCollapse,
   selectedPreset,
   onSelectPreset,
   sourceAreas,
@@ -118,6 +127,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onRunSimulation,
   onStopSimulation,
   onResetSimulation,
+  onOpenSimulationReport,
   isSimulating,
   simSpeed,
   onChangeSimSpeed,
@@ -147,8 +157,10 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onChangeGlofasOverlayOpacity,
 }) => {
   const [activeTab, setActiveTab] = useState<'sources' | 'targets' | 'nogos' | 'vehicles'>('sources');
-  const [isExecutionCollapsed, setIsExecutionCollapsed] = useState<boolean>(false);
-  const [isSpaceDataCollapsed, setIsSpaceDataCollapsed] = useState<boolean>(false);
+  const [isParametersCollapsed, setIsParametersCollapsed] = useState<boolean>(true);
+  const [isExecutionCollapsed, setIsExecutionCollapsed] = useState<boolean>(true);
+  const [isSpaceDataCollapsed, setIsSpaceDataCollapsed] = useState<boolean>(true);
+  const [isPlanetScopeModalOpen, setIsPlanetScopeModalOpen] = useState<boolean>(false);
 
   // Editing state for inline modal/form
   const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
@@ -310,13 +322,69 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     setEditingVehicleId(null);
   };
 
+  if (isCollapsed) {
+    return (
+      <aside
+        className="cockpit-left-panel collapsed"
+        id="left-parameters-panel"
+        title="Click to expand Left Control Panel"
+      >
+        <button
+          type="button"
+          id="btn-toggle-left-panel"
+          className="panel-rail-expand-btn"
+          onClick={onToggleCollapse}
+          title="Expand Left Control Panel"
+        >
+          <PanelLeftOpen size={15} />
+          <ChevronRight size={13} />
+        </button>
+        <div
+          className="panel-rail-vertical-label"
+          onClick={onToggleCollapse}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') onToggleCollapse?.();
+          }}
+        >
+          <span className="brand-badge">EVAC-SIM</span>
+          <span>PARAMETERS &amp; CONTROLS</span>
+        </div>
+      </aside>
+    );
+  }
+
   return (
     <aside className="cockpit-left-panel" id="left-parameters-panel">
-      {/* Application Brand Header */}
+      {/* Application Brand Header with EVAC-SIM Logo */}
       <header className="panel-brand-header">
-        <div className="brand-title-row">
-          <div className="brand-badge">EVAC-OPS</div>
-          <h1 className="app-main-title">Evacuation Command</h1>
+        <div className="brand-title-row" style={{ justifyContent: 'space-between', gap: '10px' }}>
+          <img
+            src={evacLogoUrl}
+            alt="EVAC-SIM"
+            className="brand-logo-img"
+            style={{
+              height: '38px',
+              maxWidth: 'calc(100% - 82px)',
+              objectFit: 'contain',
+              objectPosition: 'left center',
+              display: 'block',
+            }}
+          />
+          {onToggleCollapse && (
+            <button
+              type="button"
+              id="btn-toggle-left-panel"
+              className="btn-collapse-panel"
+              onClick={onToggleCollapse}
+              title="Collapse Left Control Panel"
+              style={{ flexShrink: 0 }}
+            >
+              <PanelLeftClose size={14} />
+              <span>Collapse</span>
+            </button>
+          )}
         </div>
         <p className="brand-subtitle">OSM Tactical Routing & Crowd Simulation</p>
       </header>
@@ -339,105 +407,45 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         </select>
       </section>
 
-      {/* Primary Action & Simulation Execution Controls (Collapsible) */}
-      <section className="panel-section execution-controls-section">
-        <button
-          id="toggle-execution-section"
-          type="button"
-          aria-expanded={!isExecutionCollapsed}
-          onClick={() => setIsExecutionCollapsed((prev) => !prev)}
-          style={{
-            width: '100%',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            background: 'transparent',
-            border: 'none',
-            padding: 0,
-            marginBottom: isExecutionCollapsed ? 0 : '8px',
-            cursor: 'pointer',
-            textAlign: 'left',
-          }}
-        >
-          <span className="section-label" style={{ marginBottom: 0 }}>
-            EXECUTION & SIMULATION
-          </span>
-          {isExecutionCollapsed ? (
-            <ChevronRight size={15} style={{ color: '#94a3b8' }} />
-          ) : (
-            <ChevronDown size={15} style={{ color: '#38bdf8' }} />
-          )}
-        </button>
+      {/* Top-Justified Stack of 3 Collapsible Sections: 1. Parameters, 2. Execution & Simulation, 3. Space Data */}
+      <div className="left-panel-sections-stack">
+      {/* 1. Parameters Section (Sources, Targets, No-Go, Vehicles — Collapsible) */}
+      <section
+        className="panel-section parameters-controls-section"
+        style={{ padding: isParametersCollapsed ? '12px 16px' : '12px 0 0 0' }}
+      >
+        <div style={{ padding: isParametersCollapsed ? 0 : '0 16px' }}>
+          <button
+            id="toggle-parameters-section"
+            type="button"
+            aria-expanded={!isParametersCollapsed}
+            onClick={() => setIsParametersCollapsed((prev) => !prev)}
+            style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              background: 'transparent',
+              border: 'none',
+              padding: 0,
+              marginBottom: isParametersCollapsed ? 0 : '8px',
+              cursor: 'pointer',
+              textAlign: 'left',
+            }}
+          >
+            <span className="section-label" style={{ marginBottom: 0 }}>
+              PARAMETERS
+            </span>
+            {isParametersCollapsed ? (
+              <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+            ) : (
+              <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+            )}
+          </button>
+        </div>
 
-        {!isExecutionCollapsed && (
+        {!isParametersCollapsed && (
           <>
-            <button
-              id="btn-compute-routes"
-              type="button"
-              className="btn-primary-action compute-btn"
-              onClick={onComputeRoutes}
-              disabled={isComputingRoutes || isSimulating || sourceAreas.length === 0 || targetAreas.length === 0}
-            >
-              <Route size={16} />
-              <span>
-                {isComputingRoutes ? 'Computing OSRM Routes...' : 'Compute evacuation routes'}
-              </span>
-            </button>
-
-            <div className="sim-buttons-grid">
-              <button
-                id="btn-run-simulation"
-                type="button"
-                className={`btn-sim-action run-btn ${isSimulating ? 'active-running' : ''}`}
-                onClick={onRunSimulation}
-                disabled={(!hasComputedRoutes && !isSimulating) || isComputingRoutes}
-                title={!hasComputedRoutes ? 'Compute evacuation routes first' : 'Run / Resume simulation'}
-              >
-                <Play size={15} />
-                <span>Run simulation</span>
-              </button>
-
-              <button
-                id="btn-stop-simulation"
-                type="button"
-                className="btn-sim-action stop-btn"
-                onClick={onStopSimulation}
-                disabled={!isSimulating}
-              >
-                <Pause size={15} />
-                <span>Pause simulation</span>
-              </button>
-
-              <button
-                id="btn-reset-simulation"
-                type="button"
-                className="btn-sim-action reset-btn"
-                onClick={onResetSimulation}
-              >
-                <RotateCcw size={15} />
-                <span>Reset simulation</span>
-              </button>
-            </div>
-
-            <div className="sim-speed-bar">
-              <span className="speed-label">Playback Speed:</span>
-              <div className="speed-pills">
-                {[1, 2, 5, 10].map((spd) => (
-                  <button
-                    key={spd}
-                    type="button"
-                    className={`speed-pill ${simSpeed === spd ? 'active' : ''}`}
-                    onClick={() => onChangeSimSpeed(spd)}
-                  >
-                    {spd}x
-                  </button>
-                ))}
-              </div>
-            </div>
-          </>
-        )}
-      </section>
-
       {/* Pause Requirement Notice Banner when Simulation is Active */}
       {isSimulating && (
         <div
@@ -1283,8 +1291,149 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           </div>
         )}
       </div>
+          </>
+        )}
+      </section>
 
-      {/* Space Data Section (Placed below all other sections on the left panel; Collapsible) */}
+      {/* 2. Primary Action & Simulation Execution Controls (Collapsible, Below Parameters) */}
+      <section className="panel-section execution-controls-section">
+        <button
+          id="toggle-execution-section"
+          type="button"
+          aria-expanded={!isExecutionCollapsed}
+          onClick={() => setIsExecutionCollapsed((prev) => !prev)}
+          style={{
+            width: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            marginBottom: isExecutionCollapsed ? 0 : '8px',
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          <span className="section-label" style={{ marginBottom: 0 }}>
+            EXECUTION & SIMULATION
+          </span>
+          {isExecutionCollapsed ? (
+            <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+          ) : (
+            <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+          )}
+        </button>
+
+        {!isExecutionCollapsed && (
+          <>
+            <button
+              id="btn-compute-routes"
+              type="button"
+              className="btn-primary-action compute-btn"
+              onClick={onComputeRoutes}
+              disabled={isComputingRoutes || isSimulating || sourceAreas.length === 0 || targetAreas.length === 0}
+            >
+              <Route size={16} />
+              <span>
+                {isComputingRoutes ? 'Computing OSRM Routes...' : 'Compute evacuation routes'}
+              </span>
+            </button>
+
+            <div className="sim-buttons-grid">
+              <button
+                id="btn-run-simulation"
+                type="button"
+                className={`btn-sim-action run-btn ${isSimulating ? 'active-running' : ''}`}
+                onClick={onRunSimulation}
+                disabled={(!hasComputedRoutes && !isSimulating) || isComputingRoutes}
+                title={!hasComputedRoutes ? 'Compute evacuation routes first' : 'Run / Resume simulation'}
+              >
+                <Play size={15} />
+                <span>Run simulation</span>
+              </button>
+
+              <button
+                id="btn-stop-simulation"
+                type="button"
+                className="btn-sim-action stop-btn"
+                onClick={onStopSimulation}
+                disabled={!isSimulating}
+              >
+                <Pause size={15} />
+                <span>Pause simulation</span>
+              </button>
+
+              <button
+                id="btn-reset-simulation"
+                type="button"
+                className="btn-sim-action reset-btn"
+                onClick={onResetSimulation}
+              >
+                <RotateCcw size={15} />
+                <span>Reset simulation</span>
+              </button>
+            </div>
+
+            <button
+              id="btn-simulation-report"
+              type="button"
+              className="btn-sim-action report-btn"
+              onClick={onOpenSimulationReport}
+              disabled={isSimulating}
+              title={
+                isSimulating
+                  ? 'Pause simulation first to open the Simulation report'
+                  : 'Open full Simulation report popup'
+              }
+              style={{
+                marginTop: '8px',
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '7px',
+                padding: '7px 12px',
+                borderRadius: '6px',
+                border: isSimulating
+                  ? '1px solid rgba(148, 163, 184, 0.2)'
+                  : '1px solid rgba(56, 189, 248, 0.55)',
+                background: isSimulating
+                  ? 'rgba(30, 41, 59, 0.45)'
+                  : 'linear-gradient(135deg, rgba(14, 165, 233, 0.22) 0%, rgba(37, 99, 235, 0.32) 100%)',
+                color: isSimulating ? '#64748b' : '#f8fafc',
+                fontWeight: 600,
+                fontSize: '0.77rem',
+                cursor: isSimulating ? 'not-allowed' : 'pointer',
+              }}
+            >
+              <FileBarChart2
+                size={15}
+                style={{ color: isSimulating ? '#64748b' : '#38bdf8' }}
+              />
+              <span>Simulation report</span>
+            </button>
+
+            <div className="sim-speed-bar">
+              <span className="speed-label">Playback Speed:</span>
+              <div className="speed-pills">
+                {[1, 2, 5, 10].map((spd) => (
+                  <button
+                    key={spd}
+                    type="button"
+                    className={`speed-pill ${simSpeed === spd ? 'active' : ''}`}
+                    onClick={() => onChangeSimSpeed(spd)}
+                  >
+                    {spd}x
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* 3. Space Data Section (Top-Justified Collapsible Section #3) */}
       <section className="panel-section space-data-section">
         <button
           id="toggle-space-data-section"
@@ -1446,6 +1595,105 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               : 'Sentinel 1 SAR Data'}
           </span>
         </button>
+
+        {/* Planet Scope button directly below Sentinel 1 */}
+        <button
+          id="btn-planet-scope-data"
+          type="button"
+          className="btn-primary-action"
+          style={{
+            marginTop: '6px',
+            padding: '6px 10px',
+            fontSize: '0.76rem',
+            minHeight: '30px',
+            background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+            border: '1px solid rgba(52, 211, 153, 0.38)',
+            color: '#f8fafc',
+          }}
+          onClick={() => setIsPlanetScopeModalOpen(true)}
+        >
+          <Satellite size={14} style={{ color: '#34d399' }} />
+          <span>Planet Scope</span>
+        </button>
+
+        {/* Planet Scope "Not yet available" Popup Modal */}
+        {isPlanetScopeModalOpen && (
+          <div
+            id="planet-scope-modal-backdrop"
+            style={{
+              position: 'fixed',
+              inset: 0,
+              zIndex: 9999,
+              backgroundColor: 'rgba(6, 11, 20, 0.72)',
+              backdropFilter: 'blur(4px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            onClick={() => setIsPlanetScopeModalOpen(false)}
+          >
+            <div
+              id="planet-scope-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="planet-scope-modal-title"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                backgroundColor: 'hsl(222, 28%, 13%)',
+                border: '1px solid rgba(52, 211, 153, 0.5)',
+                borderRadius: '8px',
+                padding: '18px 22px',
+                minWidth: '280px',
+                maxWidth: '360px',
+                boxShadow: '0 14px 36px rgba(0, 0, 0, 0.65)',
+                textAlign: 'center',
+                color: '#f8fafc',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  marginBottom: '10px',
+                  color: '#34d399',
+                  fontWeight: 700,
+                  fontSize: '0.88rem',
+                }}
+              >
+                <Satellite size={17} />
+                <span id="planet-scope-modal-title">Planet Scope</span>
+              </div>
+              <p
+                style={{
+                  fontSize: '0.85rem',
+                  color: '#e2e8f0',
+                  marginBottom: '16px',
+                }}
+              >
+                Not yet available
+              </p>
+              <button
+                id="btn-dismiss-planet-scope-modal"
+                type="button"
+                onClick={() => setIsPlanetScopeModalOpen(false)}
+                style={{
+                  backgroundColor: '#10b981',
+                  color: '#041f16',
+                  border: 'none',
+                  borderRadius: '5px',
+                  padding: '6px 18px',
+                  fontSize: '0.78rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
 
         {sentinel2Layer.active && (
           <div
@@ -1703,7 +1951,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     marginBottom: '4px',
                   }}
                 >
-                  <span>Color Map: White (0) &rarr; Red (80)</span>
+                  <span>&lt;10 Transparent &bull; &gt;10&rarr;80 Red</span>
                   <span>Clipped &le; 80 m&sup3;/s</span>
                 </div>
                 <div
@@ -1712,7 +1960,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     width: '100%',
                     borderRadius: '3px',
                     background:
-                      'linear-gradient(to right, #ffffff 0%, #fecaca 25%, #f87171 50%, #ef4444 75%, #ff0000 100%)',
+                      'linear-gradient(to right, rgba(255,255,255,0) 0%, rgba(255,255,255,0) 12.5%, #ffe4e6 12.5%, #fecaca 25%, #f87171 50%, #ef4444 75%, #ff0000 100%)',
                     border: '1px solid rgba(255,255,255,0.35)',
                   }}
                 />
@@ -1726,7 +1974,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     color: '#cbd5e1',
                   }}
                 >
-                  <span>0</span>
+                  <span>&lt;10</span>
+                  <span>10</span>
                   <span>20</span>
                   <span>40</span>
                   <span>60</span>
@@ -1792,7 +2041,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                       <span>Opacity:</span>
                       <input
                         type="range"
-                        min={0.15}
+                        min={0}
                         max={1}
                         step={0.05}
                         value={ov.opacity}
@@ -1814,6 +2063,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           </>
         )}
       </section>
+      </div>
     </aside>
   );
 };

@@ -70,6 +70,21 @@ export interface LogEntry {
   message: string;
 }
 
+export interface BehaviorCounts {
+  obedient: number;
+  autonomous: number;
+  random: number;
+}
+
+export interface SimulationTelemetryStats {
+  initialByBehavior: BehaviorCounts;
+  evacuatedByBehavior: BehaviorCounts;
+  evacuatedPersonSecondsByBehavior: BehaviorCounts;
+  pickupArrivedByBehavior: BehaviorCounts;
+  pickupArrivalPersonSecondsByBehavior: BehaviorCounts;
+  totalCompletedVehicleTrips: number;
+}
+
 export interface PickupLocationState {
   id: string;
   routeId: string;
@@ -80,7 +95,15 @@ export interface PickupLocationState {
   label: string;
   location: [number, number];
   waitingPopulation: number;
+  waitingByBehavior: BehaviorCounts;
   totalBoardedCount: number;
+  boardedByBehavior: BehaviorCounts;
+  evacuatedCount: number;
+  evacuatedByBehavior: BehaviorCounts;
+  completedDeparturesCount: number;
+  totalCompletedVehicleWaitSeconds: number;
+  maxVehicleWaitSeconds: number;
+  totalDepartureOccupancyRatioSum: number;
   boardingVehicleInfo?: string; // e.g., "STIB Bus #1 (64% | Wait 06:15/10:00)"
 }
 
@@ -106,6 +129,7 @@ export interface ActiveVehicleUnit {
   capacityPerUnit: number;
   maxCapacity: number; // unitCount * capacityPerUnit
   currentOccupancy: number;
+  occupancyByBehavior: BehaviorCounts;
   assignedRouteId: string;
   assignedPickupId: string;
   sourceId: string;
@@ -132,6 +156,7 @@ export interface SimulationStateSnapshot {
   vehicles: ActiveVehicleUnit[];
   heatmapPoints: HeatmapPoint[];
   targetOccupancies: Record<string, number>;
+  telemetryStats: SimulationTelemetryStats;
   newLogs: string[];
   totalEvacuated: number;
   totalInTransit: number;

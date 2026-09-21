@@ -17,6 +17,7 @@ import {
   Sentinel2AggregationPeriod,
   GlofasForecastState,
   GlofasForecastOverlay,
+  SimulationTelemetryStats,
 } from './types/evacuation';
 import { PRESET_SCENARIOS } from './data/presets';
 import {
@@ -28,11 +29,13 @@ import {
   reconcileSimulationOnRestart,
   stepSimulationState,
   getRemainingPopulationBySource,
+  createInitialTelemetryStats,
 } from './services/simulationEngine';
 import { LeftControlPanel } from './components/LeftControlPanel';
 import { EvacuationMap } from './components/EvacuationMap';
 import { BottomLogPanel } from './components/BottomLogPanel';
 import { RightTelemetryPanel } from './components/RightTelemetryPanel';
+import { SimulationReportModal } from './components/SimulationReportModal';
 
 export function App() {
   // Preset scenario selection
@@ -73,10 +76,14 @@ export function App() {
   const [pickupStates, setPickupStates] = useState<PickupLocationState[]>([]);
   const [vehicles, setVehicles] = useState<ActiveVehicleUnit[]>([]);
   const [heatmapPoints, setHeatmapPoints] = useState<HeatmapPoint[]>([]);
+  const [telemetryStats, setTelemetryStats] = useState<SimulationTelemetryStats>(() =>
+    createInitialTelemetryStats(PRESET_SCENARIOS.brussels.sourceAreas)
+  );
 
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [simSpeed, setSimSpeed] = useState<number>(2);
   const [elapsedSimSeconds, setElapsedSimSeconds] = useState<number>(0);
+  const [isSimulationReportOpen, setIsSimulationReportOpen] = useState<boolean>(false);
 
   // Telemetry metrics
   const [totalEvacuated, setTotalEvacuated] = useState<number>(0);
@@ -86,6 +93,11 @@ export function App() {
 
   // System & Simulation Logs
   const [logs, setLogs] = useState<LogEntry[]>([]);
+
+  // Independent Cockpit Panel Collapse States
+  const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState<boolean>(false);
+  const [isBottomPanelCollapsed, setIsBottomPanelCollapsed] = useState<boolean>(false);
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState<boolean>(false);
 
   const appendLog = useCallback(
     (level: LogEntry['level'], message: string, simSec: number = 0) => {
@@ -156,6 +168,7 @@ export function App() {
       setPickupStates([]);
       setVehicles([]);
       setHeatmapPoints([]);
+      setTelemetryStats(createInitialTelemetryStats(data.sourceAreas));
 
       const totalPop = data.sourceAreas.reduce((acc, s) => acc + s.population, 0);
       setTotalEvacuated(0);
@@ -177,6 +190,7 @@ export function App() {
       setPickupStates([]);
       setVehicles([]);
       setHeatmapPoints([]);
+      setTelemetryStats(createInitialTelemetryStats([]));
       setTotalEvacuated(0);
       setTotalInTransit(0);
       setTotalRemainingAtSource(0);
@@ -226,6 +240,7 @@ export function App() {
       setPickupStates(initialSimState.pickupStates);
       setVehicles(initialSimState.vehicles);
       setHeatmapPoints(initialSimState.heatmapPoints);
+      setTelemetryStats(initialSimState.telemetryStats);
       setElapsedSimSeconds(0);
 
       setTotalEvacuated(0);
@@ -301,13 +316,16 @@ export function App() {
             vehicleFleets,
             vehicles,
             currentTargetOccupancies,
-            directRoutesToClosestTarget
+            directRoutesToClosestTarget,
+            telemetryStats,
+            pickupStates
           );
 
           setClusters(reconciled.clusters);
           setPickupStates(reconciled.pickupStates);
           setVehicles(reconciled.vehicles);
           setHeatmapPoints(reconciled.heatmapPoints);
+          setTelemetryStats(reconciled.telemetryStats);
           setTotalEvacuated(reconciled.totalEvacuated);
           setTotalInTransit(reconciled.totalInTransit);
           setTotalRemainingAtSource(reconciled.totalRemainingAtSource);
@@ -328,6 +346,7 @@ export function App() {
           setPickupStates(initialSimState.pickupStates);
           setVehicles(initialSimState.vehicles);
           setHeatmapPoints(initialSimState.heatmapPoints);
+          setTelemetryStats(initialSimState.telemetryStats);
           setTotalEvacuated(0);
           setTotalInTransit(0);
           setTotalRemainingAtSource(initialSimState.totalRemainingAtSource);
@@ -348,6 +367,7 @@ export function App() {
       handleResetSimulation();
     }
 
+    setIsSimulationReportOpen(false);
     setIsSimulating(true);
     appendLog(
       'SIMULATION',
@@ -398,6 +418,7 @@ export function App() {
     setPickupStates(freshState.pickupStates);
     setVehicles(freshState.vehicles);
     setHeatmapPoints(freshState.heatmapPoints);
+    setTelemetryStats(freshState.telemetryStats);
 
     setTotalEvacuated(0);
     setTotalInTransit(0);
@@ -417,6 +438,7 @@ export function App() {
     pickupStates,
     vehicles,
     targetOccupancies: {} as Record<string, number>,
+    telemetryStats,
     elapsedSimSeconds,
     sourceAreas,
     targetAreas,
@@ -434,12 +456,22 @@ export function App() {
       pickupStates,
       vehicles,
       targetOccupancies: occMap,
+      telemetryStats,
       elapsedSimSeconds,
       sourceAreas,
       targetAreas,
       simSpeed,
     };
-  }, [clusters, pickupStates, vehicles, elapsedSimSeconds, sourceAreas, targetAreas, simSpeed]);
+  }, [
+    clusters,
+    pickupStates,
+    vehicles,
+    telemetryStats,
+    elapsedSimSeconds,
+    sourceAreas,
+    targetAreas,
+    simSpeed,
+  ]);
 
   useEffect(() => {
     if (!isSimulating) return;
@@ -457,6 +489,7 @@ export function App() {
           vehicles: state.vehicles,
           heatmapPoints: [],
           targetOccupancies: state.targetOccupancies,
+          telemetryStats: state.telemetryStats,
           newLogs: [],
           totalEvacuated: 0,
           totalInTransit: 0,
@@ -473,6 +506,7 @@ export function App() {
       setPickupStates(stepResult.pickupStates);
       setVehicles(stepResult.vehicles);
       setHeatmapPoints(stepResult.heatmapPoints);
+      setTelemetryStats(stepResult.telemetryStats);
       setElapsedSimSeconds(nextElapsed);
 
       setTotalEvacuated(stepResult.totalEvacuated);
@@ -1068,7 +1102,7 @@ export function App() {
             data.cached
               ? `Reused existing GeoTIFF for today (${data.geotiffPath}) to spare download time.`
               : `Downloaded GRIB2 & converted to 3-band GeoTIFF (${data.geotiffPath}).`
-          } Added 3 map overlays (24h, 48h, 72h forecasts, values > 80 clipped to 80, White [0] -> Red [80] color map).`,
+          } Added 3 map overlays (24h, 48h, 72h forecasts: pixels < 10 m³/s fully transparent, pixels > 10 m³/s clipped at 80 with White -> Red color map and controlled by transparency sliders).`,
           elapsedSimSeconds
         );
       } else {
@@ -1123,8 +1157,10 @@ export function App() {
 
   return (
     <div className="cockpit-grid-layout">
-      {/* 1. LEFT SIDE PANEL (25% Width x 100% Height) */}
+      {/* 1. LEFT SIDE PANEL (25% Width x 100% Height, Collapsible) */}
       <LeftControlPanel
+        isCollapsed={isLeftPanelCollapsed}
+        onToggleCollapse={() => setIsLeftPanelCollapsed((prev) => !prev)}
         selectedPreset={selectedPreset}
         onSelectPreset={handleSelectPreset}
         sourceAreas={sourceAreas}
@@ -1150,6 +1186,11 @@ export function App() {
         onRunSimulation={handleRunSimulation}
         onStopSimulation={handleStopSimulation}
         onResetSimulation={handleResetSimulation}
+        onOpenSimulationReport={() => {
+          if (!isSimulating) {
+            setIsSimulationReportOpen(true);
+          }
+        }}
         isSimulating={isSimulating}
         simSpeed={simSpeed}
         onChangeSimSpeed={setSimSpeed}
@@ -1179,7 +1220,7 @@ export function App() {
         onChangeGlofasOverlayOpacity={handleChangeGlofasOverlayOpacity}
       />
 
-      {/* 2. CENTER AREA COLUMN (50% Width) -> TOP 75% MAP + BOTTOM 25% LOGS */}
+      {/* 2. CENTER AREA COLUMN (Dynamic Flex Width) -> TOP MAP (Flex Height) + BOTTOM LOGS (Collapsible) */}
       <main className="cockpit-center-column">
         <div className="cockpit-map-area" id="center-osm-map-panel">
           <EvacuationMap
@@ -1210,11 +1251,18 @@ export function App() {
           />
         </div>
 
-        <BottomLogPanel logs={logs} onClearLogs={() => setLogs([])} />
+        <BottomLogPanel
+          logs={logs}
+          onClearLogs={() => setLogs([])}
+          isCollapsed={isBottomPanelCollapsed}
+          onToggleCollapse={() => setIsBottomPanelCollapsed((prev) => !prev)}
+        />
       </main>
 
-      {/* 3. RIGHT SIDE PANEL (25% Width x 100% Height) */}
+      {/* 3. RIGHT SIDE PANEL (25% Width x 100% Height, Collapsible) */}
       <RightTelemetryPanel
+        isCollapsed={isRightPanelCollapsed}
+        onToggleCollapse={() => setIsRightPanelCollapsed((prev) => !prev)}
         sourceAreas={sourceAreas}
         targetAreas={targetAreas}
         vehicleFleets={vehicleFleets}
@@ -1226,6 +1274,34 @@ export function App() {
         totalRemainingAtSource={totalRemainingAtSource}
         totalWaitingAtPickups={totalWaitingAtPickups}
         isSimulating={isSimulating}
+      />
+
+      {/* Centered Simulation Report Modal (enabled only when simulation is paused) */}
+      <SimulationReportModal
+        isOpen={isSimulationReportOpen && !isSimulating}
+        onClose={() => setIsSimulationReportOpen(false)}
+        scenarioName={
+          selectedPreset === 'brussels'
+            ? PRESET_SCENARIOS.brussels.name
+            : selectedPreset === 'paris'
+            ? PRESET_SCENARIOS.paris.name
+            : 'Custom Scenario'
+        }
+        elapsedSimSeconds={elapsedSimSeconds}
+        simSpeed={simSpeed}
+        sourceAreas={sourceAreas}
+        targetAreas={targetAreas}
+        noGoAreas={noGoAreas}
+        vehicleFleets={vehicleFleets}
+        computedRoutes={computedRoutes}
+        clusters={clusters}
+        pickupStates={pickupStates}
+        vehicles={vehicles}
+        telemetryStats={telemetryStats}
+        totalEvacuated={totalEvacuated}
+        totalInTransit={totalInTransit}
+        totalRemainingAtSource={totalRemainingAtSource}
+        totalWaitingAtPickups={totalWaitingAtPickups}
       />
     </div>
   );

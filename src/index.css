@@ -45,7 +45,7 @@ body,
 }
 
 /* ==========================================================================
-   4-PANEL COCKPIT LAYOUT (25% Left | 50% Center [75% Map + 25% Logs] | 25% Right)
+   4-PANEL COCKPIT LAYOUT (Collapsible Left | Dynamic Center [Flex Map + Collapsible Logs] | Collapsible Right)
    ========================================================================== */
 .cockpit-grid-layout {
   display: flex;
@@ -56,17 +56,28 @@ body,
 
 .cockpit-left-panel {
   width: 25%;
+  flex-shrink: 0;
   height: 100vh;
   background-color: var(--bg-panel);
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   contain: layout style paint;
 }
 
+.cockpit-left-panel.collapsed {
+  width: 38px;
+  min-width: 38px;
+  max-width: 38px;
+  align-items: center;
+  padding: 10px 0;
+}
+
 .cockpit-center-column {
-  width: 50%;
+  flex: 1;
+  min-width: 0;
   height: 100vh;
   display: flex;
   flex-direction: column;
@@ -75,8 +86,9 @@ body,
 }
 
 .cockpit-map-area {
+  flex: 1;
+  min-height: 0;
   width: 100%;
-  height: 75vh;
   position: relative;
   background-color: #0b101b;
   overflow: hidden;
@@ -85,23 +97,126 @@ body,
 .cockpit-bottom-panel {
   width: 100%;
   height: 25vh;
+  flex-shrink: 0;
   background-color: var(--bg-cockpit);
   border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: height 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   contain: layout style paint;
+}
+
+.cockpit-bottom-panel.collapsed {
+  height: 36px;
+  min-height: 36px;
 }
 
 .cockpit-right-panel {
   width: 25%;
+  flex-shrink: 0;
   height: 100vh;
   background-color: var(--bg-panel);
   border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   contain: layout style paint;
+}
+
+.cockpit-right-panel.collapsed {
+  width: 38px;
+  min-width: 38px;
+  max-width: 38px;
+  align-items: center;
+  padding: 10px 0;
+}
+
+/* Collapsible Panel Header Buttons & Vertical Rails */
+.btn-collapse-panel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-collapse-panel:hover {
+  color: var(--text-primary);
+  border-color: var(--border-focus);
+  background-color: var(--bg-card-hover);
+}
+
+.panel-rail-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  color: var(--accent-route-primary);
+  cursor: pointer;
+  margin-bottom: 14px;
+  transition: all 0.15s ease;
+}
+
+.panel-rail-expand-btn:hover {
+  background-color: var(--bg-card-hover);
+  border-color: var(--border-focus);
+  transform: scale(1.05);
+}
+
+.panel-rail-vertical-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  padding: 8px 0;
+}
+
+.panel-rail-vertical-label:hover {
+  color: var(--text-primary);
+}
+
+.rail-kpi-pill {
+  writing-mode: horizontal-tb;
+  background-color: rgba(16, 185, 129, 0.18);
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  color: #34d399;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.collapsed-latest-log-preview {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: 6px;
+  max-width: 480px;
 }
 
 /* ==========================================================================
@@ -334,10 +449,19 @@ body,
   font-weight: 600;
 }
 
-/* Entity List Scroll Area */
-.entity-list-scroll-area {
+/* Top-justified scrollable stack for Left Panel collapsible sections */
+.left-panel-sections-stack {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+/* Entity List Scroll Area (inside collapsible Parameters section) */
+.entity-list-scroll-area {
+  flex: 0 0 auto;
   padding: 12px 14px;
 }
 

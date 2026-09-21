@@ -17,9 +17,14 @@ import {
   EyeOff,
   BarChart3,
   MapPin,
+  ChevronLeft,
+  PanelRightClose,
+  PanelRightOpen,
 } from 'lucide-react';
 
 interface RightTelemetryPanelProps {
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
   vehicleFleets: VehicleFleet[];
@@ -34,6 +39,8 @@ interface RightTelemetryPanelProps {
 }
 
 export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
+  isCollapsed = false,
+  onToggleCollapse,
   sourceAreas,
   targetAreas,
   vehicleFleets,
@@ -92,6 +99,39 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
 
   const wanderingInZones = Math.max(0, totalRemainingAtSource - totalWaitingAtPickups);
 
+  if (isCollapsed) {
+    return (
+      <aside
+        className="cockpit-right-panel collapsed"
+        id="right-telemetry-panel"
+        title="Click to expand Right Situational Telemetry Panel"
+      >
+        <button
+          type="button"
+          id="btn-toggle-right-panel"
+          className="panel-rail-expand-btn"
+          onClick={onToggleCollapse}
+          title="Expand Right Situational Telemetry Panel"
+        >
+          <ChevronLeft size={13} />
+          <PanelRightOpen size={15} />
+        </button>
+        <div
+          className="panel-rail-vertical-label"
+          onClick={onToggleCollapse}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') onToggleCollapse?.();
+          }}
+        >
+          <span className="rail-kpi-pill">{progressPercent}%</span>
+          <span>SITUATIONAL TELEMETRY</span>
+        </div>
+      </aside>
+    );
+  }
+
   return (
     <aside className="cockpit-right-panel" id="right-telemetry-panel">
       <header className="right-panel-header">
@@ -99,15 +139,29 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
           <Activity size={16} className="telemetry-icon" />
           <h2 className="right-panel-title">Situational Telemetry</h2>
         </div>
-        <button
-          type="button"
-          className="btn-toggle-minimal"
-          onClick={() => setMinimalMode(!minimalMode)}
-          title="Toggle Telemetry vs Scoping Blank View"
-        >
-          {minimalMode ? <BarChart3 size={14} /> : <EyeOff size={14} />}
-          <span>{minimalMode ? 'Show KPIs' : 'Blank View'}</span>
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <button
+            type="button"
+            className="btn-toggle-minimal"
+            onClick={() => setMinimalMode(!minimalMode)}
+            title="Toggle Telemetry vs Scoping Blank View"
+          >
+            {minimalMode ? <BarChart3 size={14} /> : <EyeOff size={14} />}
+            <span>{minimalMode ? 'Show KPIs' : 'Blank View'}</span>
+          </button>
+          {onToggleCollapse && (
+            <button
+              type="button"
+              id="btn-toggle-right-panel"
+              className="btn-collapse-panel"
+              onClick={onToggleCollapse}
+              title="Collapse Right Situational Telemetry Panel"
+            >
+              <span>Collapse</span>
+              <PanelRightClose size={14} />
+            </button>
+          )}
+        </div>
       </header>
 
       {minimalMode ? (

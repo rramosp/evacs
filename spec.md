@@ -102,7 +102,7 @@ When the user restarts (`Run simulation`) a paused simulation after modifying or
 
 ## 5. UI Layout & UX Architecture
 
-The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non-scrolling outer container):
+The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non-scrolling outer flex container) where the **Left Control Panel**, **Bottom Log Panel**, and **Right Telemetry Panel** are **independently collapsible**, dynamically giving all reclaimed horizontal and vertical space to the **Center Map Viewport**:
 
 ```
 +-------------------+-----------------------------------+-------------------+
@@ -110,33 +110,49 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 |                   |                                   |                   |
 |                   |            CENTER MAP             |                   |
 |    LEFT PANEL     |         (OSM + Overlays)          |    RIGHT PANEL    |
-|   (Parameters &   |        50% Width, 75% Height      |  (Live Telemetry  |
-|     Controls)     |                                   |   & Analytics)    |
-|                   |                                   |                   |
-|    25% Width      +-----------------------------------+    25% Width      |
-|   100% Height     |           BOTTOM PANEL            |   100% Height     |
-|                   |      (System & Simulation Logs)   |                   |
-|                   |        50% Width, 25% Height      |                   |
+|   (Parameters &   |   Default: 50% W × 75% H          |  (Live Telemetry  |
+|     Controls)     |   Expands dynamically (`flex: 1`) |   & Analytics)    |
+|                   |   up to ~100% W × ~100% H         |                   |
+|  25% W (or 38px   +-----------------------------------+  25% W (or 38px   |
+|  collapsed rail)  |           BOTTOM PANEL            |  collapsed rail)  |
+|   100% Height     |      (System & Simulation Logs)   |   100% Height     |
+|   [Collapsible]   |   25% H (or 36px collapsed bar)   |   [Collapsible]   |
 +-------------------+-----------------------------------+-------------------+
 ```
 
-### 5.1 Left Panel: Parameters & Controls (`25% Width × 100% Height`)
+- **Independent Panel Collapse & Dynamic Center Map Expansion**:
+  - **Left Panel Collapse (`#btn-toggle-left-panel`)**: Collapses the Left Control Panel (`25%` width) into a `38px` vertical tactical rail displaying an expand button and rotated `EVAC-OPS — PARAMETERS & CONTROLS` label.
+  - **Right Panel Collapse (`#btn-toggle-right-panel`)**: Collapses the Right Situational Telemetry Panel (`25%` width) into a `38px` vertical tactical rail displaying an expand button, a live evacuation progress percentage badge (`{progressPercent}%`), and rotated `SITUATIONAL TELEMETRY` label.
+  - **Bottom Log Panel Collapse (`#btn-toggle-bottom-panel`)**: Collapses the Bottom Log Console (`25vh` height) into a compact `36px` header bar that retains the event counter badge, a live one-line preview of the most recent log entry, and an `Expand Logs` button.
+  - **Automatic Map & Heatmap Canvas Resize (`ResizeObserver`)**: The Center Column (`.cockpit-center-column`) and Map Area (`.cockpit-map-area`) use `flex: 1; min-width: 0; min-height: 0;` and attach a `ResizeObserver` to the Leaflet container in [`EvacuationMap.tsx`](src/components/EvacuationMap.tsx) that automatically calls `map.invalidateSize({ animate: false })` and `renderHeatmapCanvas()` whenever any panel is collapsed or expanded.
+
+### 5.1 Left Panel: Parameters & Controls (`25% Width × 100% Height`, Independently Collapsible)
+- **Brand Header Logo ([`imgs/evac-logo.png`](imgs/evac-logo.png)) & Panel Collapse Toggle (`#btn-toggle-left-panel`)**: Displays the `imgs/evac-logo.png` (`EVAC-SIM`) logo banner at the top of the Left Panel alongside the `#btn-toggle-left-panel` button (`Collapse`), which collapses the Left Panel to a `38px` vertical rail and expands the Center Map horizontally.
 - **Scenario Selector**: Dropdown to load preset scenarios (`Brussels`, `Paris`, or `Custom / Clear`).
-- **Simulation Lock Banner**: Indicates when entity editing is locked during active simulation playback and unlocks automatically when paused.
-- **Entity Management Accordion / Tabs**:
-  - **Source Areas**: List with live remaining / total population count, behavioral split badge, and `Add (Draw Polygon)`, `Edit` (including population count changes), and `Delete` (enabled only when remaining population is `0`).
-  - **Target Areas**: List with capacity/occupancy badges, `Add (Draw Polygon)`, `Edit`, and `Disable / Enable Shelter` toggle (no Delete action allowed).
-  - **No-Go Areas**: List with hazard tags and `Add (Draw Polygon)`, `Edit`, `Delete` actions.
-  - **Vehicle Fleets**: List with count/capacity summary and `Add (Place Pin)`, `Edit`, `Delete` actions.
-- **Execution Toolbar (Collapsible Panel — `#toggle-execution-section`)**:
-  - Collapsible section header (`EXECUTION & SIMULATION`) allowing the user to expand or collapse the execution and simulation controls.
-  - `Compute Evacuation Routes`
-  - `Run Simulation` / `Resume Simulation`
-  - `Pause Simulation` (Pauses simulation and unlocks entity editing)
-  - `Reset Simulation` (Resets time to `t = 0` and restores initial source area population)
-  - Simulation Speed Selector (`1x`, `2x`, `5x`, `10x`)
-- **Space Data Section (Collapsible Panel — `#toggle-space-data-section`, Positioned Below All Other Left Panel Sections)**:
-  - Collapsible section header (`SPACE DATA`) placed at the very bottom of the Left Control Panel, below all other sections (Scenario Preset Selector, Simulation Execution Toolbar, and Entity Management Accordion / Tabs).
+- **Top-Justified Stack of Three Collapsible Sections (`.left-panel-sections-stack`, `justify-content: flex-start`, All Startup-Collapsed by Default)**:
+  All three sections below start **collapsed (`true`)** when the application starts and are top-justified immediately beneath the Preset Scenario selector in the following order:
+  1. **Parameters Section (Collapsible — `#toggle-parameters-section`, Placed Above Execution & Simulation)**:
+     - Collapsible section header (`PARAMETERS`) wrapping the **Simulation Lock Banner** (when simulation is running), the **New Entity Creation Modal Card** (when drawing/placing), the **Entity Category Navigation Tabs** (`Sources`, `Targets`, `No-Go`, `Vehicles`), and the **Entity List**:
+       - **Source Areas**: List with live remaining / total population count, behavioral split badge, and `Add (Draw Polygon)`, `Edit` (including population count changes), and `Delete` (enabled only when remaining population is `0`).
+       - **Target Areas**: List with capacity/occupancy badges, `Add (Draw Polygon)`, `Edit`, and `Disable / Enable Shelter` toggle (no Delete action allowed).
+       - **No-Go Areas**: List with hazard tags and `Add (Draw Polygon)`, `Edit`, `Delete` actions.
+       - **Vehicle Fleets**: List with count/capacity summary and `Add (Place Pin)`, `Edit`, `Delete` actions.
+  2. **Execution & Simulation Section (Collapsible — `#toggle-execution-section`, Placed Below Parameters)**:
+     - Collapsible section header (`EXECUTION & SIMULATION`) allowing the user to expand or collapse the execution and simulation controls:
+       - `Compute Evacuation Routes`
+       - `Run Simulation` / `Resume Simulation`
+       - `Pause Simulation` (Pauses simulation and unlocks entity editing)
+       - `Reset Simulation` (Resets time to `t = 0` and restores initial source area population)
+       - **`Simulation report` Button (`#btn-simulation-report`)**: Enabled **only when the simulation is paused** (`!isSimulating`). Clicking **`Simulation report`** opens a popup modal (`#simulation-report-modal`) centered in the browser window via React portal (`SimulationReportModal.tsx`), displaying a comprehensive simulation report including:
+         1. **Number of people evacuated to shelter** (`totalEvacuated`, completion `%`, and shelter-level arrivals).
+         2. **Number of people still not evacuated**, with exact breakdown per population behaviour (`obedient`, `autonomous`, `random`) and sub-stage breakdown (moving inside Source Zone, waiting/boarding at Pickup Locations, and in transit on vehicles).
+         3. **Mean evacuation time per person**, overall and broken down per population behaviour (`obedient`, `autonomous`, `random`), alongside mean pickup assembly time per behaviour.
+         4. **Number of people evacuated at each pick up location** (both total boarded at pickup with `obedient`/`autonomous`/`random` breakdown and total delivered to shelter, plus active queue count).
+         5. **Mean vehicle wait time at each pick up location** (`MM:SS` and raw seconds across completed departures and active waiting vehicles, plus peak wait time and average vehicle departure load factor `%`).
+         6. **Additional operational metrics**: Shelter capacity utilization & remaining headroom bars, evacuation & boarding velocity (`pax/min`), estimated time to 100% clearance (`ETA`), completed vehicle convoys, No-Go hazard avoidance summary, and `Export JSON` download button.
+       - Simulation Speed Selector (`1x`, `2x`, `5x`, `10x`)
+  3. **Space Data Section (Collapsible — `#toggle-space-data-section`, Placed Below Execution & Simulation)**:
+     - Collapsible section header (`SPACE DATA`) stacked directly below the `Execution & Simulation` section.
   - **Current Date Text Box**: Located at the top of the Space Data section (`YYYY-MM-DD`, defaulting to today's date).
   - **`aggregation period` Dropdown Selector**: Located above the action button with options:
     - `'last week'`
@@ -147,6 +163,7 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
     - `'last year'`
   - **Compact `Sentinel 2 Optical Data` Button** (`#btn-sentinel2-optical-data`): Styled as a compact button below the `aggregation period` selector.
   - **Compact `Sentinel 1 SAR Data` Button** (`#btn-sentinel1-sar-data`): Placed directly below the **`Sentinel 2 Optical Data`** button.
+  - **Compact `Planet Scope` Button (`#btn-planet-scope-data`) & Popup Modal (`#planet-scope-modal`)**: Placed directly below the **`Sentinel 1 SAR Data`** button. Clicking **`Planet Scope`** opens a modal popup displaying `"Not yet available"` with a **`Dismiss`** button (`#btn-dismiss-planet-scope-modal`) to close the popup.
   - Clicking **`Sentinel 2 Optical Data`** computes the derived date window `[start_date, end_date]` from the **Current Date** text box and selected **`aggregation period`**, logs the actual derived dates (`start_date` to `end_date`) in the Bottom Logging Panel, and invokes `POST /api/space-data/sentinel2`, which executes `server/ee_sentinel2.py` using Google Earth Engine (`ee`) on the server side:
     ```python
     ee.Authenticate()
@@ -205,10 +222,11 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
     - **Automatic Cleanup & Caching**:
       - On application startup (`/api/cems-glofas/cleanup`) and whenever a download is requested, every file in `tmp_downloads/` from previous days (not matching today's date) is automatically deleted.
       - If a GeoTIFF file for today and the requested region already exists in `tmp_downloads/`, it is reused immediately without re-downloading from the CDS API to spare download time.
-    - **Three Overlays & White-to-Red Color Map (Clipped at 80)**:
+    - **Three Overlays, `< 10` Transparency Threshold & White-to-Red Color Map (Clipped at 80)**:
       - Produces a 3-band GeoTIFF (Band 1: `24h Forecast`, Band 2: `48h Forecast`, Band 3: `72h Forecast`).
+      - **Full Transparency Below `10 m³/s`**: Any pixel value below `10` (`<= 10.0 m³/s`) is rendered as **fully transparent (`alpha = 0`)**. Only pixel values above `10` (`> 10.0 m³/s`) appear on the map (`alpha = 255`) and have their transparency controlled by the corresponding band's transparency/opacity slider (`0%` to `100%`).
       - Clips every pixel value above `80` to `80` (`np.clip(arr, 0.0, 80.0)`) and applies a continuous **Red Scale Color Map from White (`0`) to Red (`80`)**.
-      - Adds **three independent image overlays** (`24h`, `48h`, `72h`) on the map along with a color map legend (`0` White &rarr; `80` Red) and individual visibility/opacity controls.
+      - Adds **three independent image overlays** (`24h`, `48h`, `72h`) on the map along with a color map legend (`< 10 Transparent` | `10` &rarr; `80` Red) and individual visibility/opacity controls.
 
 ### 5.2 Center Area: Interactive OpenStreetMap Viewport (`50% Width × 75% Height`)
 - **Base Layer (Zero API Key Required)**: Exclusively uses public, open-source **OpenStreetMap** tile layers that require **no API key**:
@@ -218,17 +236,19 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 - **Visual Overlays**:
   - **Sentinel-2 True Color RGB Satellite Layer**: When loaded via **Space Data -> Sentinel 2 Optical Data**, renders the Google Earth Engine `median_image` tile layer (`vis_params`: `bands: ['B4', 'B3', 'B2']`, `min: 0`, `max: 3000`, `gamma: 1.4`) directly on the center Leaflet map.
   - **Sentinel-1 SAR False-Color Composite Layer**: When loaded via **Space Data -> Sentinel 1 SAR Data**, renders the Google Earth Engine `COPERNICUS/S1_GRD` false-color composite tile layer (`vis_params`: `bands: ['VV', 'VH', 'VV/VH']`, `min: [-25, -30, 0]`, `max: [0, -5, 1]`) directly on the center Leaflet map.
-  - **CEMS GloFAS River Discharge Forecast Overlays (24h, 48h, 72h)**: Renders three georeferenced RGBA image overlays (`L.imageOverlay`) for the 24h, 48h, and 72h river discharge forecasts within a 100 km radius around the map center, with pixel values above `80` clipped to `80`, colored using a **White (`0`) to Red (`80`)** scale color map, and accompanied by a floating on-map colorbar legend.
+  - **CEMS GloFAS River Discharge Forecast Overlays (24h, 48h, 72h)**: Renders three georeferenced RGBA image overlays (`L.imageOverlay`) for the 24h, 48h, and 72h river discharge forecasts within a 100 km radius around the map center. Pixels with discharge values below `10 m³/s` are rendered as **fully transparent (`alpha = 0`)**, while pixels above `10 m³/s` (clipped at `80 m³/s`) are colored using the **White (`0`) to Red (`80`)** scale color map and governed directly by the corresponding band's transparency slider (`ov.opacity`). Accompanied by a floating on-map colorbar legend.
   - Source Areas: Amber/Orange polygons with live remaining headcount badges.
   - Target Areas: Emerald Green polygons for active shelters; Slate Gray dashed polygons with `🚫 DISABLED` badge for disabled shelters.
   - No-Go Areas: Cross-hatched Crimson Red polygons.
   - **Route Pickup Locations (Blue Squares)**: Marked with a distinct **blue square** (`#2563eb`) displaying live waiting queue counts and active vehicle boarding timers (`MM:SS / 10:00`).
   - **Dynamic Heatmap Overlay**: Hotter around Pickup Locations as queues form; progressively cools down over time as vehicles evacuate people from Source Areas.
 
-### 5.3 Bottom Panel: System & Simulation Console (`50% Width × 25% Height`)
+### 5.3 Bottom Panel: System & Simulation Console (`25% Height` Default, Independently Collapsible to `36px`)
+- **Panel Collapse Toggle (`#btn-toggle-bottom-panel`)**: Located in the right controls group of the Bottom Panel header (`Collapse` / `Expand Logs`), collapsing the console to a `36px` bar (with a live preview of the most recent log entry) so the Center Map expands vertically from `75vh` to `calc(100vh - 36px)`.
 - Timestamped log stream displaying routing computations, mid-simulation edits, route recomputations upon restart, loaded vehicle redirections to closest active shelters, arrival confirmations, **Space Data (Sentinel-2 Optical & Sentinel-1 SAR) requests including the actual derived date range (`start_date` to `end_date`) computed from the user's Current Date and `aggregation period` selection**, and **CEMS Early Warning River Discharge Prediction cleanup, cache-hit/download status in `tmp_downloads/`, and 24h/48h/72h overlay rendering**.
 
-### 5.4 Right Panel: Telemetry & KPI Dashboard (`25% Width × 100% Height`)
+### 5.4 Right Panel: Telemetry & KPI Dashboard (`25% Width × 100% Height`, Independently Collapsible)
+- **Panel Collapse Toggle (`#btn-toggle-right-panel`)**: Located in the top-right of the Right Panel header (`Collapse`), collapsing the telemetry panel into a `38px` vertical rail (showing a live `{progressPercent}%` badge) so the Center Map expands horizontally.
 - Live evacuation progress KPIs, Blue Square pickup queues, Target Shelter occupancy meters (with `DISABLED` indicators), and behavioral breakdowns.
 - **Exact Population Conservation & Progress Invariant**:
   - Total population across the system satisfies exact conservation: $\text{Total Population} = \text{Safe at Shelter } (\text{totalEvacuated}) + \text{On Vehicles } (\text{totalInTransit}) + \text{In Source Area } (\text{totalRemainingAtSource})$.
@@ -299,3 +319,9 @@ The viewport is divided into a **4-Panel Cockpit Layout** (`100vw × 100vh`, non
 | **v1.14** | 2026-09-20 | Added **CEMS Early Warning River Discharge Prediction (`scripts/download_glofas.py`)**: (1) Added **`CEMS Early Warning River Discharge Prediction`** section under **Space Data**; (2) Updated [`scripts/download_glofas.py`](scripts/download_glofas.py) to accept configurable region coordinates (`--lat`, `--lon`, `--radius 100000` for a 100 km radius around current map center) and store all files in **`tmp_downloads/`**; (3) Implemented automatic deletion of all files from previous days in `tmp_downloads/` on application startup and on every download, while reusing today's existing GeoTIFF when present to spare download time; (4) Rendered three map overlays (`24h`, `48h`, `72h` forecast bands) with pixel values above `80` clipped to `80`, a **White (`0`) to Red (`80`)** scale color map, and an interactive color map legend. |
 | **v1.15** | 2026-09-20 | Made **"Execution & Simulation"** and **"Space Data"** panels collapsible in [`LeftControlPanel.tsx`](src/components/LeftControlPanel.tsx) via interactive toggle headers (`#toggle-execution-section` and `#toggle-space-data-section`) with chevron state indicators. |
 | **v1.16** | 2026-09-20 | Updated [`README.md`](README.md) with detailed end-to-end setup and operational instructions covering Conda geospatial environment creation, Google Earth Engine GCP project setup (`geo-stars`), `earthengine` CLI authentication (local and headless SSH modes), Copernicus CEMS / EWDS account registration, dataset license acceptance, `~/.cdsapirc` API token configuration, `tmp_downloads/` caching/cleanup lifecycle, and standalone script verification. |
+| **v1.17** | 2026-09-21 | Made the **Left Control Panel** (`#btn-toggle-left-panel`), **Bottom System & Simulation Log Panel** (`#btn-toggle-bottom-panel`), and **Right Situational Telemetry Panel** (`#btn-toggle-right-panel`) **independently collapsible** across [`App.tsx`](src/App.tsx), [`LeftControlPanel.tsx`](src/components/LeftControlPanel.tsx), [`BottomLogPanel.tsx`](src/components/BottomLogPanel.tsx), [`RightTelemetryPanel.tsx`](src/components/RightTelemetryPanel.tsx), and [`index.css`](src/index.css), dynamically expanding the Center Map Viewport (`flex: 1`) horizontally and vertically and attaching a `ResizeObserver` in [`EvacuationMap.tsx`](src/components/EvacuationMap.tsx) to automatically resize Leaflet tiles and the HTML5 heatmap canvas. |
+| **v1.18** | 2026-09-21 | Gathered the entity tabs (`Sources`, `Targets`, `No-Go`, `Vehicles`) and entity list into a collapsible **"Parameters"** section (`#toggle-parameters-section`) in [`LeftControlPanel.tsx`](src/components/LeftControlPanel.tsx) and [`index.css`](src/index.css) (`.left-panel-sections-stack`), so the Left Panel now features three **top-justified** collapsible sections: **"Execution & Simulation"**, **"Parameters"**, and **"Space Data"**. |
+| **v1.19** | 2026-09-21 | Updated **CEMS GloFAS River Discharge Prediction Map Rendering** across [`scripts/download_glofas.py`](scripts/download_glofas.py), [`EvacuationMap.tsx`](src/components/EvacuationMap.tsx), and [`LeftControlPanel.tsx`](src/components/LeftControlPanel.tsx) so that any pixel value below `10` (`<= 10.0 m³/s`) appears as **fully transparent (`alpha = 0`)**, while only pixel values above `10` (`> 10.0 m³/s`, clipped at `80`) appear on the map (`alpha = 255`) and are subject to the corresponding band's transparency/opacity slider (`0%` to `100%`). |
+| **v1.20** | 2026-09-21 | Replaced the `"EVAC-OPS Evacuation Command"` text title at the top of the Left Control Panel ([`LeftControlPanel.tsx`](src/components/LeftControlPanel.tsx)) with the application logo image [`imgs/evac-logo.png`](imgs/evac-logo.png). |
+| **v1.21** | 2026-09-21 | Updated Left Control Panel ([`LeftControlPanel.tsx`](src/components/LeftControlPanel.tsx)): (1) Configured all three collapsible sections (**"Parameters"**, **"Execution & Simulation"**, **"Space Data"**) to start **collapsed by default** on application startup; (2) Moved the **"Parameters"** section above the **"Execution & Simulation"** section; (3) Added a **`Planet Scope`** button (`#btn-planet-scope-data`) directly below the **`Sentinel 1 SAR Data`** button in the **"Space Data"** section that opens a popup dialog (`#planet-scope-modal`) displaying `"Not yet available"` with a **`Dismiss`** button (`#btn-dismiss-planet-scope-modal`). |
+| **v1.22** | 2026-09-21 | Added **`Simulation report`** button (`#btn-simulation-report`) in the Left Control Panel's **Execution & Simulation** section ([`LeftControlPanel.tsx`](src/components/LeftControlPanel.tsx)), enabled only when the simulation is paused (`!isSimulating`). Clicking it opens a centered browser-window popup modal ([`SimulationReportModal.tsx`](src/components/SimulationReportModal.tsx)) backed by per-behavior and per-pickup telemetry in [`simulationEngine.ts`](src/services/simulationEngine.ts) and [`evacuation.ts`](src/types/evacuation.ts), reporting: (1) number of people evacuated to shelter; (2) number of people still not evacuated with full detail per population behaviour (`obedient`, `autonomous`, `random`) and stage (in source zone, at pickup, in transit); (3) mean evacuation time per person overall and per population behaviour (`obedient`, `autonomous`, `random`); (4) number of people evacuated at each pickup location; (5) mean vehicle wait time at each pickup location; and (6) additional operational telemetry (shelter occupancy/headroom, throughput `pax/min`, clearance ETA, vehicle load factors, and JSON report export). |

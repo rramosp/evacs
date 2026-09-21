@@ -10,8 +10,135 @@ import {
   SimulationStateSnapshot,
   HeatmapPoint,
   PopulationBehaviorType,
+  BehaviorCounts,
+  SimulationTelemetryStats,
 } from '../types/evacuation';
 import { getPolygonCentroid, toTurfPolygon } from './routingEngine';
+
+/**
+ * Create a zeroed BehaviorCounts object
+ */
+export function createZeroBehaviorCounts(): BehaviorCounts {
+  return { obedient: 0, autonomous: 0, random: 0 };
+}
+
+/**
+ * Compute exact initial behavior headcounts for a list of Source Areas (matching buildClustersForSources)
+ */
+export function computeBehaviorCountsFromSources(sourceAreas: SourceArea[]): BehaviorCounts {
+  const counts = createZeroBehaviorCounts();
+  sourceAreas.forEach((src) => {
+    const totalPop = Math.max(0, src.population);
+    if (totalPop === 0) return;
+
+    const numClusters = Math.min(75, Math.max(1, totalPop));
+    const obCount = Math.round((numClusters * src.behavior.obedient) / 100);
+    const auCount = Math.round((numClusters * src.behavior.autonomous) / 100);
+
+    const baseHeadcount = Math.floor(totalPop / numClusters);
+    const remainder = totalPop % numClusters;
+
+    for (let i = 0; i < numClusters; i++) {
+      const headcount = baseHeadcount + (i < remainder ? 1 : 0);
+      if (headcount <= 0) continue;
+
+      if (i < obCount) {
+        counts.obedient += headcount;
+      } else if (i < obCount + auCount) {
+        counts.autonomous += headcount;
+      } else {
+        counts.random += headcount;
+      }
+    }
+  });
+  return counts;
+}
+
+/**
+ * Allocate `boardedNow` passengers proportionally from `waiting` BehaviorCounts
+ * while guaranteeing exact integer sum (`taken.obedient + taken.autonomous + taken.random === boardedNow`)
+ * and `0 <= taken[b] <= waiting[b]`.
+ */
+function allocateBoardedByBehavior(waiting: BehaviorCounts, boardedNow: number): BehaviorCounts {
+  const totalAvail = waiting.obedient + waiting.autonomous + waiting.random;
+  if (boardedNow <= 0 || totalAvail <= 0) {
+    return createZeroBehaviorCounts();
+  }
+  if (boardedNow >= totalAvail) {
+    return {
+      obedient: waiting.obedient,
+      autonomous: waiting.autonomous,
+      random: waiting.random,
+    };
+  }
+
+  const keys: PopulationBehaviorType[] = ['obedient', 'autonomous', 'random'];
+  const exactShares = keys.map((k) => ({
+    key: k,
+    avail: waiting[k],
+    exact: (waiting[k] / totalAvail) * boardedNow,
+  }));
+
+  const taken: BehaviorCounts = createZeroBehaviorCounts();
+  let assigned = 0;
+  for (const item of exactShares) {
+    const fl = Math.min(item.avail, Math.floor(item.exact));
+    taken[item.key] = fl;
+    assigned += fl;
+  }
+
+  let remainder = boardedNow - assigned;
+  const byFraction = [...exactShares].sort(
+    (a, b) => b.exact - Math.floor(b.exact) - (a.exact - Math.floor(a.exact))
+  );
+
+  for (const item of byFraction) {
+    if (remainder <= 0) break;
+    if (taken[item.key] < item.avail) {
+      taken[item.key] += 1;
+      remainder -= 1;
+    }
+  }
+
+  // Fallback in case any rounding gap remains
+  for (const k of keys) {
+    while (remainder > 0 && taken[k] < waiting[k]) {
+      taken[k] += 1;
+      remainder -= 1;
+    }
+  }
+
+  return taken;
+}
+
+/**
+ * Create initial SimulationTelemetryStats
+ */
+export function createInitialTelemetryStats(
+  sourceAreas: SourceArea[],
+  clusters?: SourceInternalCluster[]
+): SimulationTelemetryStats {
+  const initialByBehavior = createZeroBehaviorCounts();
+  if (clusters && clusters.length > 0) {
+    clusters.forEach((c) => {
+      initialByBehavior[c.behavior] += c.headcount;
+    });
+  } else {
+    const computed = computeBehaviorCountsFromSources(sourceAreas);
+    initialByBehavior.obedient = computed.obedient;
+    initialByBehavior.autonomous = computed.autonomous;
+    initialByBehavior.random = computed.random;
+  }
+
+  return {
+    initialByBehavior,
+    evacuatedByBehavior: createZeroBehaviorCounts(),
+    evacuatedPersonSecondsByBehavior: createZeroBehaviorCounts(),
+    pickupArrivedByBehavior: createZeroBehaviorCounts(),
+    pickupArrivalPersonSecondsByBehavior: createZeroBehaviorCounts(),
+    totalCompletedVehicleTrips: 0,
+  };
+}
 
 /**
  * Format seconds as MM:SS
@@ -372,10 +499,19 @@ export function initializeSimulationState(
     label: r.pickupLabel || `Pickup Point #${idx + 1}`,
     location: r.pickupLocation,
     waitingPopulation: 0,
+    waitingByBehavior: createZeroBehaviorCounts(),
     totalBoardedCount: 0,
+    boardedByBehavior: createZeroBehaviorCounts(),
+    evacuatedCount: 0,
+    evacuatedByBehavior: createZeroBehaviorCounts(),
+    completedDeparturesCount: 0,
+    totalCompletedVehicleWaitSeconds: 0,
+    maxVehicleWaitSeconds: 0,
+    totalDepartureOccupancyRatioSum: 0,
   }));
 
   const clusters = buildClustersForSources(sourceAreas);
+  const telemetryStats = createInitialTelemetryStats(sourceAreas, clusters);
 
   // Initialize Vehicle Units cycling along the existing computed routes to Pickups and Targets
   const vehicles: ActiveVehicleUnit[] = [];
@@ -414,6 +550,7 @@ export function initializeSimulationState(
         capacityPerUnit: capPerUnit,
         maxCapacity: maxCapPerWave,
         currentOccupancy: 0,
+        occupancyByBehavior: createZeroBehaviorCounts(),
         assignedRouteId: route.id,
         assignedPickupId: pickup.id,
         sourceId: route.sourceId,
@@ -454,6 +591,7 @@ export function initializeSimulationState(
     vehicles,
     heatmapPoints,
     targetOccupancies,
+    telemetryStats,
     newLogs: [],
     totalEvacuated: 0,
     totalInTransit: 0,
@@ -479,23 +617,43 @@ export function reconcileSimulationOnRestart(
   directRoutesToClosestTarget: Record<
     string,
     { target: TargetArea; coordinates: [number, number][] }
-  >
+  >,
+  existingTelemetryStats?: SimulationTelemetryStats,
+  existingPickupStates?: PickupLocationState[]
 ): SimulationStateSnapshot {
   const newLogs: string[] = [];
 
-  // 1. Establish new Pickup Location states from recomputed routes
-  const pickupStates: PickupLocationState[] = newRoutes.map((r, idx) => ({
-    id: `pickup-${r.id}`,
-    routeId: r.id,
-    sourceId: r.sourceId,
-    sourceName: r.sourceName,
-    targetId: r.targetId,
-    targetName: r.targetName,
-    label: r.pickupLabel || `Pickup Point #${idx + 1}`,
-    location: r.pickupLocation,
-    waitingPopulation: 0,
-    totalBoardedCount: 0,
-  }));
+  // 1. Establish new Pickup Location states from recomputed routes, preserving cumulative history if matched
+  const pickupStates: PickupLocationState[] = newRoutes.map((r, idx) => {
+    const label = r.pickupLabel || `Pickup Point #${idx + 1}`;
+    const prevPickup = existingPickupStates?.find(
+      (p) => p.routeId === r.id || (p.sourceId === r.sourceId && p.label === label)
+    );
+    return {
+      id: `pickup-${r.id}`,
+      routeId: r.id,
+      sourceId: r.sourceId,
+      sourceName: r.sourceName,
+      targetId: r.targetId,
+      targetName: r.targetName,
+      label,
+      location: r.pickupLocation,
+      waitingPopulation: 0,
+      waitingByBehavior: createZeroBehaviorCounts(),
+      totalBoardedCount: prevPickup?.totalBoardedCount || 0,
+      boardedByBehavior: prevPickup?.boardedByBehavior
+        ? { ...prevPickup.boardedByBehavior }
+        : createZeroBehaviorCounts(),
+      evacuatedCount: prevPickup?.evacuatedCount || 0,
+      evacuatedByBehavior: prevPickup?.evacuatedByBehavior
+        ? { ...prevPickup.evacuatedByBehavior }
+        : createZeroBehaviorCounts(),
+      completedDeparturesCount: prevPickup?.completedDeparturesCount || 0,
+      totalCompletedVehicleWaitSeconds: prevPickup?.totalCompletedVehicleWaitSeconds || 0,
+      maxVehicleWaitSeconds: prevPickup?.maxVehicleWaitSeconds || 0,
+      totalDepartureOccupancyRatioSum: prevPickup?.totalDepartureOccupancyRatioSum || 0,
+    };
+  });
 
   // 2. Build clusters for each Source Area using its current (remaining/edited/new) population
   const clusters = buildClustersForSources(sourceAreas);
@@ -538,6 +696,9 @@ export function reconcileSimulationOnRestart(
 
       updatedVehicles.push({
         ...veh,
+        occupancyByBehavior: veh.occupancyByBehavior
+          ? { ...veh.occupancyByBehavior }
+          : { obedient: veh.currentOccupancy, autonomous: 0, random: 0 },
         status: 'to_target',
         waitingAtPickupSeconds: 0,
         progressMeters: 0,
@@ -575,6 +736,7 @@ export function reconcileSimulationOnRestart(
 
       updatedVehicles.push({
         ...veh,
+        occupancyByBehavior: createZeroBehaviorCounts(),
         status: 'to_pickup',
         waitingAtPickupSeconds: 0,
         progressMeters: 0,
@@ -623,6 +785,7 @@ export function reconcileSimulationOnRestart(
         capacityPerUnit: fleet.capacityPerUnit,
         maxCapacity: maxCapPerWave,
         currentOccupancy: 0,
+        occupancyByBehavior: createZeroBehaviorCounts(),
         assignedRouteId: route.id,
         assignedPickupId: pickup.id,
         sourceId: route.sourceId,
@@ -657,6 +820,44 @@ export function reconcileSimulationOnRestart(
     .reduce((acc, v) => acc + v.currentOccupancy, 0);
   const totalRemainingAtSource = clusters.reduce((acc, c) => acc + c.headcount, 0);
 
+  // Recompute telemetryStats preserving already evacuated + in-transit + new remaining clusters
+  const newClustersByBehavior = createZeroBehaviorCounts();
+  clusters.forEach((c) => {
+    newClustersByBehavior[c.behavior] += c.headcount;
+  });
+
+  const inTransitByBehavior = createZeroBehaviorCounts();
+  updatedVehicles.forEach((v) => {
+    if (v.currentOccupancy > 0 && v.occupancyByBehavior) {
+      inTransitByBehavior.obedient += v.occupancyByBehavior.obedient;
+      inTransitByBehavior.autonomous += v.occupancyByBehavior.autonomous;
+      inTransitByBehavior.random += v.occupancyByBehavior.random;
+    }
+  });
+
+  const baseTelemetry = existingTelemetryStats || createInitialTelemetryStats(sourceAreas, clusters);
+  const reconciledTelemetry: SimulationTelemetryStats = {
+    initialByBehavior: {
+      obedient:
+        baseTelemetry.evacuatedByBehavior.obedient +
+        inTransitByBehavior.obedient +
+        newClustersByBehavior.obedient,
+      autonomous:
+        baseTelemetry.evacuatedByBehavior.autonomous +
+        inTransitByBehavior.autonomous +
+        newClustersByBehavior.autonomous,
+      random:
+        baseTelemetry.evacuatedByBehavior.random +
+        inTransitByBehavior.random +
+        newClustersByBehavior.random,
+    },
+    evacuatedByBehavior: { ...baseTelemetry.evacuatedByBehavior },
+    evacuatedPersonSecondsByBehavior: { ...baseTelemetry.evacuatedPersonSecondsByBehavior },
+    pickupArrivedByBehavior: { ...baseTelemetry.pickupArrivedByBehavior },
+    pickupArrivalPersonSecondsByBehavior: { ...baseTelemetry.pickupArrivalPersonSecondsByBehavior },
+    totalCompletedVehicleTrips: baseTelemetry.totalCompletedVehicleTrips,
+  };
+
   const heatmapPoints = generateHeatmapFromState(
     clusters,
     pickupStates,
@@ -671,6 +872,7 @@ export function reconcileSimulationOnRestart(
     vehicles: updatedVehicles,
     heatmapPoints,
     targetOccupancies,
+    telemetryStats: reconciledTelemetry,
     newLogs,
     totalEvacuated,
     totalInTransit,
@@ -701,9 +903,32 @@ export function stepSimulationState(
 ): SimulationStateSnapshot {
   const newLogs: string[] = [];
 
+  const prevTelemetry =
+    prevState.telemetryStats || createInitialTelemetryStats(sourceAreas, prevState.clusters);
+  const updatedTelemetry: SimulationTelemetryStats = {
+    initialByBehavior: { ...prevTelemetry.initialByBehavior },
+    evacuatedByBehavior: { ...prevTelemetry.evacuatedByBehavior },
+    evacuatedPersonSecondsByBehavior: { ...prevTelemetry.evacuatedPersonSecondsByBehavior },
+    pickupArrivedByBehavior: { ...prevTelemetry.pickupArrivedByBehavior },
+    pickupArrivalPersonSecondsByBehavior: { ...prevTelemetry.pickupArrivalPersonSecondsByBehavior },
+    totalCompletedVehicleTrips: prevTelemetry.totalCompletedVehicleTrips,
+  };
+
   const pickupMap = new Map<string, PickupLocationState>();
   prevState.pickupStates.forEach((p) => {
-    pickupMap.set(p.id, { ...p, boardingVehicleInfo: undefined });
+    pickupMap.set(p.id, {
+      ...p,
+      waitingByBehavior: p.waitingByBehavior
+        ? { ...p.waitingByBehavior }
+        : createZeroBehaviorCounts(),
+      boardedByBehavior: p.boardedByBehavior
+        ? { ...p.boardedByBehavior }
+        : createZeroBehaviorCounts(),
+      evacuatedByBehavior: p.evacuatedByBehavior
+        ? { ...p.evacuatedByBehavior }
+        : createZeroBehaviorCounts(),
+      boardingVehicleInfo: undefined,
+    });
   });
 
   const sourceMap = new Map<string, SourceArea>();
@@ -742,6 +967,11 @@ export function stepSimulationState(
     // Check arrival threshold (within 14 meters of a pickup point)
     if (closest.distMeters <= 14) {
       closest.pickup.waitingPopulation += cluster.headcount;
+      closest.pickup.waitingByBehavior[cluster.behavior] += cluster.headcount;
+      updatedTelemetry.pickupArrivedByBehavior[cluster.behavior] += cluster.headcount;
+      updatedTelemetry.pickupArrivalPersonSecondsByBehavior[cluster.behavior] +=
+        cluster.headcount * elapsedSimSeconds;
+
       return {
         ...cluster,
         position: [...closest.pickup.location] as [number, number],
@@ -902,7 +1132,14 @@ export function stepSimulationState(
   const updatedTargetOccupancies = { ...prevState.targetOccupancies };
 
   // --- STEP 2: Process Vehicle Dispatches, Dual Departure Condition (80% Occupancy OR 10 Minutes Wait), and Shelter Offloads ---
-  const updatedVehicles = prevState.vehicles.map((veh) => {
+  const updatedVehicles = prevState.vehicles.map((rawVeh) => {
+    const veh: ActiveVehicleUnit = {
+      ...rawVeh,
+      occupancyByBehavior: rawVeh.occupancyByBehavior
+        ? { ...rawVeh.occupancyByBehavior }
+        : createZeroBehaviorCounts(),
+    };
+
     if (veh.status === 'completed') return veh;
     if (elapsedSimSeconds < veh.departureDelaySeconds) return veh;
 
@@ -947,9 +1184,31 @@ export function stepSimulationState(
       const spaceNeeded = veh.maxCapacity - veh.currentOccupancy;
       if (spaceNeeded > 0 && pickup.waitingPopulation > 0) {
         const boardedNow = Math.min(spaceNeeded, pickup.waitingPopulation);
+        const boardedBreakdown = allocateBoardedByBehavior(pickup.waitingByBehavior, boardedNow);
+
         veh.currentOccupancy += boardedNow;
+        veh.occupancyByBehavior.obedient += boardedBreakdown.obedient;
+        veh.occupancyByBehavior.autonomous += boardedBreakdown.autonomous;
+        veh.occupancyByBehavior.random += boardedBreakdown.random;
+
         pickup.waitingPopulation -= boardedNow;
+        pickup.waitingByBehavior.obedient = Math.max(
+          0,
+          pickup.waitingByBehavior.obedient - boardedBreakdown.obedient
+        );
+        pickup.waitingByBehavior.autonomous = Math.max(
+          0,
+          pickup.waitingByBehavior.autonomous - boardedBreakdown.autonomous
+        );
+        pickup.waitingByBehavior.random = Math.max(
+          0,
+          pickup.waitingByBehavior.random - boardedBreakdown.random
+        );
+
         pickup.totalBoardedCount += boardedNow;
+        pickup.boardedByBehavior.obedient += boardedBreakdown.obedient;
+        pickup.boardedByBehavior.autonomous += boardedBreakdown.autonomous;
+        pickup.boardedByBehavior.random += boardedBreakdown.random;
       }
 
       const hasAtLeastOnePassenger = veh.currentOccupancy >= 1;
@@ -966,6 +1225,11 @@ export function stepSimulationState(
       if (hasAtLeastOnePassenger && (reached80Percent || reached10Minutes || isLastCleanupSweep)) {
         const pctStr = Math.round(occupancyRatio * 100);
         const waitFormatted = formatMMSS(nextWaitSeconds);
+
+        pickup.completedDeparturesCount += 1;
+        pickup.totalCompletedVehicleWaitSeconds += nextWaitSeconds;
+        pickup.maxVehicleWaitSeconds = Math.max(pickup.maxVehicleWaitSeconds, nextWaitSeconds);
+        pickup.totalDepartureOccupancyRatioSum += occupancyRatio;
 
         let triggerReason = '80% Occupancy Reached';
         if (!reached80Percent && reached10Minutes) {
@@ -989,6 +1253,7 @@ export function stepSimulationState(
         // Still waiting at Blue Square
         const pctStr = Math.round(occupancyRatio * 100);
         const waitFormatted = formatMMSS(nextWaitSeconds);
+        pickup.maxVehicleWaitSeconds = Math.max(pickup.maxVehicleWaitSeconds, nextWaitSeconds);
 
         if (nextWaitSeconds >= 600.0 && !hasAtLeastOnePassenger) {
           pickup.boardingVehicleInfo = `${veh.fleetName}: 0/${veh.maxCapacity} (Wait ${waitFormatted}/10:00 — Awaiting >=1 passenger)`;
@@ -1022,6 +1287,20 @@ export function stepSimulationState(
         updatedTargetOccupancies[veh.targetId] =
           (updatedTargetOccupancies[veh.targetId] || 0) + veh.currentOccupancy;
 
+        // Credit evacuated counts & cumulative person-seconds by behavior
+        updatedTelemetry.totalCompletedVehicleTrips += 1;
+        (['obedient', 'autonomous', 'random'] as PopulationBehaviorType[]).forEach((beh) => {
+          const countB = veh.occupancyByBehavior[beh] || 0;
+          updatedTelemetry.evacuatedByBehavior[beh] += countB;
+          updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] += countB * elapsedSimSeconds;
+        });
+
+        // Credit pickup location shelter delivery statistics
+        pickup.evacuatedCount += veh.currentOccupancy;
+        pickup.evacuatedByBehavior.obedient += veh.occupancyByBehavior.obedient;
+        pickup.evacuatedByBehavior.autonomous += veh.occupancyByBehavior.autonomous;
+        pickup.evacuatedByBehavior.random += veh.occupancyByBehavior.random;
+
         newLogs.push(
           `${veh.fleetName} arrived at ${veh.targetName}, offloading ${veh.currentOccupancy.toLocaleString()} evacuees safely.`
         );
@@ -1040,6 +1319,7 @@ export function stepSimulationState(
         const offloadedVeh: ActiveVehicleUnit = {
           ...veh,
           currentOccupancy: 0,
+          occupancyByBehavior: createZeroBehaviorCounts(),
           waitingAtPickupSeconds: 0,
           progressMeters: 0,
           currentPosition: returnCoords[0],
@@ -1125,6 +1405,7 @@ export function stepSimulationState(
     vehicles: updatedVehicles,
     heatmapPoints,
     targetOccupancies: updatedTargetOccupancies,
+    telemetryStats: updatedTelemetry,
     newLogs,
     totalEvacuated,
     totalInTransit,

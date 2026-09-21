@@ -40,6 +40,7 @@ import xarray as xr
 DEFAULT_LAT = 50.8503
 DEFAULT_LON = 4.3517
 DEFAULT_RADIUS_METERS = 100_000.0  # 100 km radius
+TRANSPARENT_BELOW_DISCHARGE = 10.0
 CLIP_MAX_DISCHARGE = 80.0
 
 
@@ -167,7 +168,7 @@ def encode_rgba_png_data_url(rgba: np.ndarray) -> str:
 
 
 def render_geotiff_bands_to_overlays(geotiff_path: Path) -> tuple[list[list[float]], list[dict]]:
-  """Read the 3-band GeoTIFF, clip values > 80 to 80, and render White->Red RGBA overlays."""
+  """Read the 3-band GeoTIFF, make pixels < 10 fully transparent, clip > 80 to 80, and render White->Red RGBA overlays."""
   leadtimes = [24, 48, 72]
   overlays = []
 
@@ -186,6 +187,9 @@ def render_geotiff_bands_to_overlays(geotiff_path: Path) -> tuple[list[list[floa
       # Upsample by 8x nearest-neighbor so pixels are sharp on interactive Leaflet map
       upsampled = np.repeat(np.repeat(raw_band, 8, axis=0), 8, axis=1)
       valid_mask = ~np.isnan(upsampled)
+      # Pixels below 10 m3/s appear as fully transparent (alpha = 0);
+      # only pixels above 10 m3/s appear on the map and are subject to the transparency slider.
+      visible_mask = valid_mask & (upsampled > TRANSPARENT_BELOW_DISCHARGE)
 
       # Clip every pixel value above 80 to 80 (and below 0 to 0)
       clipped = np.clip(np.where(valid_mask, upsampled, 0.0), 0.0, CLIP_MAX_DISCHARGE)
@@ -195,7 +199,7 @@ def render_geotiff_bands_to_overlays(geotiff_path: Path) -> tuple[list[list[floa
       r = np.full_like(norm, 255, dtype=np.uint8)
       g = np.round(255.0 * (1.0 - norm)).astype(np.uint8)
       b = np.round(255.0 * (1.0 - norm)).astype(np.uint8)
-      a = np.where(valid_mask, 210, 0).astype(np.uint8)
+      a = np.where(visible_mask, 255, 0).astype(np.uint8)
 
       rgba = np.stack([r, g, b, a], axis=-1)
       data_url = encode_rgba_png_data_url(rgba)
@@ -208,6 +212,7 @@ def render_geotiff_bands_to_overlays(geotiff_path: Path) -> tuple[list[list[floa
           "description": src.descriptions[band_idx - 1] or f"river_discharge_24h_leadtime_{leadtime_hr}h (m3/s)",
           "rawMin": round(raw_min, 2),
           "rawMax": round(raw_max, 2),
+          "transparentBelow": TRANSPARENT_BELOW_DISCHARGE,
           "clippedMax": CLIP_MAX_DISCHARGE,
           "dataUrl": data_url,
           "bounds": leaflet_bounds,
