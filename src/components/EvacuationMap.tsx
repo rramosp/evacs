@@ -4,7 +4,7 @@ import 'leaflet/dist/leaflet.css';
 import {
   SourceArea,
   TargetArea,
-  NoGoArea,
+  AvoidArea,
   VehicleFleet,
   ComputedRoute,
   PickupLocationState,
@@ -15,6 +15,9 @@ import {
   Sentinel2LayerState,
   Sentinel1LayerState,
   GlofasForecastState,
+  BrusselsMetroLineFeature,
+  BrusselsMetroStationFeature,
+  BrusselsMetroCorridor,
 } from '../types/evacuation';
 import { getPolygonCentroid } from '../services/routingEngine';
 import { formatMMSS } from '../services/simulationEngine';
@@ -51,7 +54,7 @@ interface EvacuationMapProps {
   zoom: number;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
-  noGoAreas: NoGoArea[];
+  avoidAreas: AvoidArea[];
   vehicleFleets: VehicleFleet[];
   computedRoutes: ComputedRoute[];
   pickupStates: PickupLocationState[];
@@ -69,6 +72,10 @@ interface EvacuationMapProps {
   sentinel1Layer?: Sentinel1LayerState;
   glofasForecast?: GlofasForecastState;
   onMapViewportChange?: (center: [number, number]) => void;
+  showBrusselsMetroNetwork?: boolean;
+  brusselsMetroLines?: BrusselsMetroLineFeature[];
+  brusselsMetroStations?: BrusselsMetroStationFeature[];
+  activeMetroCorridors?: BrusselsMetroCorridor[];
 }
 
 export const EvacuationMap: React.FC<EvacuationMapProps> = ({
@@ -76,7 +83,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   zoom,
   sourceAreas,
   targetAreas,
-  noGoAreas,
+  avoidAreas,
   vehicleFleets,
   computedRoutes,
   pickupStates,
@@ -94,6 +101,10 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   sentinel1Layer,
   glofasForecast,
   onMapViewportChange,
+  showBrusselsMetroNetwork = false,
+  brusselsMetroLines = [],
+  brusselsMetroStations = [],
+  activeMetroCorridors = [],
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -104,6 +115,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
   // Layer groups
   const polygonsLayerGroupRef = useRef<L.LayerGroup | null>(null);
+  const brusselsMetroLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const routesLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const pickupSquaresLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const vehiclesLayerGroupRef = useRef<L.LayerGroup | null>(null);
@@ -154,6 +166,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     tileLayerRef.current = tileLayer;
     glofasLayerGroupRef.current = L.layerGroup().addTo(map);
     polygonsLayerGroupRef.current = L.layerGroup().addTo(map);
+    brusselsMetroLayerGroupRef.current = L.layerGroup().addTo(map);
     routesLayerGroupRef.current = L.layerGroup().addTo(map);
     pickupSquaresLayerGroupRef.current = L.layerGroup().addTo(map);
     vehiclesLayerGroupRef.current = L.layerGroup().addTo(map);
@@ -171,7 +184,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       if (
         currentMode.type === 'source' ||
         currentMode.type === 'target' ||
-        currentMode.type === 'nogo'
+        currentMode.type === 'avoid'
       ) {
         onUpdateDrawMode({
           ...currentMode,
@@ -336,7 +349,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     }
   }, [center, zoom]);
 
-  // Render Source, Target, No-Go Polygons & Vehicle Staging Depots
+  // Render Source, Target, Avoid Area Polygons & Vehicle Staging Depots
   useEffect(() => {
     const group = polygonsLayerGroupRef.current;
     if (!group) return;
@@ -458,10 +471,10 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       marker.addTo(group);
     });
 
-    // 3. No-Go Areas (Crimson Red Hazard)
-    noGoAreas.forEach((nogo) => {
-      const isSelected = selectedEntityId === nogo.id;
-      const poly = L.polygon(nogo.polygon, {
+    // 3. Avoid Areas (Crimson Red Hazard)
+    avoidAreas.forEach((avoid) => {
+      const isSelected = selectedEntityId === avoid.id;
+      const poly = L.polygon(avoid.polygon, {
         color: isSelected ? '#f87171' : '#ef4444',
         weight: isSelected ? 3 : 2,
         fillColor: '#ef4444',
@@ -471,14 +484,14 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
       poly.on('click', (e) => {
         L.DomEvent.stopPropagation(e);
-        onSelectEntity(nogo.id);
+        onSelectEntity(avoid.id);
       });
 
-      const centroid = getPolygonCentroid(nogo.polygon);
+      const centroid = getPolygonCentroid(avoid.polygon);
       const labelHtml = `
-        <div class="map-zone-badge map-zone-nogo ${isSelected ? 'selected' : ''}">
-          <div class="zone-badge-title">⛔ NO-GO ZONE</div>
-          <div class="zone-badge-sub">${nogo.name}</div>
+        <div class="map-zone-badge map-zone-avoid ${isSelected ? 'selected' : ''}">
+          <div class="zone-badge-title">⛔ AVOID AREA</div>
+          <div class="zone-badge-sub">${avoid.name}</div>
         </div>
       `;
 
@@ -490,7 +503,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           iconAnchor: [75, 20],
         }),
       });
-      marker.on('click', () => onSelectEntity(nogo.id));
+      marker.on('click', () => onSelectEntity(avoid.id));
 
       poly.addTo(group);
       marker.addTo(group);
@@ -500,12 +513,14 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     vehicleFleets.forEach((fleet) => {
       const isSelected = selectedEntityId === fleet.id;
       const totalCap = fleet.count * fleet.capacityPerUnit;
+      const loadUnloadSec = fleet.loadUnloadTimePerPersonSeconds ?? 2;
+      const speedKmh = fleet.transitSpeedKmh ?? 25;
       const iconHtml = `
         <div class="map-depot-pin ${isSelected ? 'selected' : ''}">
           <div class="depot-pin-icon">${fleet.type === 'Bus' ? '🚌' : '🚓'}</div>
           <div class="depot-pin-info">
             <span class="depot-name">${fleet.name}</span>
-            <span class="depot-meta">${fleet.count} units (${totalCap} cap)</span>
+            <span class="depot-meta">${fleet.count} units (${totalCap} cap · ${speedKmh} km/h · ${loadUnloadSec}s/pax)</span>
           </div>
         </div>
       `;
@@ -514,8 +529,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         icon: L.divIcon({
           className: 'custom-div-icon',
           html: iconHtml,
-          iconSize: [160, 36],
-          iconAnchor: [80, 18],
+          iconSize: [195, 36],
+          iconAnchor: [97, 18],
         }),
       });
 
@@ -529,7 +544,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   }, [
     sourceAreas,
     targetAreas,
-    noGoAreas,
+    avoidAreas,
     vehicleFleets,
     selectedEntityId,
     showZones,
@@ -538,7 +553,142 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     vehicles,
   ]);
 
-  // Render Computed Evacuation Routes
+  // Render Brussels Metro Network Overlay (Lines in distinct colours + Stations with station names right beside them)
+  useEffect(() => {
+    const metroGroup = brusselsMetroLayerGroupRef.current;
+    if (!metroGroup) return;
+    metroGroup.clearLayers();
+
+    // 1. If the user toggled 'Show Brussels Metro Network', render all metro lines and stations with station names beside them
+    if (showBrusselsMetroNetwork) {
+      // Render variant 1 of each line (1, 2, 5, 6) with slight parallel offset for shared trunks (5 & 6)
+      const primaryLines = brusselsMetroLines.filter((l) => l.variant === 1);
+      const linesToRender = primaryLines.length > 0 ? primaryLines : brusselsMetroLines;
+
+      linesToRender.forEach((lineFeature) => {
+        const latOffset =
+          lineFeature.line === '5' ? 0.00016 : lineFeature.line === '6' ? -0.00016 : 0;
+        const lngOffset =
+          lineFeature.line === '5' ? 0.00022 : lineFeature.line === '6' ? -0.00022 : 0;
+
+        const segments =
+          lineFeature.segments && lineFeature.segments.length > 0
+            ? lineFeature.segments
+            : [lineFeature.coordinates];
+
+        segments.forEach((seg) => {
+          if (!seg || seg.length < 2) return;
+          const offsetSeg: [number, number][] = seg.map(([lat, lng]) => [
+            lat + latOffset,
+            lng + lngOffset,
+          ]);
+
+          // Dark casing for contrast
+          L.polyline(offsetSeg, {
+            color: '#090d16',
+            weight: 6.5,
+            opacity: 0.78,
+            interactive: false,
+          }).addTo(metroGroup);
+
+          const poly = L.polyline(offsetSeg, {
+            color: lineFeature.color,
+            weight: 4,
+            opacity: 0.96,
+            className: `brussels-metro-line-layer brussels-metro-line-${lineFeature.line}`,
+          });
+
+          poly.bindTooltip(
+            `<div class="route-tooltip">
+              <strong style="color:${lineFeature.color}">🚇 BRUSSELS METRO LINE ${lineFeature.line}</strong><br/>
+              Colour: <code>${lineFeature.color}</code>
+            </div>`,
+            { sticky: true }
+          );
+
+          poly.addTo(metroGroup);
+        });
+      });
+
+      // Render all 60 metro stations with their station name right beside them on the map
+      brusselsMetroStations.forEach((station) => {
+        const primaryLine = station.lines[0] || '1';
+        const dotColor =
+          primaryLine === '1'
+            ? '#B5378C'
+            : primaryLine === '2'
+            ? '#ED6C23'
+            : primaryLine === '5'
+            ? '#F6A90B'
+            : '#0066A3';
+
+        const stationHtml = `
+          <div class="brussels-metro-station-marker" data-station-id="${station.id}" style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap;pointer-events:auto;">
+            <span class="brussels-metro-station-dot" style="width:10px;height:10px;border-radius:50%;background:${dotColor};border:2px solid #ffffff;box-shadow:0 1px 4px rgba(0,0,0,0.85);display:inline-block;flex-shrink:0;"></span>
+            <span class="brussels-metro-station-label" style="background:rgba(15,23,42,0.88);color:#f8fafc;border:1px solid ${dotColor};border-radius:4px;padding:1px 5px;font-size:10px;font-weight:700;line-height:1.25;box-shadow:0 1px 4px rgba(0,0,0,0.75);">${station.name_fr}</span>
+          </div>
+        `;
+
+        const stMarker = L.marker(station.position, {
+          icon: L.divIcon({
+            className: 'custom-div-icon brussels-metro-station-icon',
+            html: stationHtml,
+            iconSize: [140, 20],
+            iconAnchor: [5, 10],
+          }),
+          zIndexOffset: 650,
+        });
+
+        stMarker.bindTooltip(
+          `<div class="route-tooltip">
+            <strong>🚇 ${station.name_fr}</strong> (${station.name_nl})<br/>
+            Metro Line(s): <b>${station.line}</b><br/>
+            Stop ID: <code>${station.stop_id}</code>
+          </div>`,
+          { direction: 'top', offset: [0, -8] }
+        );
+
+        stMarker.addTo(metroGroup);
+      });
+    }
+
+    // 2. If activeMetroCorridors are present (when 'Use these stations for evacuation' is checked), highlight active underground corridors
+    if (activeMetroCorridors.length > 0) {
+      activeMetroCorridors.forEach((corridor) => {
+        L.polyline(corridor.coordinates, {
+          color: '#090d16',
+          weight: 8,
+          opacity: 0.85,
+        }).addTo(metroGroup);
+
+        const activeLine = L.polyline(corridor.coordinates, {
+          color: corridor.color,
+          weight: 4.5,
+          opacity: 0.98,
+          dashArray: '8, 5',
+        });
+
+        const distKm = (corridor.distanceMeters / 1000).toFixed(2);
+        activeLine.bindTooltip(
+          `<div class="route-tooltip">
+            <strong style="color:#38bdf8">🚇 ACTIVE METRO EVACUATION CORRIDOR (${corridor.lineLabel})</strong><br/>
+            <b>${corridor.sourceStation.name_fr}</b> (${corridor.sourceName}) &rarr; <b>${corridor.targetStation.name_fr}</b> (${corridor.targetName})<br/>
+            Distance: <b>${distKm} km</b> (Underground — Immune to Avoid Areas)
+          </div>`,
+          { sticky: true }
+        );
+
+        activeLine.addTo(metroGroup);
+      });
+    }
+  }, [
+    showBrusselsMetroNetwork,
+    brusselsMetroLines,
+    brusselsMetroStations,
+    activeMetroCorridors,
+  ]);
+
+  // Render Computed Evacuation Routes (for Source Areas not overridden by active Metro Corridors)
   useEffect(() => {
     const routesGroup = routesLayerGroupRef.current;
     if (!routesGroup) return;
@@ -546,111 +696,289 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
     if (!showRoutes || computedRoutes.length === 0) return;
 
-    computedRoutes.forEach((route) => {
-      const color = route.behaviorType === 'obedient' ? '#0284c7' : '#d97706';
-      const weight = 4;
+    const metroSourceIds = new Set(activeMetroCorridors.map((c) => c.sourceId));
 
-      // Outer casing for main evacuation route
-      L.polyline(route.coordinates, {
-        color: '#090d16',
-        weight: weight + 3,
-        opacity: 0.72,
-      }).addTo(routesGroup);
+    computedRoutes
+      .filter((route) => !metroSourceIds.has(route.sourceId))
+      .forEach((route) => {
+        const color = route.behaviorType === 'obedient' ? '#0284c7' : '#d97706';
+        const weight = 4;
 
-      const polyline = L.polyline(route.coordinates, {
-        color,
-        weight,
-        opacity: 0.92,
+        // Outer casing for main evacuation route
+        L.polyline(route.coordinates, {
+          color: '#090d16',
+          weight: weight + 3,
+          opacity: 0.72,
+        }).addTo(routesGroup);
+
+        const polyline = L.polyline(route.coordinates, {
+          color,
+          weight,
+          opacity: 0.92,
+        });
+
+        const distKm = (route.distanceMeters / 1000).toFixed(2);
+        const estDuration = formatMMSS(route.estimatedDurationSeconds);
+        polyline.bindTooltip(
+          `<div class="route-tooltip">
+            <strong>EVACUATION CORRIDOR</strong><br/>
+            ${route.pickupLabel} &rarr; ${route.targetName}<br/>
+            Distance: <b>${distKm} km</b> (Est. Transit: <b>${estDuration}</b>)
+            ${route.isDetour ? '<br/><span style="color:#f87171">⚠️ Obstacle Detour Active</span>' : ''}
+          </div>`,
+          { sticky: true }
+        );
+
+        polyline.addTo(routesGroup);
       });
+  }, [computedRoutes, showRoutes, activeMetroCorridors]);
 
-      const distKm = (route.distanceMeters / 1000).toFixed(2);
-      polyline.bindTooltip(
-        `<div class="route-tooltip">
-          <strong>EVACUATION CORRIDOR</strong><br/>
-          ${route.pickupLabel} &rarr; ${route.targetName}<br/>
-          Distance: <b>${distKm} km</b>
-          ${route.isDetour ? '<br/><span style="color:#f87171">⚠️ Obstacle Detour Active</span>' : ''}
-        </div>`,
-        { sticky: true }
-      );
-
-      polyline.addTo(routesGroup);
-    });
-  }, [computedRoutes, showRoutes]);
-
-  // Render Blue Square Pickup Locations with Live Queue & Boarding Badges
+  // Render Blue Square Pickup Locations & Active Metro Station Pickup and Drop-Off Points with Live Queue & Boarding/Unloading Badges
   useEffect(() => {
     const pickupGroup = pickupSquaresLayerGroupRef.current;
     if (!pickupGroup) return;
     pickupGroup.clearLayers();
 
-    if (!showRoutes || computedRoutes.length === 0) return;
+    const metroSourceIds = new Set(activeMetroCorridors.map((c) => c.sourceId));
 
-    computedRoutes.forEach((route, idx) => {
-      if (!route.pickupLocation) return;
+    if (showRoutes) {
+      computedRoutes
+        .filter((route) => !metroSourceIds.has(route.sourceId))
+        .forEach((route, idx) => {
+          if (!route.pickupLocation) return;
 
-      const pState = pickupStates.find((p) => p.routeId === route.id);
-      const waitingCount = pState ? pState.waitingPopulation : 0;
+          const pState = pickupStates.find((p) => p.routeId === route.id);
+          const waitingCount = pState ? pState.waitingPopulation : 0;
 
-      // Also check if a vehicle is currently boarding at this pickup point
-      const boardingVeh = vehicles.find(
-        (v) => v.assignedRouteId === route.id && v.status === 'waiting_for_80_pct'
-      );
+          // Also check if a vehicle is currently boarding at this pickup point
+          const boardingVeh =
+            vehicles.find(
+              (v) =>
+                v.assignedRouteId === route.id &&
+                v.status === 'waiting_for_80_pct' &&
+                v.currentOccupancy > 0
+            ) ||
+            vehicles.find(
+              (v) => v.assignedRouteId === route.id && v.status === 'waiting_for_80_pct'
+            );
 
-      const boardingPct = boardingVeh
-        ? Math.round((boardingVeh.currentOccupancy / Math.max(1, boardingVeh.maxCapacity)) * 100)
-        : 0;
-      const waitFormatted = boardingVeh ? formatMMSS(boardingVeh.waitingAtPickupSeconds) : "00:00";
+          const boardingPct = boardingVeh
+            ? Math.round((boardingVeh.currentOccupancy / Math.max(1, boardingVeh.maxCapacity)) * 100)
+            : 0;
+          const waitFormatted = boardingVeh ? formatMMSS(boardingVeh.waitingAtPickupSeconds) : '00:00';
+          const loadUnloadSec = boardingVeh ? (boardingVeh.loadUnloadTimePerPersonSeconds ?? 2) : 2;
 
-      const squareHtml = `
-        <div class="pickup-square-wrapper">
-          ${
-            waitingCount > 0 || boardingVeh
-              ? `<div class="pickup-live-queue-pill ${waitingCount > 100 ? 'hot' : ''}">
-                  <span>⏳ ${waitingCount} waiting</span>
-                  ${
-                    boardingVeh
-                      ? `<span class="boarding-sub-pill">🚌 ${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} (${boardingPct}%) · ⏱️ ${waitFormatted}/10:00</span>`
-                      : ''
-                  }
-                </div>`
-              : ''
-          }
-          <div class="map-pickup-square-marker" title="${route.pickupLabel}">
-            <span class="pickup-square-inner">${idx + 1}</span>
+          const squareHtml = `
+            <div class="pickup-square-wrapper">
+              ${
+                waitingCount > 0 || boardingVeh
+                  ? `<div class="pickup-live-queue-pill ${waitingCount > 100 ? 'hot' : ''}">
+                      <span>⏳ ${waitingCount} waiting</span>
+                      ${
+                        boardingVeh
+                          ? `<span class="boarding-sub-pill">🚌 ${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} (${boardingPct}%) · ⏱️ ${waitFormatted}/10:00</span>`
+                          : ''
+                      }
+                    </div>`
+                  : ''
+              }
+              <div class="map-pickup-square-marker" title="${route.pickupLabel}">
+                <span class="pickup-square-inner">${idx + 1}</span>
+              </div>
+            </div>
+          `;
+
+          const pickupMarker = L.marker(route.pickupLocation, {
+            icon: L.divIcon({
+              className: 'custom-div-icon',
+              html: squareHtml,
+              iconSize: [140, 48],
+              iconAnchor: [70, 38],
+            }),
+            zIndexOffset: 950,
+          });
+
+          pickupMarker.bindTooltip(
+            `<div class="route-tooltip">
+              <strong style="color:#60a5fa">🟦 BLUE SQUARE PICKUP #${idx + 1}</strong><br/>
+              <b>${route.pickupLabel}</b><br/>
+              Destination: <b>${route.targetName}</b><br/>
+              Waiting in Queue: <b>${waitingCount.toLocaleString()} evacuees</b><br/>
+              ${
+                boardingVeh
+                  ? `Active Vehicle Boarding: <b>${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} seats (${boardingPct}%)</b><br/>Load/Unload Rate: <b>${loadUnloadSec}s / person</b><br/>Wait Timer: <b>${waitFormatted} / 10:00 min</b> (departs at 80% or 10:00 with &ge;1 passenger)<br/>`
+                  : 'Vehicle Status: <b>En route to pickup</b><br/>'
+              }
+              Coordinates: <code>[${route.pickupLocation[0]}, ${route.pickupLocation[1]}]</code>
+            </div>`,
+            { direction: 'top', offset: [0, -16] }
+          );
+
+          pickupMarker.addTo(pickupGroup);
+        });
+    }
+
+    // Always render established Metro Station Pickup Points (in Source Areas) and Drop-Off Points (in Target Areas)
+    // whenever Brussels Metro evacuation corridors are active
+    const renderedPickupStations = new Set<string>();
+    const renderedDropOffStations = new Set<string>();
+
+    activeMetroCorridors.forEach((corridor) => {
+      const srcKey = `${corridor.sourceId}:${corridor.sourceStation.id}`;
+      if (!renderedPickupStations.has(srcKey)) {
+        renderedPickupStations.add(srcKey);
+
+        const stationPickups = pickupStates.filter(
+          (p) =>
+            p.isMetro &&
+            p.sourceId === corridor.sourceId &&
+            p.metroStationName === corridor.sourceStation.name_fr
+        );
+        const waitingCount = stationPickups.reduce((acc, p) => acc + p.waitingPopulation, 0);
+        const totalBoarded = stationPickups.reduce((acc, p) => acc + p.totalBoardedCount, 0);
+
+        const corridorIdsForStation = new Set(
+          activeMetroCorridors
+            .filter(
+              (c) =>
+                c.sourceId === corridor.sourceId &&
+                c.sourceStation.id === corridor.sourceStation.id
+            )
+            .map((c) => c.id)
+        );
+
+        const boardingVeh =
+          vehicles.find(
+            (v) =>
+              v.isMetro &&
+              corridorIdsForStation.has(v.assignedRouteId) &&
+              v.status === 'waiting_for_80_pct' &&
+              v.currentOccupancy > 0
+          ) ||
+          vehicles.find(
+            (v) =>
+              v.isMetro &&
+              corridorIdsForStation.has(v.assignedRouteId) &&
+              v.status === 'waiting_for_80_pct'
+          );
+
+        const boardingPct = boardingVeh
+          ? Math.round((boardingVeh.currentOccupancy / Math.max(1, boardingVeh.maxCapacity)) * 100)
+          : 0;
+        const waitFormatted = boardingVeh ? formatMMSS(boardingVeh.waitingAtPickupSeconds) : '00:00';
+
+        const metroPickupHtml = `
+          <div class="pickup-square-wrapper">
+            <div class="pickup-live-queue-pill ${waitingCount > 100 ? 'hot' : ''}">
+              <span>🚇 PICKUP: ${corridor.sourceStation.name_fr} (${waitingCount} waiting)</span>
+              ${
+                boardingVeh
+                  ? `<span class="boarding-sub-pill">🚇 Boarding ${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} (${boardingPct}%) · ⏱️ ${waitFormatted}</span>`
+                  : ''
+              }
+            </div>
+            <div class="map-pickup-square-marker" style="background:linear-gradient(135deg,#0284c7,#7c3aed);border-color:#bae6fd;" title="Metro Pickup Station: ${corridor.sourceStation.name_fr}">
+              <span class="pickup-square-inner">🚇</span>
+            </div>
           </div>
-        </div>
-      `;
+        `;
 
-      const pickupMarker = L.marker(route.pickupLocation, {
-        icon: L.divIcon({
-          className: 'custom-div-icon',
-          html: squareHtml,
-          iconSize: [140, 48],
-          iconAnchor: [70, 38],
-        }),
-        zIndexOffset: 950,
-      });
+        const metroMarker = L.marker(corridor.sourceStation.position, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: metroPickupHtml,
+            iconSize: [190, 52],
+            iconAnchor: [95, 40],
+          }),
+          zIndexOffset: 960,
+        });
 
-      pickupMarker.bindTooltip(
-        `<div class="route-tooltip">
-          <strong style="color:#60a5fa">🟦 BLUE SQUARE PICKUP #${idx + 1}</strong><br/>
-          <b>${route.pickupLabel}</b><br/>
-          Destination: <b>${route.targetName}</b><br/>
-          Waiting in Queue: <b>${waitingCount.toLocaleString()} evacuees</b><br/>
-          ${
-            boardingVeh
-              ? `Active Vehicle Boarding: <b>${boardingVeh.currentOccupancy}/${boardingVeh.maxCapacity} seats (${boardingPct}%)</b><br/>Wait Timer: <b>${waitFormatted} / 10:00 min</b> (departs at 80% or 10:00 with &ge;1 passenger)<br/>`
-              : 'Vehicle Status: <b>En route to pickup</b><br/>'
-          }
-          Coordinates: <code>[${route.pickupLocation[0]}, ${route.pickupLocation[1]}]</code>
-        </div>`,
-        { direction: 'top', offset: [0, -16] }
-      );
+        metroMarker.bindTooltip(
+          `<div class="route-tooltip">
+            <strong style="color:#38bdf8">🚇 METRO STATION PICKUP POINT</strong><br/>
+            Station: <b>${corridor.sourceStation.name_fr} / ${corridor.sourceStation.name_nl}</b><br/>
+            Source Area: <b>${corridor.sourceName}</b><br/>
+            Connected Drop-Off: <b>${corridor.targetStation.name_fr}</b> (${corridor.targetName}) via <b>${corridor.lineLabel}</b><br/>
+            Waiting on Platform: <b>${waitingCount.toLocaleString()} evacuees</b><br/>
+            Total Boarded Here: <b>${totalBoarded.toLocaleString()} evacuees</b>
+          </div>`,
+          { direction: 'top', offset: [0, -16] }
+        );
 
-      pickupMarker.addTo(pickupGroup);
+        metroMarker.addTo(pickupGroup);
+      }
+
+      // Render Target Area Metro Station Drop-Off Point
+      const tgtKey = `${corridor.targetId}:${corridor.targetStation.id}`;
+      if (!renderedDropOffStations.has(tgtKey)) {
+        renderedDropOffStations.add(tgtKey);
+
+        const dropOffPickups = pickupStates.filter(
+          (p) =>
+            p.isMetro &&
+            p.targetId === corridor.targetId &&
+            p.metroTargetStationName === corridor.targetStation.name_fr
+        );
+        const evacuatedAtStation = dropOffPickups.reduce((acc, p) => acc + p.evacuatedCount, 0);
+
+        const corridorIdsForDropOff = new Set(
+          activeMetroCorridors
+            .filter(
+              (c) =>
+                c.targetId === corridor.targetId &&
+                c.targetStation.id === corridor.targetStation.id
+            )
+            .map((c) => c.id)
+        );
+
+        const unloadingVeh = vehicles.find(
+          (v) =>
+            v.isMetro &&
+            corridorIdsForDropOff.has(v.assignedRouteId) &&
+            v.status === 'unloading'
+        );
+
+        const metroDropOffHtml = `
+          <div class="pickup-square-wrapper">
+            <div class="pickup-live-queue-pill" style="background:rgba(6, 78, 59, 0.92);border-color:#34d399;color:#ecfdf5;">
+              <span>🏁 DROP-OFF: ${corridor.targetStation.name_fr} (${evacuatedAtStation.toLocaleString()} arrived)</span>
+              ${
+                unloadingVeh
+                  ? `<span class="boarding-sub-pill" style="color:#6ee7b7;">🚇 Unloading ↓${unloadingVeh.currentOccupancy} pax</span>`
+                  : ''
+              }
+            </div>
+            <div class="map-pickup-square-marker" style="background:linear-gradient(135deg,#059669,#0284c7);border-color:#6ee7b7;" title="Metro Drop-Off Station: ${corridor.targetStation.name_fr}">
+              <span class="pickup-square-inner">🚇</span>
+            </div>
+          </div>
+        `;
+
+        const dropOffMarker = L.marker(corridor.targetStation.position, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: metroDropOffHtml,
+            iconSize: [200, 52],
+            iconAnchor: [100, 40],
+          }),
+          zIndexOffset: 960,
+        });
+
+        dropOffMarker.bindTooltip(
+          `<div class="route-tooltip">
+            <strong style="color:#34d399">🚇 METRO STATION DROP-OFF POINT</strong><br/>
+            Station: <b>${corridor.targetStation.name_fr} / ${corridor.targetStation.name_nl}</b><br/>
+            Target Shelter Area: <b>${corridor.targetName}</b><br/>
+            Served by: <b>${corridor.lineLabel}</b> (from ${corridor.sourceStation.name_fr})<br/>
+            Evacuees Dropped Off Here: <b>${evacuatedAtStation.toLocaleString()} evacuees</b>
+          </div>`,
+          { direction: 'top', offset: [0, -16] }
+        );
+
+        dropOffMarker.addTo(pickupGroup);
+      }
     });
-  }, [computedRoutes, pickupStates, vehicles, showRoutes]);
+  }, [computedRoutes, pickupStates, vehicles, showRoutes, activeMetroCorridors]);
 
   // Render Active Moving Vehicle Markers AND Internal Source Crowd Clusters
   useEffect(() => {
@@ -658,7 +986,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (!group) return;
     group.clearLayers();
 
-    if (!isSimulating && clusters.length === 0) return;
+    if (!isSimulating && clusters.length === 0 && vehicles.length === 0) return;
 
     // 1. Render micro-dots for crowd clusters moving inside Source Areas
     clusters
@@ -679,33 +1007,61 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           fillOpacity: 0.92,
         })
           .bindTooltip(
-            `<b>${c.behavior.toUpperCase()} Cluster</b> (${c.headcount} evacuees)<br/>Moving toward Blue Square pickup`,
+            `<b>${c.behavior.toUpperCase()} Cluster</b> (${c.headcount} evacuees)<br/>Moving toward pickup`,
             { direction: 'top' }
           )
           .addTo(group);
       });
 
-    // 2. Render active vehicles (en route to pickup, waiting for 80% occupancy, or en route to shelter)
+    // 2. Render active vehicles (en route to pickup, waiting/loading for 80% occupancy, en route to shelter, or unloading at shelter)
     vehicles
       .filter((v) => v.status !== 'completed')
-      .forEach((veh) => {
+      .forEach((veh, vIdx) => {
         const occPct = Math.round(
           (veh.currentOccupancy / Math.max(1, veh.maxCapacity)) * 100
         );
+        const loadUnloadSec = veh.loadUnloadTimePerPersonSeconds ?? 2;
+        const speedKmh = veh.transitSpeedKmh ?? 25;
+        const speedMps = Math.max(0.1, veh.speedMps || (speedKmh * 1000) / 3600);
+        const totalLegMeters =
+          veh.status === 'to_pickup'
+            ? veh.approachCumulative[veh.approachCumulative.length - 1] || 0
+            : veh.evacCumulative[veh.evacCumulative.length - 1] || 0;
+        const traveledKm = (veh.progressMeters / 1000).toFixed(2);
+        const totalLegKm = (totalLegMeters / 1000).toFixed(2);
+        const remMeters = Math.max(0, totalLegMeters - veh.progressMeters);
+        const remEtaSec = remMeters / speedMps;
+
         const statusClass =
           veh.status === 'waiting_for_80_pct'
             ? 'boarding-wait'
             : veh.status === 'to_target'
             ? 'evac-enroute'
+            : veh.status === 'unloading'
+            ? 'unloading-shelter'
             : 'approach-empty';
 
+        const vehIcon =
+          veh.vehicleType === 'Metro'
+            ? '🚇'
+            : veh.vehicleType === 'Bus'
+            ? '🚌'
+            : '🚓';
+
+        const metroStyle =
+          veh.vehicleType === 'Metro'
+            ? `border:2px solid ${veh.metroColor || '#38bdf8'};box-shadow:0 0 10px ${veh.metroColor || '#38bdf8'};`
+            : '';
+
         const html = `
-          <div class="sim-vehicle-marker ${statusClass}">
-            <span class="sim-veh-icon">${veh.vehicleType === 'Bus' ? '🚌' : '🚓'}</span>
+          <div class="sim-vehicle-marker ${statusClass}" style="${metroStyle}">
+            <span class="sim-veh-icon">${vehIcon}</span>
             <span class="sim-veh-badge">
               ${
                 veh.status === 'waiting_for_80_pct'
                   ? `${occPct}%`
+                  : veh.status === 'unloading'
+                  ? `↓${veh.currentOccupancy}`
                   : veh.currentOccupancy > 0
                   ? `${veh.currentOccupancy}`
                   : '0'
@@ -714,25 +1070,50 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           </div>
         `;
 
-        const marker = L.marker(veh.currentPosition, {
+        // Slightly offset stationary metro train markers at station platforms so they don't hide directly underneath the station icon
+        const isStationaryAtPlatform =
+          veh.vehicleType === 'Metro' &&
+          (veh.status === 'waiting_for_80_pct' ||
+            veh.status === 'unloading' ||
+            (veh.status === 'to_pickup' && veh.progressMeters === 0));
+
+        const displayPosition: [number, number] = isStationaryAtPlatform
+          ? [
+              veh.currentPosition[0] + 0.00022 * ((vIdx % 3) - 1),
+              veh.currentPosition[1] + 0.00032,
+            ]
+          : veh.currentPosition;
+
+        const marker = L.marker(displayPosition, {
           icon: L.divIcon({
             className: 'custom-div-icon',
             html,
-            iconSize: [58, 26],
-            iconAnchor: [29, 13],
+            iconSize: [64, 28],
+            iconAnchor: [32, 14],
           }),
-          zIndexOffset: 920,
+          zIndexOffset: veh.vehicleType === 'Metro' ? 1080 : 920,
         });
+
+        const destStationLabel =
+          veh.vehicleType === 'Metro' && veh.targetStationName
+            ? `Drop-Off Station "${veh.targetStationName}" (${veh.targetName})`
+            : veh.targetName;
+        const srcStationLabel =
+          veh.vehicleType === 'Metro' && veh.sourceStationName
+            ? `Pickup Station "${veh.sourceStationName}"`
+            : 'Pickup';
 
         marker.bindTooltip(
           `<div class="route-tooltip">
-            <strong>${veh.fleetName}</strong> (${veh.unitCount}x ${veh.vehicleType})<br/>
+            <strong>${veh.fleetName}</strong> (${veh.unitCount}x ${veh.vehicleType} · ${speedKmh} km/h · ${loadUnloadSec}s/person)<br/>
             Status: <b>${
               veh.status === 'waiting_for_80_pct'
-                ? `Boarding at Pickup (${occPct}% | Wait ${formatMMSS(veh.waitingAtPickupSeconds)}/10:00)`
+                ? `Boarding at ${srcStationLabel} (${occPct}% | Wait ${formatMMSS(veh.waitingAtPickupSeconds)})`
                 : veh.status === 'to_target'
-                ? `En Route to ${veh.targetName}`
-                : 'Approaching Blue Square Pickup Point'
+                ? `Running to ${destStationLabel} (${traveledKm}/${totalLegKm} km · ETA ${formatMMSS(remEtaSec)})`
+                : veh.status === 'unloading'
+                ? `Unloading at ${destStationLabel} (${veh.currentOccupancy} remaining | ${formatMMSS(veh.unloadingElapsedSeconds || 0)})`
+                : `Returning to ${srcStationLabel} (${traveledKm}/${totalLegKm} km · ETA ${formatMMSS(remEtaSec)})`
             }</b><br/>
             Occupancy: <b>${veh.currentOccupancy} / ${veh.maxCapacity} evacuees (${occPct}%)</b>
           </div>`,
@@ -754,7 +1135,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (
       activeDrawMode.type === 'source' ||
       activeDrawMode.type === 'target' ||
-      activeDrawMode.type === 'nogo'
+      activeDrawMode.type === 'avoid'
     ) {
       const pts = activeDrawMode.points;
       const color =
@@ -933,8 +1314,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             <span>Target Shelter</span>
           </div>
           <div className="legend-item">
-            <span className="legend-swatch nogo-swatch" />
-            <span>No-Go Hazard</span>
+            <span className="legend-swatch avoid-swatch" />
+            <span>Avoid Area</span>
           </div>
           <div className="legend-item">
             <span className="legend-swatch pickup-square-swatch" />
@@ -1060,7 +1441,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
                     ? 'Source Evacuation Area'
                     : activeDrawMode.type === 'target'
                     ? 'Target Shelter Area'
-                    : 'No-Go Hazard Zone'}
+                    : 'Avoid Area'}
                   :
                 </strong>{' '}
                 Click on the map to add polygon vertices ({activeDrawMode.points.length} placed, min 3 required).

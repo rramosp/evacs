@@ -1,7 +1,7 @@
 import {
   SourceArea,
   TargetArea,
-  NoGoArea,
+  AvoidArea,
   VehicleFleet,
   PresetScenarioId,
 } from '../types/evacuation';
@@ -14,7 +14,7 @@ export interface PresetScenarioData {
   zoom: number;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
-  noGoAreas: NoGoArea[];
+  avoidAreas: AvoidArea[];
   vehicleFleets: VehicleFleet[];
 }
 
@@ -78,9 +78,9 @@ export const PRESET_SCENARIOS: Record<'brussels' | 'paris', PresetScenarioData> 
         ],
       },
     ],
-    noGoAreas: [
+    avoidAreas: [
       {
-        id: 'bxl-nogo-1',
+        id: 'bxl-avoid-1',
         name: 'Ring of Brussels (Arts-Loi Inner Ring Sector)',
         polygon: [
           [50.8476, 4.3645],
@@ -97,6 +97,8 @@ export const PRESET_SCENARIOS: Record<'brussels' | 'paris', PresetScenarioData> 
         type: 'Bus',
         count: 100,
         capacityPerUnit: 50,
+        loadUnloadTimePerPersonSeconds: 2,
+        transitSpeedKmh: 25,
         location: [50.8276, 4.3725], // Place Flagey
       },
       {
@@ -105,6 +107,8 @@ export const PRESET_SCENARIOS: Record<'brussels' | 'paris', PresetScenarioData> 
         type: 'Private Car',
         count: 100,
         capacityPerUnit: 4,
+        loadUnloadTimePerPersonSeconds: 3,
+        transitSpeedKmh: 25,
         location: [50.8596, 4.3447], // Place Sainctelette
       },
     ],
@@ -168,9 +172,9 @@ export const PRESET_SCENARIOS: Record<'brussels' | 'paris', PresetScenarioData> 
         ],
       },
     ],
-    noGoAreas: [
+    avoidAreas: [
       {
-        id: 'par-nogo-1',
+        id: 'par-avoid-1',
         name: "Pont d'Iéna",
         polygon: [
           [48.8608, 2.2905],
@@ -180,7 +184,7 @@ export const PRESET_SCENARIOS: Record<'brussels' | 'paris', PresetScenarioData> 
         ],
       },
       {
-        id: 'par-nogo-2',
+        id: 'par-avoid-2',
         name: "Pont de l'Alma",
         polygon: [
           [48.8646, 2.3002],
@@ -197,6 +201,8 @@ export const PRESET_SCENARIOS: Record<'brussels' | 'paris', PresetScenarioData> 
         type: 'Bus',
         count: 50,
         capacityPerUnit: 50,
+        loadUnloadTimePerPersonSeconds: 2,
+        transitSpeedKmh: 25,
         location: [48.8606, 2.3125], // Esplanade des Invalides
       },
     ],

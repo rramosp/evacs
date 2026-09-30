@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   SourceArea,
   TargetArea,
-  NoGoArea,
+  AvoidArea,
   VehicleFleet,
   ComputedRoute,
   PickupLocationState,
@@ -41,7 +41,7 @@ interface SimulationReportModalProps {
   simSpeed: number;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
-  noGoAreas: NoGoArea[];
+  avoidAreas: AvoidArea[];
   vehicleFleets: VehicleFleet[];
   computedRoutes: ComputedRoute[];
   clusters: SourceInternalCluster[];
@@ -86,7 +86,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
   simSpeed,
   sourceAreas,
   targetAreas,
-  noGoAreas,
+  avoidAreas,
   vehicleFleets,
   computedRoutes,
   clusters,
@@ -137,7 +137,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
       boardingInVehiclesByBehavior.obedient += occ.obedient || 0;
       boardingInVehiclesByBehavior.autonomous += occ.autonomous || 0;
       boardingInVehiclesByBehavior.random += occ.random || 0;
-    } else if (v.status === 'to_target' && v.currentOccupancy > 0) {
+    } else if ((v.status === 'to_target' || v.status === 'unloading') && v.currentOccupancy > 0) {
       inTransitByBehavior.obedient += occ.obedient || 0;
       inTransitByBehavior.autonomous += occ.autonomous || 0;
       inTransitByBehavior.random += occ.random || 0;
@@ -282,7 +282,11 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
       .filter((v) => v.assignedPickupId === p.id && v.status === 'waiting_for_80_pct')
       .reduce((acc, v) => acc + v.currentOccupancy, 0);
     const inTransitFromPickup = vehicles
-      .filter((v) => v.assignedPickupId === p.id && v.status === 'to_target')
+      .filter(
+        (v) =>
+          v.assignedPickupId === p.id &&
+          (v.status === 'to_target' || v.status === 'unloading')
+      )
       .reduce((acc, v) => acc + v.currentOccupancy, 0);
 
     const completedDepartures = p.completedDeparturesCount || 0;
@@ -430,6 +434,15 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
         capacity: t.capacity,
         utilizationPercent:
           t.capacity > 0 ? Number(((t.currentOccupancy / t.capacity) * 100).toFixed(1)) : 0,
+      })),
+      vehicleFleets: vehicleFleets.map((f) => ({
+        id: f.id,
+        name: f.name,
+        type: f.type,
+        count: f.count,
+        capacityPerUnit: f.capacityPerUnit,
+        transitSpeedKmh: f.transitSpeedKmh ?? 25,
+        loadUnloadTimePerPersonSeconds: f.loadUnloadTimePerPersonSeconds ?? 2,
       })),
     };
 
@@ -1625,7 +1638,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                 </div>
               </div>
 
-              {/* Corridor & No-Go Zone Avoidance Summary */}
+              {/* Corridor & Avoid Area Avoidance Summary */}
               <div
                 style={{
                   padding: '9px 11px',
@@ -1643,7 +1656,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <ShieldAlert size={16} style={{ color: '#f87171', flexShrink: 0 }} />
                   <span>
-                    <strong>No-Go Hazard Avoidance:</strong> {noGoAreas.length} active No-Go zones
+                    <strong>Avoid Area Avoidance:</strong> {avoidAreas.length} active Avoid Areas
                     enforced; <strong>{detourRoutesCount}</strong> of {computedRoutes.length}{' '}
                     corridors dynamically detoured with zero polygon intersection.
                   </span>

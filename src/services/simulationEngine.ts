@@ -12,8 +12,16 @@ import {
   PopulationBehaviorType,
   BehaviorCounts,
   SimulationTelemetryStats,
+  BrusselsMetroCorridor,
 } from '../types/evacuation';
 import { getPolygonCentroid, toTurfPolygon } from './routingEngine';
+
+export interface MetroEvacuationOptions {
+  enabled: boolean;
+  corridors: BrusselsMetroCorridor[];
+  trainCount: number;
+  trainCapacity: number;
+}
 
 /**
  * Create a zeroed BehaviorCounts object
@@ -230,6 +238,14 @@ function getDepotToPickupApproachCoords(
 }
 
 /**
+ * Convert vehicle transit speed in km/h to meters per second (m/s)
+ */
+export function kmhToMps(speedKmh: number): number {
+  const safeKmh = Number.isFinite(speedKmh) && speedKmh > 0 ? speedKmh : 25;
+  return (safeKmh * 1000) / 3600;
+}
+
+/**
  * Build an empty return path along an existing route polyline
  * from the vehicle's current position along the route to the Pickup Location.
  */
@@ -253,7 +269,8 @@ function getEmptyApproachAlongExistingRoute(
   for (let i = 0; i < reversedRoute.length; i++) {
     const d = turf.distance(
       [currentPos[1], currentPos[0]],
-      [reversedRoute[i][1], reversedRoute[i][0]]
+      [reversedRoute[i][1], reversedRoute[i][0]],
+      { units: 'kilometers' }
     );
     if (d < bestDist) {
       bestDist = d;
@@ -262,7 +279,10 @@ function getEmptyApproachAlongExistingRoute(
   }
 
   const sliced = reversedRoute.slice(bestIdx);
-  return sliced.length >= 2 ? sliced : reversedRoute;
+  if (sliced.length >= 2) {
+    return bestDist > 0.003 ? [currentPos, ...sliced] : sliced;
+  }
+  return bestDist > 0.003 ? [currentPos, ...reversedRoute] : reversedRoute;
 }
 
 /**
@@ -398,9 +418,9 @@ export function generateHeatmapFromState(
     }
   });
 
-  // 3. Vehicles en route to Target Shelters carrying evacuees
+  // 3. Vehicles en route to Target Shelters or unloading at Target Shelters carrying evacuees
   vehicles
-    .filter((v) => v.status === 'to_target' && v.currentOccupancy > 0)
+    .filter((v) => (v.status === 'to_target' || v.status === 'unloading') && v.currentOccupancy > 0)
     .forEach((v) => {
       const intensity = Math.min(0.9, Math.max(0.3, v.currentOccupancy / 120));
       pts.push({
@@ -480,6 +500,143 @@ function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalClust
 }
 
 /**
+ * Helper to append Brussels Metro Station Pickups and Metro Train units
+ * along static Metro Line trajectories (unaffected by Avoid Areas).
+ */
+function appendMetroPickupsAndTrains(
+  pickupStates: PickupLocationState[],
+  vehicles: ActiveVehicleUnit[],
+  metroEvacuation?: MetroEvacuationOptions,
+  existingPickupStates?: PickupLocationState[],
+  newLogs?: string[]
+): void {
+  if (
+    !metroEvacuation ||
+    !metroEvacuation.enabled ||
+    metroEvacuation.corridors.length === 0
+  ) {
+    return;
+  }
+
+  const totalTrains = Math.max(1, Math.round(metroEvacuation.trainCount || 1));
+  const trainCapacity = Math.max(1, Math.round(metroEvacuation.trainCapacity || 300));
+  const numCorridors = metroEvacuation.corridors.length;
+
+  let globalTrainNumber = 1;
+
+  metroEvacuation.corridors.forEach((corridor, cIdx) => {
+    const pickupId = `pickup-${corridor.id}`;
+    const label = `🚇 Metro Pickup: ${corridor.sourceStation.name_fr} → Drop-Off: ${corridor.targetStation.name_fr} (${corridor.lineLabel})`;
+    const prevPickup = existingPickupStates?.find(
+      (p) => p.id === pickupId || p.routeId === corridor.id
+    );
+
+    pickupStates.push({
+      id: pickupId,
+      routeId: corridor.id,
+      sourceId: corridor.sourceId,
+      sourceName: corridor.sourceName,
+      targetId: corridor.targetId,
+      targetName: corridor.targetName,
+      label,
+      location: corridor.sourceStation.position,
+      dropOffLocation: corridor.targetStation.position,
+      waitingPopulation: 0,
+      waitingByBehavior: createZeroBehaviorCounts(),
+      totalBoardedCount: prevPickup?.totalBoardedCount || 0,
+      boardedByBehavior: prevPickup?.boardedByBehavior
+        ? { ...prevPickup.boardedByBehavior }
+        : createZeroBehaviorCounts(),
+      evacuatedCount: prevPickup?.evacuatedCount || 0,
+      evacuatedByBehavior: prevPickup?.evacuatedByBehavior
+        ? { ...prevPickup.evacuatedByBehavior }
+        : createZeroBehaviorCounts(),
+      completedDeparturesCount: prevPickup?.completedDeparturesCount || 0,
+      totalCompletedVehicleWaitSeconds: prevPickup?.totalCompletedVehicleWaitSeconds || 0,
+      maxVehicleWaitSeconds: prevPickup?.maxVehicleWaitSeconds || 0,
+      totalDepartureOccupancyRatioSum: prevPickup?.totalDepartureOccupancyRatioSum || 0,
+      isMetro: true,
+      metroLine: corridor.lineLabel,
+      metroColor: corridor.color,
+      metroStationName: corridor.sourceStation.name_fr,
+      metroTargetStationName: corridor.targetStation.name_fr,
+    });
+
+    // Distribute the user-configured trainCount across active corridors, ensuring every active corridor gets at least 1 train
+    const trainsForCorridor =
+      totalTrains >= numCorridors
+        ? Math.floor(totalTrains / numCorridors) +
+          (cIdx < totalTrains % numCorridors ? 1 : 0)
+        : 1;
+
+    const evacCoords =
+      corridor.coordinates.length >= 2
+        ? corridor.coordinates
+        : [corridor.sourceStation.position, corridor.targetStation.position];
+    const evacDist = buildCumulativeDistances(evacCoords);
+
+    // Metro trains travel at 45 km/h on underground grade-separated tracks with fast multi-door boarding (0.2s/person)
+    const metroTransitSpeedKmh = 45;
+    const metroSpeedMps = kmhToMps(metroTransitSpeedKmh);
+    const metroLoadUnloadSec = 0.2;
+
+    for (let tIdx = 0; tIdx < trainsForCorridor; tIdx++) {
+      const trainNum = globalTrainNumber++;
+      const startsImmediatelyOnPlatform = tIdx === 0;
+      const stationApproachCoords: [number, number][] = [
+        corridor.sourceStation.position,
+        corridor.sourceStation.position,
+      ];
+
+      vehicles.push({
+        id: `metro-train-${corridor.id}-unit-${tIdx}`,
+        fleetId: `brussels-metro-fleet`,
+        fleetName: `STIB ${corridor.lineLabel} Train #${trainNum} (${corridor.sourceStation.name_fr} → ${corridor.targetStation.name_fr})`,
+        vehicleType: 'Metro',
+        unitCount: 1,
+        capacityPerUnit: trainCapacity,
+        maxCapacity: trainCapacity,
+        loadUnloadTimePerPersonSeconds: metroLoadUnloadSec,
+        transitSpeedKmh: metroTransitSpeedKmh,
+        currentOccupancy: 0,
+        occupancyByBehavior: createZeroBehaviorCounts(),
+        assignedRouteId: corridor.id,
+        assignedPickupId: pickupId,
+        sourceId: corridor.sourceId,
+        targetId: corridor.targetId,
+        targetName: corridor.targetName,
+        status: startsImmediatelyOnPlatform ? 'waiting_for_80_pct' : 'to_pickup',
+        waitingAtPickupSeconds: 0,
+        loadingProgressRemainder: 0,
+        loadingElapsedSeconds: 0,
+        unloadingProgressRemainder: 0,
+        unloadingElapsedSeconds: 0,
+        unloadingInitialOccupancy: 0,
+        currentPosition: corridor.sourceStation.position,
+        progressMeters: 0,
+        speedMps: metroSpeedMps,
+        approachCoords: stationApproachCoords,
+        approachCumulative: [0, 0],
+        evacCoords,
+        evacCumulative: evacDist.cumulative,
+        departureDelaySeconds: tIdx * 18,
+        isMetro: true,
+        metroLine: corridor.lineLabel,
+        metroColor: corridor.color,
+        sourceStationName: corridor.sourceStation.name_fr,
+        targetStationName: corridor.targetStation.name_fr,
+      });
+    }
+
+    if (newLogs) {
+      newLogs.push(
+        `🚇 Brussels Metro Evacuation Active: Established Pickup Station "${corridor.sourceStation.name_fr}" (${corridor.sourceName}) → Drop-Off Station "${corridor.targetStation.name_fr}" (${corridor.targetName}) via ${corridor.lineLabel} (${(corridor.distanceMeters / 1000).toFixed(2)} km track) with ${trainsForCorridor} train(s) × ${trainCapacity} pax.`
+      );
+    }
+  });
+}
+
+/**
  * Initialize full simulation state from scratch.
  * Every empty vehicle departing to pick up population strictly follows the existing route polyline!
  */
@@ -487,42 +644,72 @@ export function initializeSimulationState(
   routes: ComputedRoute[],
   sourceAreas: SourceArea[],
   targetAreas: TargetArea[],
-  vehicleFleets: VehicleFleet[]
+  vehicleFleets: VehicleFleet[],
+  metroEvacuation?: MetroEvacuationOptions
 ): SimulationStateSnapshot {
-  const pickupStates: PickupLocationState[] = routes.map((r, idx) => ({
-    id: `pickup-${r.id}`,
-    routeId: r.id,
-    sourceId: r.sourceId,
-    sourceName: r.sourceName,
-    targetId: r.targetId,
-    targetName: r.targetName,
-    label: r.pickupLabel || `Pickup Point #${idx + 1}`,
-    location: r.pickupLocation,
-    waitingPopulation: 0,
-    waitingByBehavior: createZeroBehaviorCounts(),
-    totalBoardedCount: 0,
-    boardedByBehavior: createZeroBehaviorCounts(),
-    evacuatedCount: 0,
-    evacuatedByBehavior: createZeroBehaviorCounts(),
-    completedDeparturesCount: 0,
-    totalCompletedVehicleWaitSeconds: 0,
-    maxVehicleWaitSeconds: 0,
-    totalDepartureOccupancyRatioSum: 0,
-  }));
+  const newLogs: string[] = [];
+
+  // Source Areas that have active Brussels Metro evacuation corridors use their Metro Stations
+  // as Pickup Points and Target Area Metro Stations as Drop-Off Points
+  const metroSourceIds = new Set<string>(
+    metroEvacuation && metroEvacuation.enabled
+      ? metroEvacuation.corridors.map((c) => c.sourceId)
+      : []
+  );
+
+  const activeStreetRoutes =
+    vehicleFleets.length > 0
+      ? routes.filter((r) => !metroSourceIds.has(r.sourceId))
+      : [];
+
+  const pickupStates: PickupLocationState[] = [];
+  const vehicles: ActiveVehicleUnit[] = [];
+
+  // 1. Establish Brussels Metro Station Pickups/Drop-Offs and Metro Trains first
+  appendMetroPickupsAndTrains(
+    pickupStates,
+    vehicles,
+    metroEvacuation,
+    undefined,
+    newLogs
+  );
+
+  // 2. Establish Street Pickup Squares and Street Vehicle Units for Source Areas served by street fleets
+  activeStreetRoutes.forEach((r, idx) => {
+    pickupStates.push({
+      id: `pickup-${r.id}`,
+      routeId: r.id,
+      sourceId: r.sourceId,
+      sourceName: r.sourceName,
+      targetId: r.targetId,
+      targetName: r.targetName,
+      label: r.pickupLabel || `Pickup Point #${idx + 1}`,
+      location: r.pickupLocation,
+      waitingPopulation: 0,
+      waitingByBehavior: createZeroBehaviorCounts(),
+      totalBoardedCount: 0,
+      boardedByBehavior: createZeroBehaviorCounts(),
+      evacuatedCount: 0,
+      evacuatedByBehavior: createZeroBehaviorCounts(),
+      completedDeparturesCount: 0,
+      totalCompletedVehicleWaitSeconds: 0,
+      maxVehicleWaitSeconds: 0,
+      totalDepartureOccupancyRatioSum: 0,
+    });
+  });
 
   const clusters = buildClustersForSources(sourceAreas);
   const telemetryStats = createInitialTelemetryStats(sourceAreas, clusters);
 
-  // Initialize Vehicle Units cycling along the existing computed routes to Pickups and Targets
-  const vehicles: ActiveVehicleUnit[] = [];
-
-  routes.forEach((route, rIdx) => {
+  activeStreetRoutes.forEach((route, rIdx) => {
     const pickup = pickupStates.find((p) => p.routeId === route.id);
     if (!pickup) return;
 
     const fleet =
       vehicleFleets.find((f) => f.id === route.vehicleFleetId) ||
       vehicleFleets[rIdx % Math.max(1, vehicleFleets.length)];
+
+    if (!fleet || fleet.count <= 0) return;
 
     // Initial dispatch at t = 0 starts from the designated Vehicle Fleet staging depot location
     const approachCoords = getDepotToPickupApproachCoords(route, fleet);
@@ -535,20 +722,25 @@ export function initializeSimulationState(
     const evacDist = buildCumulativeDistances(evacCoords);
 
     const numWaves = 4;
-    const totalFleetUnits = fleet ? Math.max(4, Math.ceil(fleet.count / 2)) : 12;
-    const unitsPerWave = Math.max(2, Math.round(totalFleetUnits / numWaves));
-    const capPerUnit = fleet ? fleet.capacityPerUnit : 50;
+    const totalFleetUnits = Math.max(4, Math.ceil(fleet.count / 2));
+    const unitsPerWave = Math.max(1, Math.round(totalFleetUnits / numWaves));
+    const capPerUnit = fleet.capacityPerUnit;
     const maxCapPerWave = unitsPerWave * capPerUnit;
+    const loadUnloadTimeSec = Math.max(0, fleet.loadUnloadTimePerPersonSeconds ?? 2);
+    const transitSpeedKmh = Math.max(0.5, fleet.transitSpeedKmh ?? 25);
+    const speedMps = kmhToMps(transitSpeedKmh);
 
     for (let w = 0; w < numWaves; w++) {
       vehicles.push({
         id: `veh-${route.id}-wave-${w}`,
-        fleetId: fleet?.id || 'default-fleet',
-        fleetName: `${fleet?.name || 'Evac Transit'} Convoy #${w + 1}`,
-        vehicleType: fleet?.type || 'Bus',
+        fleetId: fleet.id,
+        fleetName: `${fleet.name} Convoy #${w + 1}`,
+        vehicleType: fleet.type || 'Bus',
         unitCount: unitsPerWave,
         capacityPerUnit: capPerUnit,
         maxCapacity: maxCapPerWave,
+        loadUnloadTimePerPersonSeconds: loadUnloadTimeSec,
+        transitSpeedKmh,
         currentOccupancy: 0,
         occupancyByBehavior: createZeroBehaviorCounts(),
         assignedRouteId: route.id,
@@ -558,9 +750,14 @@ export function initializeSimulationState(
         targetName: route.targetName,
         status: 'to_pickup',
         waitingAtPickupSeconds: 0,
+        loadingProgressRemainder: 0,
+        loadingElapsedSeconds: 0,
+        unloadingProgressRemainder: 0,
+        unloadingElapsedSeconds: 0,
+        unloadingInitialOccupancy: 0,
         currentPosition: approachCoords[0],
         progressMeters: 0,
-        speedMps: 18.0,
+        speedMps,
         approachCoords,
         approachCumulative: approachDist.cumulative,
         evacCoords,
@@ -592,7 +789,7 @@ export function initializeSimulationState(
     heatmapPoints,
     targetOccupancies,
     telemetryStats,
-    newLogs: [],
+    newLogs,
     totalEvacuated: 0,
     totalInTransit: 0,
     totalRemainingAtSource,
@@ -619,12 +816,24 @@ export function reconcileSimulationOnRestart(
     { target: TargetArea; coordinates: [number, number][] }
   >,
   existingTelemetryStats?: SimulationTelemetryStats,
-  existingPickupStates?: PickupLocationState[]
+  existingPickupStates?: PickupLocationState[],
+  metroEvacuation?: MetroEvacuationOptions
 ): SimulationStateSnapshot {
   const newLogs: string[] = [];
 
-  // 1. Establish new Pickup Location states from recomputed routes, preserving cumulative history if matched
-  const pickupStates: PickupLocationState[] = newRoutes.map((r, idx) => {
+  const metroSourceIds = new Set<string>(
+    metroEvacuation && metroEvacuation.enabled
+      ? metroEvacuation.corridors.map((c) => c.sourceId)
+      : []
+  );
+
+  const activeStreetRoutes =
+    vehicleFleets.length > 0
+      ? newRoutes.filter((r) => !metroSourceIds.has(r.sourceId))
+      : [];
+
+  // 1. Establish new Pickup Location states from recomputed street routes, preserving cumulative history if matched
+  const pickupStates: PickupLocationState[] = activeStreetRoutes.map((r, idx) => {
     const label = r.pickupLabel || `Pickup Point #${idx + 1}`;
     const prevPickup = existingPickupStates?.find(
       (p) => p.routeId === r.id || (p.sourceId === r.sourceId && p.label === label)
@@ -658,17 +867,36 @@ export function reconcileSimulationOnRestart(
   // 2. Build clusters for each Source Area using its current (remaining/edited/new) population
   const clusters = buildClustersForSources(sourceAreas);
 
-  // 3. Reconcile vehicles:
+  // 3. Reconcile street vehicles (exclude old empty metro trains, keep loaded metro trains until offload):
   const activeFleetIds = new Set(vehicleFleets.map((f) => f.id));
-  const survivingVehicles = existingVehicles.filter((v) => activeFleetIds.has(v.fleetId));
+  const survivingVehicles = existingVehicles.filter(
+    (v) => (!v.isMetro && activeFleetIds.has(v.fleetId)) || (v.isMetro && v.currentOccupancy > 0)
+  );
 
   const updatedVehicles: ActiveVehicleUnit[] = [];
 
   survivingVehicles.forEach((veh, idx) => {
-    const defaultNextRoute = newRoutes[idx % Math.max(1, newRoutes.length)];
-    if (!defaultNextRoute) return;
+    // Loaded metro trains continue unaffected along their underground metro track!
+    if (veh.isMetro && veh.currentOccupancy > 0) {
+      updatedVehicles.push(veh);
+      return;
+    }
 
-    // CASE A: Running or waiting vehicle carrying passengers (`currentOccupancy > 0`)
+    const defaultNextRoute = activeStreetRoutes[idx % Math.max(1, activeStreetRoutes.length)];
+    if (!defaultNextRoute && veh.currentOccupancy === 0) return;
+
+    const fleet = vehicleFleets.find((f) => f.id === veh.fleetId);
+    const updatedLoadUnloadSec = fleet
+      ? Math.max(0, fleet.loadUnloadTimePerPersonSeconds ?? 2)
+      : Math.max(0, veh.loadUnloadTimePerPersonSeconds ?? 2);
+    const updatedTransitSpeedKmh = fleet
+      ? Math.max(0.5, fleet.transitSpeedKmh ?? 25)
+      : Math.max(0.5, veh.transitSpeedKmh ?? (veh.speedMps > 0 ? veh.speedMps * 3.6 : 25));
+    const updatedSpeedMps = kmhToMps(updatedTransitSpeedKmh);
+    const updatedCapPerUnit = fleet ? fleet.capacityPerUnit : veh.capacityPerUnit;
+    const updatedMaxCap = Math.max(veh.currentOccupancy, veh.unitCount * updatedCapPerUnit);
+
+    // CASE A: Running, waiting, or unloading vehicle carrying passengers (`currentOccupancy > 0`)
     // -> Immediately route from its current position to the CLOSEST active Target Area,
     //    then follow an existing route connected to that Target Area right after offloading!
     if (veh.currentOccupancy > 0) {
@@ -683,29 +911,48 @@ export function reconcileSimulationOnRestart(
       // Select an existing route connected to `closestTarget` so after offloading at `closestTarget`,
       // the empty vehicle follows that existing route polyline straight back to its Pickup Location!
       const connectedRoute =
-        newRoutes.find((r) => r.targetId === closestTarget.id) || defaultNextRoute;
+        activeStreetRoutes.find((r) => r.targetId === closestTarget.id) ||
+        defaultNextRoute ||
+        newRoutes.find((r) => r.targetId === closestTarget.id) ||
+        newRoutes[0];
+      if (!connectedRoute) return;
+
       const connectedPickup =
         pickupStates.find((p) => p.routeId === connectedRoute.id) ||
-        pickupStates.find((p) => p.routeId === defaultNextRoute.id);
+        (defaultNextRoute
+          ? pickupStates.find((p) => p.routeId === defaultNextRoute.id)
+          : undefined) ||
+        pickupStates[0];
 
       if (!connectedPickup) return;
 
-      newLogs.push(
-        `Mid-sim reroute: ${veh.fleetName} (${veh.currentOccupancy} pax onboard) diverted from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest active shelter "${closestTarget.name}", then following existing route ${connectedRoute.pickupLabel}.`
-      );
+      const preserveUnloadingAtSameTarget =
+        veh.status === 'unloading' && veh.targetId === closestTarget.id;
+
+      if (!preserveUnloadingAtSameTarget) {
+        newLogs.push(
+          `Mid-sim reroute: ${veh.fleetName} (${veh.currentOccupancy} pax onboard, ${updatedTransitSpeedKmh} km/h) diverted from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest active shelter "${closestTarget.name}", then following existing route ${connectedRoute.pickupLabel}.`
+        );
+      }
 
       updatedVehicles.push({
         ...veh,
+        capacityPerUnit: updatedCapPerUnit,
+        maxCapacity: updatedMaxCap,
+        loadUnloadTimePerPersonSeconds: updatedLoadUnloadSec,
+        transitSpeedKmh: updatedTransitSpeedKmh,
+        speedMps: updatedSpeedMps,
         occupancyByBehavior: veh.occupancyByBehavior
           ? { ...veh.occupancyByBehavior }
           : { obedient: veh.currentOccupancy, autonomous: 0, random: 0 },
-        status: 'to_target',
+        status: preserveUnloadingAtSameTarget ? 'unloading' : 'to_target',
         waitingAtPickupSeconds: 0,
-        progressMeters: 0,
+        loadingProgressRemainder: 0,
+        progressMeters: preserveUnloadingAtSameTarget ? veh.progressMeters : 0,
         targetId: closestTarget.id,
         targetName: closestTarget.name,
-        evacCoords: directCoords,
-        evacCumulative: directDist.cumulative,
+        evacCoords: preserveUnloadingAtSameTarget ? veh.evacCoords : directCoords,
+        evacCumulative: preserveUnloadingAtSameTarget ? veh.evacCumulative : directDist.cumulative,
         assignedRouteId: connectedRoute.id,
         assignedPickupId: connectedPickup.id,
         sourceId: connectedRoute.sourceId,
@@ -716,10 +963,10 @@ export function reconcileSimulationOnRestart(
       });
     } else {
       // CASE B: Empty vehicle (`currentOccupancy === 0`)
+      if (!defaultNextRoute) return;
       const nextPickup = pickupStates.find((p) => p.routeId === defaultNextRoute.id);
       if (!nextPickup) return;
 
-      const fleet = vehicleFleets.find((f) => f.id === veh.fleetId);
       const isStillAtDepot =
         veh.progressMeters === 0 &&
         fleet &&
@@ -736,9 +983,19 @@ export function reconcileSimulationOnRestart(
 
       updatedVehicles.push({
         ...veh,
+        capacityPerUnit: updatedCapPerUnit,
+        maxCapacity: updatedMaxCap,
+        loadUnloadTimePerPersonSeconds: updatedLoadUnloadSec,
+        transitSpeedKmh: updatedTransitSpeedKmh,
+        speedMps: updatedSpeedMps,
         occupancyByBehavior: createZeroBehaviorCounts(),
         status: 'to_pickup',
         waitingAtPickupSeconds: 0,
+        loadingProgressRemainder: 0,
+        loadingElapsedSeconds: 0,
+        unloadingProgressRemainder: 0,
+        unloadingElapsedSeconds: 0,
+        unloadingInitialOccupancy: 0,
         progressMeters: 0,
         currentPosition: approachCoords[0],
         assignedRouteId: defaultNextRoute.id,
@@ -763,7 +1020,7 @@ export function reconcileSimulationOnRestart(
   const newFleets = vehicleFleets.filter((f) => !representedFleetIds.has(f.id));
 
   newFleets.forEach((fleet, fIdx) => {
-    const route = newRoutes[fIdx % Math.max(1, newRoutes.length)];
+    const route = activeStreetRoutes[fIdx % Math.max(1, activeStreetRoutes.length)];
     const pickup = route ? pickupStates.find((p) => p.routeId === route.id) : undefined;
     if (!route || !pickup) return;
 
@@ -772,8 +1029,11 @@ export function reconcileSimulationOnRestart(
     const evacDist = buildCumulativeDistances(route.coordinates);
 
     const numWaves = 3;
-    const unitsPerWave = Math.max(2, Math.round(fleet.count / numWaves));
+    const unitsPerWave = Math.max(1, Math.round(fleet.count / numWaves));
     const maxCapPerWave = unitsPerWave * fleet.capacityPerUnit;
+    const loadUnloadTimeSec = Math.max(0, fleet.loadUnloadTimePerPersonSeconds ?? 2);
+    const transitSpeedKmh = Math.max(0.5, fleet.transitSpeedKmh ?? 25);
+    const speedMps = kmhToMps(transitSpeedKmh);
 
     for (let w = 0; w < numWaves; w++) {
       updatedVehicles.push({
@@ -784,6 +1044,8 @@ export function reconcileSimulationOnRestart(
         unitCount: unitsPerWave,
         capacityPerUnit: fleet.capacityPerUnit,
         maxCapacity: maxCapPerWave,
+        loadUnloadTimePerPersonSeconds: loadUnloadTimeSec,
+        transitSpeedKmh,
         currentOccupancy: 0,
         occupancyByBehavior: createZeroBehaviorCounts(),
         assignedRouteId: route.id,
@@ -793,9 +1055,14 @@ export function reconcileSimulationOnRestart(
         targetName: route.targetName,
         status: 'to_pickup',
         waitingAtPickupSeconds: 0,
+        loadingProgressRemainder: 0,
+        loadingElapsedSeconds: 0,
+        unloadingProgressRemainder: 0,
+        unloadingElapsedSeconds: 0,
+        unloadingInitialOccupancy: 0,
         currentPosition: approachCoords[0],
         progressMeters: 0,
-        speedMps: 18.0,
+        speedMps,
         approachCoords,
         approachCumulative: approachDist.cumulative,
         evacCoords: route.coordinates,
@@ -805,9 +1072,18 @@ export function reconcileSimulationOnRestart(
     }
 
     newLogs.push(
-      `Deployed new fleet "${fleet.name}" (${fleet.count} × ${fleet.type}) along existing corridor ${route.pickupLabel} -> ${route.targetName}.`
+      `Deployed new fleet "${fleet.name}" (${fleet.count} × ${fleet.type}, ${transitSpeedKmh} km/h, ${loadUnloadTimeSec}s/pax load/unload) along existing corridor ${route.pickupLabel} -> ${route.targetName}.`
     );
   });
+
+  // 5. Append Brussels Metro Station Pickups and Metro Trains if enabled
+  appendMetroPickupsAndTrains(
+    pickupStates,
+    updatedVehicles,
+    metroEvacuation,
+    existingPickupStates,
+    newLogs
+  );
 
   const targetOccupancies: Record<string, number> = {};
   targetAreas.forEach((t) => {
@@ -816,7 +1092,7 @@ export function reconcileSimulationOnRestart(
 
   const totalEvacuated = Object.values(targetOccupancies).reduce((acc, v) => acc + v, 0);
   const totalInTransit = updatedVehicles
-    .filter((v) => v.status === 'to_target')
+    .filter((v) => v.status === 'to_target' || v.status === 'unloading')
     .reduce((acc, v) => acc + v.currentOccupancy, 0);
   const totalRemainingAtSource = clusters.reduce((acc, c) => acc + c.headcount, 0);
 
@@ -885,11 +1161,11 @@ export function reconcileSimulationOnRestart(
  * Step simulation forward by `deltaSimSeconds` implementing:
  * 1. Obedient population moving immediately to closest pickup location
  * 2. Random population diffusing inside Source Area via true 2D Brownian motion (independent Gaussian random walk)
- *    until within 50m of a pickup location, at which point they direct themselves straight to it
- * 3. Autonomous population wandering along Source Area perimeter limits until stumbling on a pickup location
+ *    until within capture range of a pickup location, at which point they direct themselves straight to it
+ * 3. Autonomous population wandering along Source Area perimeter limits until reaching a pickup location
  * 4. Vehicles waiting at pickup locations until EITHER:
  *    - Occupancy reaches >= 80%, OR
- *    - Waiting time reaches 10 minutes (600s)
+ *    - Waiting time reaches 10 minutes (600s) (or Metro platform dispatch cadence for Metro Trains)
  *    Whichever happens first, departing to Target Area provided there is at least 1 passenger onboard!
  * 5. When vehicles depart empty to pick up population, they ALWAYS follow the existing computed route polyline!
  * 6. Dynamic heatmap updating (hotter around pickup locations as queues build, cooler over time as source empties)
@@ -944,11 +1220,16 @@ export function stepSimulationState(
     }
 
     const src = sourceMap.get(cluster.sourceId);
-    const pickupsInZone = Array.from(pickupMap.values()).filter(
+    const allPickupsInZone = Array.from(pickupMap.values()).filter(
       (p) => p.sourceId === cluster.sourceId
     );
 
-    if (pickupsInZone.length === 0) return cluster;
+    if (allPickupsInZone.length === 0) return cluster;
+
+    // When a Source Area has active Metro Station Pickup Points, prioritize the Metro Station Pickup Points
+    const metroPickupsInZone = allPickupsInZone.filter((p) => p.isMetro);
+    const pickupsInZone =
+      metroPickupsInZone.length > 0 ? metroPickupsInZone : allPickupsInZone;
 
     const pickupsWithDist = pickupsInZone
       .map((p) => {
@@ -960,12 +1241,18 @@ export function stepSimulationState(
           ) * 1000;
         return { pickup: p, distMeters };
       })
-      .sort((a, b) => a.distMeters - b.distMeters);
+      .sort((a, b) => {
+        if (Math.abs(a.distMeters - b.distMeters) <= 15) {
+          return a.pickup.waitingPopulation - b.pickup.waitingPopulation;
+        }
+        return a.distMeters - b.distMeters;
+      });
 
     const closest = pickupsWithDist[0];
+    const arrivalRadiusMeters = closest.pickup.isMetro ? 18.0 : 14.0;
 
-    // Check arrival threshold (within 14 meters of a pickup point)
-    if (closest.distMeters <= 14) {
+    // Check arrival threshold
+    if (closest.distMeters <= arrivalRadiusMeters) {
       closest.pickup.waitingPopulation += cluster.headcount;
       closest.pickup.waitingByBehavior[cluster.behavior] += cluster.headcount;
       updatedTelemetry.pickupArrivedByBehavior[cluster.behavior] += cluster.headcount;
@@ -999,9 +1286,10 @@ export function stepSimulationState(
 
     // --- BEHAVIOR 2: RANDOM (2D BROWNIAN MOTION) ---
     // Diffuse via true stochastic 2D Brownian motion (independent zero-mean Gaussian displacements at every tick)
-    // until within 50m of ANY pickup point, then direct straight to it!
+    // until within capture distance of a pickup point, then direct straight to it!
     if (cluster.behavior === 'random') {
-      if (closest.distMeters <= 50.0) {
+      const captureDistMeters = closest.pickup.isMetro ? 75.0 : 50.0;
+      if (closest.distMeters <= captureDistMeters) {
         const stepDist = walkSpeedMetersPerSec * 1.15 * deltaSimSeconds;
         const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
         const nextLat =
@@ -1038,16 +1326,29 @@ export function stepSimulationState(
         let candidateLat = cluster.position[0] + dLat;
         let candidateLng = cluster.position[1] + dLng;
 
+        // If heading toward an interior Metro Station, add a gentle radial drift so Brownian walkers don't stay trapped at far corners
+        if (closest.pickup.isMetro) {
+          const driftRatio = Math.min(
+            0.35,
+            (walkSpeedMetersPerSec * 0.55 * deltaSimSeconds) /
+              Math.max(1, closest.distMeters)
+          );
+          candidateLat += (closest.pickup.location[0] - cluster.position[0]) * driftRatio;
+          candidateLng += (closest.pickup.location[1] - cluster.position[1]) * driftRatio;
+        }
+
         // Reflect Brownian step back inside polygon if it crosses the boundary (without persistent straight-line drift)
         if (src && src.polygon.length >= 3) {
           try {
             const poly = toTurfPolygon(src.polygon);
             if (!turf.booleanPointInPolygon(turf.point([candidateLng, candidateLat]), poly)) {
-              const centroid = getPolygonCentroid(src.polygon);
+              const targetRef = closest.pickup.isMetro
+                ? closest.pickup.location
+                : getPolygonCentroid(src.polygon);
               candidateLat =
-                cluster.position[0] - dLat * 0.65 + (centroid[0] - cluster.position[0]) * 0.08;
+                cluster.position[0] - dLat * 0.65 + (targetRef[0] - cluster.position[0]) * 0.12;
               candidateLng =
-                cluster.position[1] - dLng * 0.65 + (centroid[1] - cluster.position[1]) * 0.08;
+                cluster.position[1] - dLng * 0.65 + (targetRef[1] - cluster.position[1]) * 0.12;
             }
           } catch {
             // Ignore turf error
@@ -1063,8 +1364,10 @@ export function stepSimulationState(
 
     // --- BEHAVIOR 3: AUTONOMOUS ---
     // Wander around the LIMITS (perimeter boundary) of the source area until stumbling upon a pickup location
+    // (or curve inward from the perimeter when the pickup is an interior Metro Station)
     if (cluster.behavior === 'autonomous') {
-      if (closest.distMeters <= 55.0) {
+      const captureDistMeters = closest.pickup.isMetro ? 75.0 : 55.0;
+      if (closest.distMeters <= captureDistMeters) {
         const stepDist = walkSpeedMetersPerSec * 1.1 * deltaSimSeconds;
         const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
         const nextLat =
@@ -1103,6 +1406,24 @@ export function stepSimulationState(
         const perimLat = edgeA[0] + (edgeB[0] - edgeA[0]) * nextProgress;
         const perimLng = edgeA[1] + (edgeB[1] - edgeA[1]) * nextProgress;
 
+        if (closest.pickup.isMetro) {
+          // Interior Metro Station: follow a curved path guided by the perimeter while steadily converging on the Metro Station
+          const stepToMetro = walkSpeedMetersPerSec * 0.9 * deltaSimSeconds;
+          const directRatio = Math.min(1.0, stepToMetro / Math.max(1, closest.distMeters));
+          const directLat =
+            cluster.position[0] + (closest.pickup.location[0] - cluster.position[0]) * directRatio;
+          const directLng =
+            cluster.position[1] + (closest.pickup.location[1] - cluster.position[1]) * directRatio;
+
+          return {
+            ...cluster,
+            position: [directLat, directLng] as [number, number],
+            perimeterEdgeIndex: nextEdgeIdx,
+            perimeterProgress: nextProgress,
+            targetPickupId: closest.pickup.id,
+          };
+        }
+
         const nextLat = cluster.position[0] * 0.35 + perimLat * 0.65;
         const nextLng = cluster.position[1] * 0.35 + perimLng * 0.65;
 
@@ -1118,11 +1439,16 @@ export function stepSimulationState(
     return cluster;
   });
 
-  // Calculate remaining unboarded evacuees per Source Area
-  const getUnboardedInSource = (sourceId: string): number => {
-    const movingCount = updatedClusters
+  // Calculate remaining moving evacuees in a Source Area
+  const getMovingInSource = (sourceId: string): number => {
+    return updatedClusters
       .filter((c) => c.sourceId === sourceId && c.status === 'moving_in_zone')
       .reduce((acc, c) => acc + c.headcount, 0);
+  };
+
+  // Calculate remaining unboarded evacuees per Source Area
+  const getUnboardedInSource = (sourceId: string): number => {
+    const movingCount = getMovingInSource(sourceId);
     const waitingCount = Array.from(pickupMap.values())
       .filter((p) => p.sourceId === sourceId)
       .reduce((acc, p) => acc + p.waitingPopulation, 0);
@@ -1131,10 +1457,77 @@ export function stepSimulationState(
 
   const updatedTargetOccupancies = { ...prevState.targetOccupancies };
 
-  // --- STEP 2: Process Vehicle Dispatches, Dual Departure Condition (80% Occupancy OR 10 Minutes Wait), and Shelter Offloads ---
+  // Helper to transition an empty vehicle after completing unloading at a Target Shelter
+  const finalizeEmptyVehicleAfterUnload = (veh: ActiveVehicleUnit): ActiveVehicleUnit => {
+    updatedTelemetry.totalCompletedVehicleTrips += 1;
+
+    // If this vehicle was diverted mid-simulation to the closest Target Area and has a post-offload recomputed route,
+    // transition it now to follow that existing route!
+    const nextEvacCoords = veh.postOffloadEvacCoords || veh.evacCoords;
+    const nextTargetId = veh.postOffloadTargetId || veh.targetId;
+    const nextTargetName = veh.postOffloadTargetName || veh.targetName;
+    const nextEvacDist = buildCumulativeDistances(nextEvacCoords);
+
+    // Return trip to pick up population ALWAYS follows the existing route polyline in reverse!
+    const returnCoords: [number, number][] = [...nextEvacCoords].reverse();
+    const returnDist = buildCumulativeDistances(returnCoords);
+
+    const offloadedVeh: ActiveVehicleUnit = {
+      ...veh,
+      currentOccupancy: 0,
+      occupancyByBehavior: createZeroBehaviorCounts(),
+      waitingAtPickupSeconds: 0,
+      loadingProgressRemainder: 0,
+      loadingElapsedSeconds: 0,
+      unloadingProgressRemainder: 0,
+      unloadingElapsedSeconds: 0,
+      unloadingInitialOccupancy: 0,
+      progressMeters: 0,
+      currentPosition: returnCoords[0],
+      evacCoords: nextEvacCoords,
+      evacCumulative: nextEvacDist.cumulative,
+      targetId: nextTargetId,
+      targetName: nextTargetName,
+      postOffloadEvacCoords: undefined,
+      postOffloadTargetId: undefined,
+      postOffloadTargetName: undefined,
+    };
+
+    const assignedPickup = pickupMap.get(veh.assignedPickupId);
+    const remainingForPickup =
+      getMovingInSource(veh.sourceId) + (assignedPickup ? assignedPickup.waitingPopulation : 0);
+
+    if (remainingForPickup > 0 || getUnboardedInSource(veh.sourceId) > 0) {
+      return {
+        ...offloadedVeh,
+        status: 'to_pickup' as const,
+        approachCoords: returnCoords,
+        approachCumulative: returnDist.cumulative,
+      };
+    } else {
+      return {
+        ...offloadedVeh,
+        status: 'completed' as const,
+      };
+    }
+  };
+
+  // Track queue passengers reserved by earlier waiting vehicles at the same Pickup Location
+  // so the lead boarding vehicle fills to 80% before subsequent vehicles board non-overflow passengers
+  const reservedQueueByPickup = new Map<string, number>();
+
+  // --- STEP 2: Process Vehicle Dispatches, Loading Time at Pickups (80% Occupancy OR 10 Minutes Wait), and Unloading Time at Target Shelters ---
   const updatedVehicles = prevState.vehicles.map((rawVeh) => {
+    const transitSpeedKmh = Math.max(
+      0.5,
+      rawVeh.transitSpeedKmh ?? (rawVeh.speedMps > 0 ? rawVeh.speedMps * 3.6 : 25)
+    );
+    const speedMps = kmhToMps(transitSpeedKmh);
+
     const veh: ActiveVehicleUnit = {
       ...rawVeh,
+      transitSpeedKmh,
+      speedMps,
       occupancyByBehavior: rawVeh.occupancyByBehavior
         ? { ...rawVeh.occupancyByBehavior }
         : createZeroBehaviorCounts(),
@@ -1146,17 +1539,34 @@ export function stepSimulationState(
     const pickup = pickupMap.get(veh.assignedPickupId);
     if (!pickup) return veh;
 
-    // STATE A: Driving empty along existing route TO Pickup Location (Blue Square)
+    const loadUnloadSecPerPerson = Math.max(0, veh.loadUnloadTimePerPersonSeconds ?? 2);
+
+    // Account for exact active time within tick if vehicle just passed its departureDelaySeconds
+    const effectiveDeltaSec =
+      veh.progressMeters === 0 && veh.status === 'to_pickup' && veh.departureDelaySeconds > 0
+        ? Math.min(deltaSimSeconds, Math.max(0, elapsedSimSeconds - veh.departureDelaySeconds))
+        : deltaSimSeconds;
+
+    // STATE A: Driving empty along existing route TO Pickup Location (Blue Square or Metro Station) at configured transitSpeedKmh
     if (veh.status === 'to_pickup') {
-      const totalApproachDist =
-        veh.approachCumulative[veh.approachCumulative.length - 1] || 1;
-      const nextProgress = veh.progressMeters + veh.speedMps * deltaSimSeconds;
+      const totalApproachDist = Math.max(
+        0,
+        veh.approachCumulative[veh.approachCumulative.length - 1] ?? 0
+      );
+      const stepMeters = speedMps * effectiveDeltaSec;
+      const nextProgress = veh.progressMeters + stepMeters;
 
       if (nextProgress >= totalApproachDist) {
+        const remainingDistToPickup = Math.max(0, totalApproachDist - veh.progressMeters);
+        const driveTimeUsedSec = speedMps > 0 ? remainingDistToPickup / speedMps : 0;
+        const leftoverWaitSec = Math.max(0, effectiveDeltaSec - driveTimeUsedSec);
+
         return {
           ...veh,
           status: 'waiting_for_80_pct' as const,
-          waitingAtPickupSeconds: 0,
+          waitingAtPickupSeconds: leftoverWaitSec,
+          loadingProgressRemainder: 0,
+          loadingElapsedSeconds: 0,
           progressMeters: 0,
           currentPosition: pickup.location,
         };
@@ -1174,57 +1584,151 @@ export function stepSimulationState(
       };
     }
 
-    // STATE B: At Blue Square Pickup Location — Board waiting evacuees & WAIT UNTIL:
-    // (1) Occupancy >= 80%, OR (2) Waiting time >= 10 minutes (600 seconds)
+    // STATE B: At Blue Square Pickup Location (or Metro Station) — Board waiting evacuees accounting for per-person loading time
+    // & WAIT UNTIL: (1) Occupancy >= 80%, OR (2) Waiting time >= 10 minutes (600 seconds) (or Metro platform cadence)
     // Whichever happens first, depart to Target Area IF there is at least 1 passenger!
     if (veh.status === 'waiting_for_80_pct') {
       const nextWaitSeconds = veh.waitingAtPickupSeconds + deltaSimSeconds;
 
-      // Board any waiting evacuees from the pickup queue
+      const reservedAhead = reservedQueueByPickup.get(pickup.id) || 0;
       const spaceNeeded = veh.maxCapacity - veh.currentOccupancy;
-      if (spaceNeeded > 0 && pickup.waitingPopulation > 0) {
-        const boardedNow = Math.min(spaceNeeded, pickup.waitingPopulation);
-        const boardedBreakdown = allocateBoardedByBehavior(pickup.waitingByBehavior, boardedNow);
 
-        veh.currentOccupancy += boardedNow;
-        veh.occupancyByBehavior.obedient += boardedBreakdown.obedient;
-        veh.occupancyByBehavior.autonomous += boardedBreakdown.autonomous;
-        veh.occupancyByBehavior.random += boardedBreakdown.random;
+      // If this is a Metro train (or local queue is empty with no more moving clusters in zone) and more passengers are needed,
+      // draw waiting evacuees from other pickup queues in the same Source Area so Metro capacity is fully utilized!
+      if (
+        spaceNeeded > Math.max(0, pickup.waitingPopulation - reservedAhead) &&
+        (veh.isMetro || (pickup.waitingPopulation === 0 && getMovingInSource(veh.sourceId) === 0))
+      ) {
+        for (const otherPickup of pickupMap.values()) {
+          const currentAvail = Math.max(0, pickup.waitingPopulation - reservedAhead);
+          const deficit = spaceNeeded - currentAvail;
+          if (deficit <= 0) break;
+          if (
+            otherPickup.sourceId === veh.sourceId &&
+            otherPickup.id !== pickup.id &&
+            otherPickup.waitingPopulation > 0
+          ) {
+            const transferCount = Math.min(deficit, otherPickup.waitingPopulation);
+            if (transferCount > 0) {
+              const transferredByBehavior = allocateBoardedByBehavior(
+                otherPickup.waitingByBehavior,
+                transferCount
+              );
+              otherPickup.waitingPopulation -= transferCount;
+              otherPickup.waitingByBehavior.obedient = Math.max(
+                0,
+                otherPickup.waitingByBehavior.obedient - transferredByBehavior.obedient
+              );
+              otherPickup.waitingByBehavior.autonomous = Math.max(
+                0,
+                otherPickup.waitingByBehavior.autonomous - transferredByBehavior.autonomous
+              );
+              otherPickup.waitingByBehavior.random = Math.max(
+                0,
+                otherPickup.waitingByBehavior.random - transferredByBehavior.random
+              );
 
-        pickup.waitingPopulation -= boardedNow;
-        pickup.waitingByBehavior.obedient = Math.max(
-          0,
-          pickup.waitingByBehavior.obedient - boardedBreakdown.obedient
-        );
-        pickup.waitingByBehavior.autonomous = Math.max(
-          0,
-          pickup.waitingByBehavior.autonomous - boardedBreakdown.autonomous
-        );
-        pickup.waitingByBehavior.random = Math.max(
-          0,
-          pickup.waitingByBehavior.random - boardedBreakdown.random
-        );
+              pickup.waitingPopulation += transferCount;
+              pickup.waitingByBehavior.obedient += transferredByBehavior.obedient;
+              pickup.waitingByBehavior.autonomous += transferredByBehavior.autonomous;
+              pickup.waitingByBehavior.random += transferredByBehavior.random;
+            }
+          }
+        }
+      }
 
-        pickup.totalBoardedCount += boardedNow;
-        pickup.boardedByBehavior.obedient += boardedBreakdown.obedient;
-        pickup.boardedByBehavior.autonomous += boardedBreakdown.autonomous;
-        pickup.boardedByBehavior.random += boardedBreakdown.random;
+      const availableQueueForVeh = Math.max(0, pickup.waitingPopulation - reservedAhead);
+
+      let boardedNow = 0;
+      if (spaceNeeded > 0 && availableQueueForVeh > 0) {
+        if (loadUnloadSecPerPerson <= 0) {
+          boardedNow = Math.min(spaceNeeded, availableQueueForVeh);
+          veh.loadingProgressRemainder = 0;
+        } else {
+          // Each individual vehicle in `veh.unitCount` boards 1 person every `loadUnloadSecPerPerson` seconds in parallel
+          const activeLoadingUnits = Math.max(
+            1,
+            Math.min(veh.unitCount, availableQueueForVeh, spaceNeeded)
+          );
+          const exactBoarded =
+            (deltaSimSeconds * activeLoadingUnits) / loadUnloadSecPerPerson +
+            (veh.loadingProgressRemainder || 0);
+          boardedNow = Math.min(
+            spaceNeeded,
+            availableQueueForVeh,
+            Math.floor(exactBoarded)
+          );
+          veh.loadingProgressRemainder = exactBoarded - boardedNow;
+          veh.loadingElapsedSeconds = (veh.loadingElapsedSeconds || 0) + deltaSimSeconds;
+        }
+
+        if (boardedNow > 0) {
+          const boardedBreakdown = allocateBoardedByBehavior(
+            pickup.waitingByBehavior,
+            boardedNow
+          );
+
+          veh.currentOccupancy += boardedNow;
+          veh.occupancyByBehavior.obedient += boardedBreakdown.obedient;
+          veh.occupancyByBehavior.autonomous += boardedBreakdown.autonomous;
+          veh.occupancyByBehavior.random += boardedBreakdown.random;
+
+          pickup.waitingPopulation -= boardedNow;
+          pickup.waitingByBehavior.obedient = Math.max(
+            0,
+            pickup.waitingByBehavior.obedient - boardedBreakdown.obedient
+          );
+          pickup.waitingByBehavior.autonomous = Math.max(
+            0,
+            pickup.waitingByBehavior.autonomous - boardedBreakdown.autonomous
+          );
+          pickup.waitingByBehavior.random = Math.max(
+            0,
+            pickup.waitingByBehavior.random - boardedBreakdown.random
+          );
+
+          pickup.totalBoardedCount += boardedNow;
+          pickup.boardedByBehavior.obedient += boardedBreakdown.obedient;
+          pickup.boardedByBehavior.autonomous += boardedBreakdown.autonomous;
+          pickup.boardedByBehavior.random += boardedBreakdown.random;
+        }
+      } else {
+        veh.loadingProgressRemainder = 0;
       }
 
       const hasAtLeastOnePassenger = veh.currentOccupancy >= 1;
       const occupancyRatio = veh.currentOccupancy / Math.max(1, veh.maxCapacity);
+      const remainingUnboardedForPickup =
+        getMovingInSource(veh.sourceId) + pickup.waitingPopulation;
       const remainingUnboardedInSource = getUnboardedInSource(veh.sourceId);
 
-      // Dual Departure Conditions:
+      // Departure Conditions:
+      const remainingQueueForVeh = Math.max(0, pickup.waitingPopulation - reservedAhead);
       const reached80Percent = occupancyRatio >= 0.80;
       const reached10Minutes = nextWaitSeconds >= 600.0; // 10 minutes = 600 simulation seconds
+      const reachedMetroCadence =
+        Boolean(veh.isMetro) &&
+        remainingQueueForVeh === 0 &&
+        nextWaitSeconds >= 25.0;
       const isLastCleanupSweep =
-        remainingUnboardedInSource === 0 && hasAtLeastOnePassenger;
+        (remainingUnboardedForPickup === 0 || remainingUnboardedInSource === 0) &&
+        hasAtLeastOnePassenger;
 
-      // Depart if (80% occupancy OR 10 min wait OR cleanup sweep) AND at least 1 passenger is onboard
-      if (hasAtLeastOnePassenger && (reached80Percent || reached10Minutes || isLastCleanupSweep)) {
+      // Depart if (80% occupancy OR metro cadence OR 10 min wait OR cleanup sweep) AND at least 1 passenger is onboard
+      if (
+        hasAtLeastOnePassenger &&
+        (reached80Percent || reachedMetroCadence || reached10Minutes || isLastCleanupSweep)
+      ) {
         const pctStr = Math.round(occupancyRatio * 100);
         const waitFormatted = formatMMSS(nextWaitSeconds);
+        const loadFormatted = formatMMSS(veh.loadingElapsedSeconds || 0);
+        const totalEvacDistMeters = Math.max(
+          0,
+          veh.evacCumulative[veh.evacCumulative.length - 1] ?? 0
+        );
+        const estTransitFormatted = formatMMSS(
+          speedMps > 0 ? totalEvacDistMeters / speedMps : 0
+        );
 
         pickup.completedDeparturesCount += 1;
         pickup.totalCompletedVehicleWaitSeconds += nextWaitSeconds;
@@ -1232,37 +1736,64 @@ export function stepSimulationState(
         pickup.totalDepartureOccupancyRatioSum += occupancyRatio;
 
         let triggerReason = '80% Occupancy Reached';
-        if (!reached80Percent && reached10Minutes) {
-          triggerReason = '10-Minute Wait Timeout Reached';
-        } else if (!reached80Percent && !reached10Minutes && isLastCleanupSweep) {
+        if (!reached80Percent && isLastCleanupSweep) {
           triggerReason = 'Final Evacuees Boarded';
+        } else if (!reached80Percent && reachedMetroCadence) {
+          triggerReason = 'Metro Platform Dispatch Cadence';
+        } else if (!reached80Percent && reached10Minutes) {
+          triggerReason = '10-Minute Wait Timeout Reached';
         }
 
+        const destDesc = veh.isMetro && veh.targetStationName
+          ? `${veh.targetStationName} (${veh.targetName})`
+          : veh.targetName;
+
         newLogs.push(
-          `${veh.fleetName} departing ${pickup.label} -> ${veh.targetName} [${triggerReason}: ${veh.currentOccupancy}/${veh.maxCapacity} passengers (${pctStr}%), Wait Time: ${waitFormatted}].`
+          `${veh.fleetName} departing ${pickup.label} -> ${destDesc} (${(totalEvacDistMeters / 1000).toFixed(2)} km @ ${transitSpeedKmh} km/h, est. transit ${estTransitFormatted}) [${triggerReason}: ${veh.currentOccupancy}/${veh.maxCapacity} passengers (${pctStr}%), Wait/Load Time: ${waitFormatted} (active loading: ${loadFormatted} @ ${loadUnloadSecPerPerson}s/pax)].`
         );
 
         return {
           ...veh,
           status: 'to_target' as const,
           waitingAtPickupSeconds: 0,
+          loadingProgressRemainder: 0,
+          loadingElapsedSeconds: 0,
           progressMeters: 0,
           currentPosition: veh.evacCoords[0] || pickup.location,
         };
       } else {
-        // Still waiting at Blue Square
+        // Reserve queue seats needed by this vehicle to reach 80% so subsequent vehicles in bay only board overflow
+        const neededFor80Pct = Math.max(
+          0,
+          Math.ceil(veh.maxCapacity * 0.80) - veh.currentOccupancy
+        );
+        const remainingQueueAfterBoard = Math.max(0, availableQueueForVeh - boardedNow);
+        reservedQueueByPickup.set(
+          pickup.id,
+          reservedAhead + Math.min(remainingQueueAfterBoard, neededFor80Pct)
+        );
+
+        // Still waiting / boarding at Pickup Location / Metro Station
         const pctStr = Math.round(occupancyRatio * 100);
         const waitFormatted = formatMMSS(nextWaitSeconds);
         pickup.maxVehicleWaitSeconds = Math.max(pickup.maxVehicleWaitSeconds, nextWaitSeconds);
 
-        if (nextWaitSeconds >= 600.0 && !hasAtLeastOnePassenger) {
-          pickup.boardingVehicleInfo = `${veh.fleetName}: 0/${veh.maxCapacity} (Wait ${waitFormatted}/10:00 — Awaiting >=1 passenger)`;
-        } else {
-          pickup.boardingVehicleInfo = `${veh.fleetName}: ${veh.currentOccupancy}/${veh.maxCapacity} (${pctStr}% | Wait ${waitFormatted}/10:00)`;
+        if (!pickup.boardingVehicleInfo || veh.currentOccupancy > 0) {
+          if (nextWaitSeconds >= 600.0 && !hasAtLeastOnePassenger) {
+            pickup.boardingVehicleInfo = `${veh.fleetName}: 0/${veh.maxCapacity} (Wait ${waitFormatted}/10:00 — Awaiting >=1 passenger)`;
+          } else if (availableQueueForVeh > 0 && spaceNeeded > 0) {
+            pickup.boardingVehicleInfo = `${veh.fleetName}: ${veh.currentOccupancy}/${veh.maxCapacity} (${pctStr}% | Loading ${loadUnloadSecPerPerson}s/pax | Wait ${waitFormatted})`;
+          } else {
+            pickup.boardingVehicleInfo = `${veh.fleetName}: ${veh.currentOccupancy}/${veh.maxCapacity} (${pctStr}% | Wait ${waitFormatted})`;
+          }
         }
 
-        // If 0 people left anywhere in source area and vehicle is empty, mark completed
-        if (remainingUnboardedInSource === 0 && veh.currentOccupancy === 0) {
+        // If 0 people left for this pickup/source area and vehicle is empty, mark completed
+        if (
+          remainingUnboardedForPickup === 0 &&
+          remainingUnboardedInSource === 0 &&
+          veh.currentOccupancy === 0
+        ) {
           return {
             ...veh,
             waitingAtPickupSeconds: nextWaitSeconds,
@@ -1278,74 +1809,57 @@ export function stepSimulationState(
       }
     }
 
-    // STATE C: Driving from Pickup Location (or mid-transit diversion) TO Target Shelter
+    // STATE C: Driving from Pickup Location (or mid-transit diversion) TO Target Shelter at configured transitSpeedKmh
     if (veh.status === 'to_target') {
-      const totalEvacDist = veh.evacCumulative[veh.evacCumulative.length - 1] || 1;
-      const nextProgress = veh.progressMeters + veh.speedMps * deltaSimSeconds;
+      const totalEvacDist = Math.max(
+        0,
+        veh.evacCumulative[veh.evacCumulative.length - 1] ?? 0
+      );
+      const nextProgress = veh.progressMeters + speedMps * deltaSimSeconds;
 
       if (nextProgress >= totalEvacDist) {
-        updatedTargetOccupancies[veh.targetId] =
-          (updatedTargetOccupancies[veh.targetId] || 0) + veh.currentOccupancy;
+        const arrivalPos =
+          veh.evacCoords[veh.evacCoords.length - 1] || veh.currentPosition;
+        const distKmStr = (totalEvacDist / 1000).toFixed(2);
 
-        // Credit evacuated counts & cumulative person-seconds by behavior
-        updatedTelemetry.totalCompletedVehicleTrips += 1;
-        (['obedient', 'autonomous', 'random'] as PopulationBehaviorType[]).forEach((beh) => {
-          const countB = veh.occupancyByBehavior[beh] || 0;
-          updatedTelemetry.evacuatedByBehavior[beh] += countB;
-          updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] += countB * elapsedSimSeconds;
-        });
+        // If load/unload time per person is 0 (instantaneous) or vehicle is empty, offload immediately
+        if (loadUnloadSecPerPerson <= 0 || veh.currentOccupancy <= 0) {
+          updatedTargetOccupancies[veh.targetId] =
+            (updatedTargetOccupancies[veh.targetId] || 0) + veh.currentOccupancy;
 
-        // Credit pickup location shelter delivery statistics
-        pickup.evacuatedCount += veh.currentOccupancy;
-        pickup.evacuatedByBehavior.obedient += veh.occupancyByBehavior.obedient;
-        pickup.evacuatedByBehavior.autonomous += veh.occupancyByBehavior.autonomous;
-        pickup.evacuatedByBehavior.random += veh.occupancyByBehavior.random;
+          (['obedient', 'autonomous', 'random'] as PopulationBehaviorType[]).forEach((beh) => {
+            const countB = veh.occupancyByBehavior[beh] || 0;
+            updatedTelemetry.evacuatedByBehavior[beh] += countB;
+            updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] +=
+              countB * elapsedSimSeconds;
+          });
 
+          pickup.evacuatedCount += veh.currentOccupancy;
+          pickup.evacuatedByBehavior.obedient += veh.occupancyByBehavior.obedient;
+          pickup.evacuatedByBehavior.autonomous += veh.occupancyByBehavior.autonomous;
+          pickup.evacuatedByBehavior.random += veh.occupancyByBehavior.random;
+
+          newLogs.push(
+            `${veh.fleetName} arrived at ${veh.targetName} (${distKmStr} km @ ${transitSpeedKmh} km/h), offloading ${veh.currentOccupancy.toLocaleString()} evacuees safely.`
+          );
+
+          return finalizeEmptyVehicleAfterUnload(veh);
+        }
+
+        // Otherwise, transition to STATE D ('unloading') at the Target Shelter
         newLogs.push(
-          `${veh.fleetName} arrived at ${veh.targetName}, offloading ${veh.currentOccupancy.toLocaleString()} evacuees safely.`
+          `${veh.fleetName} arrived at ${veh.targetName} (${distKmStr} km @ ${transitSpeedKmh} km/h) with ${veh.currentOccupancy.toLocaleString()} evacuees — unloading started (${loadUnloadSecPerPerson}s/person)...`
         );
 
-        // If this vehicle was diverted mid-simulation to the closest Target Area and has a post-offload recomputed route,
-        // transition it now to follow that existing route!
-        const nextEvacCoords = veh.postOffloadEvacCoords || veh.evacCoords;
-        const nextTargetId = veh.postOffloadTargetId || veh.targetId;
-        const nextTargetName = veh.postOffloadTargetName || veh.targetName;
-        const nextEvacDist = buildCumulativeDistances(nextEvacCoords);
-
-        // Return trip to pick up population ALWAYS follows the existing route polyline in reverse!
-        const returnCoords: [number, number][] = [...nextEvacCoords].reverse();
-        const returnDist = buildCumulativeDistances(returnCoords);
-
-        const offloadedVeh: ActiveVehicleUnit = {
+        return {
           ...veh,
-          currentOccupancy: 0,
-          occupancyByBehavior: createZeroBehaviorCounts(),
-          waitingAtPickupSeconds: 0,
-          progressMeters: 0,
-          currentPosition: returnCoords[0],
-          evacCoords: nextEvacCoords,
-          evacCumulative: nextEvacDist.cumulative,
-          targetId: nextTargetId,
-          targetName: nextTargetName,
-          postOffloadEvacCoords: undefined,
-          postOffloadTargetId: undefined,
-          postOffloadTargetName: undefined,
+          status: 'unloading' as const,
+          progressMeters: totalEvacDist,
+          currentPosition: arrivalPos,
+          unloadingInitialOccupancy: veh.currentOccupancy,
+          unloadingElapsedSeconds: 0,
+          unloadingProgressRemainder: 0,
         };
-
-        const remainingInSource = getUnboardedInSource(veh.sourceId);
-        if (remainingInSource > 0) {
-          return {
-            ...offloadedVeh,
-            status: 'to_pickup' as const,
-            approachCoords: returnCoords,
-            approachCumulative: returnDist.cumulative,
-          };
-        } else {
-          return {
-            ...offloadedVeh,
-            status: 'completed' as const,
-          };
-        }
       }
 
       const pos = interpolateAlongPolyline(
@@ -1357,6 +1871,79 @@ export function stepSimulationState(
         ...veh,
         progressMeters: nextProgress,
         currentPosition: pos,
+      };
+    }
+
+    // STATE D: Unloading passengers at Target Shelter accounting for per-person unloading time
+    if (veh.status === 'unloading') {
+      const nextUnloadElapsed = (veh.unloadingElapsedSeconds || 0) + deltaSimSeconds;
+      const initialOcc = Math.max(
+        1,
+        veh.unloadingInitialOccupancy || veh.currentOccupancy
+      );
+
+      let unloadedNow = 0;
+      if (loadUnloadSecPerPerson <= 0) {
+        unloadedNow = veh.currentOccupancy;
+        veh.unloadingProgressRemainder = 0;
+      } else {
+        // Each individual vehicle in `veh.unitCount` that carried passengers unloads 1 person every `loadUnloadSecPerPerson` seconds in parallel
+        const activeUnloadingUnits = Math.max(1, Math.min(veh.unitCount, initialOcc));
+        const exactUnloaded =
+          (deltaSimSeconds * activeUnloadingUnits) / loadUnloadSecPerPerson +
+          (veh.unloadingProgressRemainder || 0);
+        unloadedNow = Math.min(veh.currentOccupancy, Math.floor(exactUnloaded));
+        veh.unloadingProgressRemainder = exactUnloaded - unloadedNow;
+      }
+
+      if (unloadedNow > 0) {
+        const unloadedBreakdown = allocateBoardedByBehavior(
+          veh.occupancyByBehavior,
+          unloadedNow
+        );
+
+        veh.currentOccupancy -= unloadedNow;
+        veh.occupancyByBehavior.obedient = Math.max(
+          0,
+          veh.occupancyByBehavior.obedient - unloadedBreakdown.obedient
+        );
+        veh.occupancyByBehavior.autonomous = Math.max(
+          0,
+          veh.occupancyByBehavior.autonomous - unloadedBreakdown.autonomous
+        );
+        veh.occupancyByBehavior.random = Math.max(
+          0,
+          veh.occupancyByBehavior.random - unloadedBreakdown.random
+        );
+
+        updatedTargetOccupancies[veh.targetId] =
+          (updatedTargetOccupancies[veh.targetId] || 0) + unloadedNow;
+
+        // Credit evacuated counts & cumulative person-seconds by behavior as evacuees step off into shelter
+        (['obedient', 'autonomous', 'random'] as PopulationBehaviorType[]).forEach((beh) => {
+          const countB = unloadedBreakdown[beh] || 0;
+          updatedTelemetry.evacuatedByBehavior[beh] += countB;
+          updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] +=
+            countB * elapsedSimSeconds;
+        });
+
+        // Credit pickup location shelter delivery statistics
+        pickup.evacuatedCount += unloadedNow;
+        pickup.evacuatedByBehavior.obedient += unloadedBreakdown.obedient;
+        pickup.evacuatedByBehavior.autonomous += unloadedBreakdown.autonomous;
+        pickup.evacuatedByBehavior.random += unloadedBreakdown.random;
+      }
+
+      if (veh.currentOccupancy <= 0) {
+        newLogs.push(
+          `${veh.fleetName} finished unloading ${initialOcc.toLocaleString()} evacuees at ${veh.targetName} (unload time: ${formatMMSS(nextUnloadElapsed)} @ ${loadUnloadSecPerPerson}s/pax).`
+        );
+        return finalizeEmptyVehicleAfterUnload(veh);
+      }
+
+      return {
+        ...veh,
+        unloadingElapsedSeconds: nextUnloadElapsed,
       };
     }
 
@@ -1372,7 +1959,7 @@ export function stepSimulationState(
   );
 
   const totalInTransit = updatedVehicles
-    .filter((v) => v.status === 'to_target')
+    .filter((v) => v.status === 'to_target' || v.status === 'unloading')
     .reduce((acc, v) => acc + v.currentOccupancy, 0);
 
   const totalBoardingInVehicles = updatedVehicles

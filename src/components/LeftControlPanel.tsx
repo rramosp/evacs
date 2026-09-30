@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   SourceArea,
   TargetArea,
-  NoGoArea,
+  AvoidArea,
   VehicleFleet,
   PresetScenarioId,
   ActiveDrawMode,
@@ -11,6 +12,9 @@ import {
   Sentinel1LayerState,
   Sentinel2AggregationPeriod,
   GlofasForecastState,
+  BrusselsMetroMatchedStation,
+  BrusselsMetroCorridor,
+  BrusselsMetroConfig,
 } from '../types/evacuation';
 import {
   Route,
@@ -24,6 +28,7 @@ import {
   ShieldAlert,
   Building2,
   Bus,
+  TrainFront,
   Check,
   X,
   MapPin,
@@ -48,7 +53,7 @@ interface LeftControlPanelProps {
   onSelectPreset: (preset: PresetScenarioId) => void;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
-  noGoAreas: NoGoArea[];
+  avoidAreas: AvoidArea[];
   vehicleFleets: VehicleFleet[];
   remainingBySource: Record<string, number>;
   onAddSourceArea: (src: Omit<SourceArea, 'id'>) => void;
@@ -57,9 +62,10 @@ interface LeftControlPanelProps {
   onAddTargetArea: (tgt: Omit<TargetArea, 'id' | 'currentOccupancy'>) => void;
   onUpdateTargetArea: (tgt: TargetArea) => void;
   onToggleDisableTargetArea: (id: string) => void;
-  onAddNoGoArea: (nogo: Omit<NoGoArea, 'id'>) => void;
-  onUpdateNoGoArea: (nogo: NoGoArea) => void;
-  onDeleteNoGoArea: (id: string) => void;
+  onDeleteTargetArea: (id: string) => void;
+  onAddAvoidArea: (avoid: Omit<AvoidArea, 'id'>) => void;
+  onUpdateAvoidArea: (avoid: AvoidArea) => void;
+  onDeleteAvoidArea: (id: string) => void;
   onAddVehicleFleet: (fleet: Omit<VehicleFleet, 'id'>) => void;
   onUpdateVehicleFleet: (fleet: VehicleFleet) => void;
   onDeleteVehicleFleet: (id: string) => void;
@@ -71,10 +77,11 @@ interface LeftControlPanelProps {
   onResetSimulation: () => void;
   onOpenSimulationReport: () => void;
   isSimulating: boolean;
+  isSimulationInProgress?: boolean;
   simSpeed: number;
   onChangeSimSpeed: (speed: number) => void;
   activeDrawMode: ActiveDrawMode;
-  onStartDrawing: (type: 'source' | 'target' | 'nogo' | 'vehicle') => void;
+  onStartDrawing: (type: 'source' | 'target' | 'avoid' | 'vehicle') => void;
   pendingDrawnPolygon: [number, number][] | null;
   pendingPlacedPoint: [number, number] | null;
   onClearPendingGeometry: () => void;
@@ -97,6 +104,15 @@ interface LeftControlPanelProps {
   onFetchGlofasForecast: () => void;
   onToggleGlofasOverlayVisibility: (band: number) => void;
   onChangeGlofasOverlayOpacity: (band: number, opacity: number) => void;
+  hasBrusselsAreas: boolean;
+  brusselsMetroConfig: BrusselsMetroConfig;
+  sourceMetroStations: BrusselsMetroMatchedStation[];
+  targetMetroStations: BrusselsMetroMatchedStation[];
+  metroCorridors: BrusselsMetroCorridor[];
+  onToggleBrusselsMetroNetworkOverlay: () => void;
+  onToggleUseBrusselsMetroForEvacuation: (checked: boolean) => void;
+  onChangeBrusselsMetroTrainCount: (count: number) => void;
+  onChangeBrusselsMetroTrainCapacity: (capacity: number) => void;
 }
 
 export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
@@ -106,7 +122,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onSelectPreset,
   sourceAreas,
   targetAreas,
-  noGoAreas,
+  avoidAreas,
   vehicleFleets,
   remainingBySource,
   onAddSourceArea,
@@ -115,9 +131,10 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onAddTargetArea,
   onUpdateTargetArea,
   onToggleDisableTargetArea,
-  onAddNoGoArea,
-  onUpdateNoGoArea,
-  onDeleteNoGoArea,
+  onDeleteTargetArea,
+  onAddAvoidArea,
+  onUpdateAvoidArea,
+  onDeleteAvoidArea,
   onAddVehicleFleet,
   onUpdateVehicleFleet,
   onDeleteVehicleFleet,
@@ -129,6 +146,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onResetSimulation,
   onOpenSimulationReport,
   isSimulating,
+  isSimulationInProgress = false,
   simSpeed,
   onChangeSimSpeed,
   activeDrawMode,
@@ -155,17 +173,32 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onFetchGlofasForecast,
   onToggleGlofasOverlayVisibility,
   onChangeGlofasOverlayOpacity,
+  hasBrusselsAreas,
+  brusselsMetroConfig,
+  sourceMetroStations,
+  targetMetroStations,
+  metroCorridors,
+  onToggleBrusselsMetroNetworkOverlay,
+  onToggleUseBrusselsMetroForEvacuation,
+  onChangeBrusselsMetroTrainCount,
+  onChangeBrusselsMetroTrainCapacity,
 }) => {
-  const [activeTab, setActiveTab] = useState<'sources' | 'targets' | 'nogos' | 'vehicles'>('sources');
+  const [activeTab, setActiveTab] = useState<'sources' | 'targets' | 'avoids' | 'vehicles'>('sources');
   const [isParametersCollapsed, setIsParametersCollapsed] = useState<boolean>(true);
   const [isExecutionCollapsed, setIsExecutionCollapsed] = useState<boolean>(true);
   const [isSpaceDataCollapsed, setIsSpaceDataCollapsed] = useState<boolean>(true);
+  const [isBrusselsMetroCollapsed, setIsBrusselsMetroCollapsed] = useState<boolean>(false);
   const [isPlanetScopeModalOpen, setIsPlanetScopeModalOpen] = useState<boolean>(false);
+  const [pendingRemovalArea, setPendingRemovalArea] = useState<{
+    type: 'source' | 'target' | 'avoid';
+    id: string;
+    name: string;
+  } | null>(null);
 
   // Editing state for inline modal/form
   const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
   const [editingTargetId, setEditingTargetId] = useState<string | null>(null);
-  const [editingNoGoId, setEditingNoGoId] = useState<string | null>(null);
+  const [editingAvoidId, setEditingAvoidId] = useState<string | null>(null);
   const [editingVehicleId, setEditingVehicleId] = useState<string | null>(null);
 
   // Form states for creating or editing entities
@@ -182,7 +215,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     capacity: 25000,
   });
 
-  const [nogoForm, setNogoForm] = useState({
+  const [avoidForm, setAvoidForm] = useState({
     name: '',
   });
 
@@ -191,6 +224,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     type: 'Bus' as VehicleType,
     count: 25,
     capacityPerUnit: 50,
+    loadUnloadTimePerPersonSeconds: 2,
+    transitSpeedKmh: 25,
   });
 
   // Trigger creation modal when polygon drawing or point placement finishes
@@ -217,9 +252,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         polygon: pendingDrawnPolygon,
         disabled: false,
       });
-    } else if (pendingDrawnPolygon && activeDrawMode?.type === 'nogo') {
-      onAddNoGoArea({
-        name: nogoForm.name || `Hazard Area #${noGoAreas.length + 1}`,
+    } else if (pendingDrawnPolygon && activeDrawMode?.type === 'avoid') {
+      onAddAvoidArea({
+        name: avoidForm.name || `Avoid Area #${avoidAreas.length + 1}`,
         polygon: pendingDrawnPolygon,
       });
     } else if (pendingPlacedPoint && activeDrawMode?.type === 'vehicle') {
@@ -228,6 +263,18 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         type: vehForm.type,
         count: Number(vehForm.count) || 10,
         capacityPerUnit: Number(vehForm.capacityPerUnit) || 50,
+        loadUnloadTimePerPersonSeconds: Math.max(
+          0,
+          Number.isFinite(Number(vehForm.loadUnloadTimePerPersonSeconds))
+            ? Number(vehForm.loadUnloadTimePerPersonSeconds)
+            : 2
+        ),
+        transitSpeedKmh: Math.max(
+          0.5,
+          Number.isFinite(Number(vehForm.transitSpeedKmh)) && Number(vehForm.transitSpeedKmh) > 0
+            ? Number(vehForm.transitSpeedKmh)
+            : 25
+        ),
         location: pendingPlacedPoint,
       });
     }
@@ -282,20 +329,20 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     setEditingTargetId(null);
   };
 
-  // Start editing an existing No-Go Area (only when paused)
-  const startEditNoGo = (nogo: NoGoArea) => {
+  // Start editing an existing Avoid Area (only when paused)
+  const startEditAvoid = (avoid: AvoidArea) => {
     if (isSimulating) return;
-    setEditingNoGoId(nogo.id);
-    setNogoForm({ name: nogo.name });
+    setEditingAvoidId(avoid.id);
+    setAvoidForm({ name: avoid.name });
   };
 
-  const saveEditNoGo = (nogo: NoGoArea) => {
+  const saveEditAvoid = (avoid: AvoidArea) => {
     if (isSimulating) return;
-    onUpdateNoGoArea({
-      ...nogo,
-      name: nogoForm.name,
+    onUpdateAvoidArea({
+      ...avoid,
+      name: avoidForm.name,
     });
-    setEditingNoGoId(null);
+    setEditingAvoidId(null);
   };
 
   // Start editing an existing Vehicle Fleet (only when paused)
@@ -307,6 +354,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
       type: veh.type,
       count: veh.count,
       capacityPerUnit: veh.capacityPerUnit,
+      loadUnloadTimePerPersonSeconds: veh.loadUnloadTimePerPersonSeconds ?? 2,
+      transitSpeedKmh: veh.transitSpeedKmh ?? 25,
     });
   };
 
@@ -318,6 +367,18 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
       type: vehForm.type,
       count: Number(vehForm.count),
       capacityPerUnit: Number(vehForm.capacityPerUnit),
+      loadUnloadTimePerPersonSeconds: Math.max(
+        0,
+        Number.isFinite(Number(vehForm.loadUnloadTimePerPersonSeconds))
+          ? Number(vehForm.loadUnloadTimePerPersonSeconds)
+          : 2
+      ),
+      transitSpeedKmh: Math.max(
+        0.5,
+        Number.isFinite(Number(vehForm.transitSpeedKmh)) && Number(vehForm.transitSpeedKmh) > 0
+          ? Number(vehForm.transitSpeedKmh)
+          : 25
+      ),
     });
     setEditingVehicleId(null);
   };
@@ -409,7 +470,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
       {/* Top-Justified Stack of 3 Collapsible Sections: 1. Parameters, 2. Execution & Simulation, 3. Space Data */}
       <div className="left-panel-sections-stack">
-      {/* 1. Parameters Section (Sources, Targets, No-Go, Vehicles — Collapsible) */}
+      {/* 1. Parameters Section (Sources, Targets, Avoid Areas, Vehicles — Collapsible) */}
       <section
         className="panel-section parameters-controls-section"
         style={{ padding: isParametersCollapsed ? '12px 16px' : '12px 0 0 0' }}
@@ -480,8 +541,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                 ? 'Source Evacuation Area'
                 : activeDrawMode?.type === 'target'
                 ? 'Target Shelter Area'
-                : activeDrawMode?.type === 'nogo'
-                ? 'No-Go Hazard Area'
+                : activeDrawMode?.type === 'avoid'
+                ? 'Avoid Area'
                 : 'Vehicle Fleet Depot'}
             </span>
             <button type="button" onClick={onClearPendingGeometry} className="btn-icon-only">
@@ -583,15 +644,15 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               </>
             )}
 
-            {activeDrawMode?.type === 'nogo' && (
+            {activeDrawMode?.type === 'avoid' && (
               <div className="form-group">
-                <label>No-Go Hazard Zone Name</label>
+                <label>Avoid Area Name</label>
                 <input
                   type="text"
                   required
                   placeholder="e.g., Collapsed Bridge Sector"
-                  value={nogoForm.name}
-                  onChange={(e) => setNogoForm({ ...nogoForm, name: e.target.value })}
+                  value={avoidForm.name}
+                  onChange={(e) => setAvoidForm({ ...avoidForm, name: e.target.value })}
                 />
               </div>
             )}
@@ -613,13 +674,15 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     <label>Vehicle Type</label>
                     <select
                       value={vehForm.type}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const nextType = e.target.value as VehicleType;
                         setVehForm({
                           ...vehForm,
-                          type: e.target.value as VehicleType,
-                          capacityPerUnit: e.target.value === 'Bus' ? 50 : 4,
-                        })
-                      }
+                          type: nextType,
+                          capacityPerUnit:
+                            nextType === 'Bus' ? 50 : nextType === 'Shuttle' ? 15 : 4,
+                        });
+                      }}
                     >
                       <option value="Bus">Bus (50 cap)</option>
                       <option value="Private Car">Private Car (4 cap)</option>
@@ -637,15 +700,53 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     />
                   </div>
                 </div>
+                <div className="form-row-2">
+                  <div className="form-group">
+                    <label>Capacity per Vehicle</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={vehForm.capacityPerUnit}
+                      onChange={(e) =>
+                        setVehForm({ ...vehForm, capacityPerUnit: Number(e.target.value) })
+                      }
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label title="Vehicle transit speed in km/h (default 25 km/h)">
+                      Transit Speed (km/h)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      step="0.5"
+                      value={vehForm.transitSpeedKmh}
+                      onChange={(e) =>
+                        setVehForm({
+                          ...vehForm,
+                          transitSpeedKmh: Math.max(0.5, Number(e.target.value)),
+                        })
+                      }
+                    />
+                  </div>
+                </div>
                 <div className="form-group">
-                  <label>Capacity per Vehicle</label>
+                  <label title="Average time in seconds to load or unload 1 person">
+                    Load/Unload (s/person)
+                  </label>
                   <input
                     type="number"
-                    min={1}
-                    max={200}
-                    value={vehForm.capacityPerUnit}
+                    min={0}
+                    max={600}
+                    step="0.1"
+                    value={vehForm.loadUnloadTimePerPersonSeconds}
                     onChange={(e) =>
-                      setVehForm({ ...vehForm, capacityPerUnit: Number(e.target.value) })
+                      setVehForm({
+                        ...vehForm,
+                        loadUnloadTimePerPersonSeconds: Math.max(0, Number(e.target.value)),
+                      })
                     }
                   />
                 </div>
@@ -689,11 +790,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         </button>
         <button
           type="button"
-          className={`entity-tab-btn ${activeTab === 'nogos' ? 'active' : ''}`}
-          onClick={() => setActiveTab('nogos')}
+          className={`entity-tab-btn ${activeTab === 'avoids' ? 'active' : ''}`}
+          onClick={() => setActiveTab('avoids')}
         >
           <ShieldAlert size={14} />
-          <span>No-Go ({noGoAreas.length})</span>
+          <span>Avoid Areas ({avoidAreas.length})</span>
         </button>
         <button
           type="button"
@@ -737,7 +838,6 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               const isEditing = editingSourceId === src.id;
               const isSelected = selectedEntityId === src.id;
               const remainingPeople = remainingBySource[src.id] ?? src.population;
-              const canDeleteSource = !isSimulating && remainingPeople === 0;
 
               return (
                 <div
@@ -832,28 +932,41 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             <Pencil size={13} />
                           </button>
                           <button
+                            id={`btn-remove-source-${src.id}`}
                             type="button"
                             className="btn-entity-icon delete"
-                            disabled={!canDeleteSource}
+                            disabled={isSimulating}
                             style={{
-                              opacity: canDeleteSource ? 1 : 0.35,
-                              cursor: canDeleteSource ? 'pointer' : 'not-allowed',
+                              padding: '3px 7px',
+                              borderRadius: '4px',
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              background: 'rgba(239, 68, 68, 0.16)',
+                              color: '#f87171',
+                              border: '1px solid rgba(239, 68, 68, 0.4)',
+                              opacity: isSimulating ? 0.4 : 1,
+                              cursor: isSimulating ? 'not-allowed' : 'pointer',
                             }}
                             title={
                               isSimulating
-                                ? 'Pause simulation to modify or delete areas'
-                                : remainingPeople > 0
-                                ? `Cannot remove Source Area while ${remainingPeople.toLocaleString()} people remain inside`
-                                : 'Delete Source Area (0 people remaining)'
+                                ? 'Pause simulation to remove Source Area'
+                                : `Remove Source Area "${src.name}"`
                             }
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (canDeleteSource) {
-                                onDeleteSourceArea(src.id);
+                              if (!isSimulating) {
+                                setPendingRemovalArea({
+                                  type: 'source',
+                                  id: src.id,
+                                  name: src.name,
+                                });
                               }
                             }}
                           >
-                            <Trash2 size={13} />
+                            <Trash2 size={12} /> Remove
                           </button>
                         </div>
                       </div>
@@ -866,17 +979,6 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           {src.behavior.random}%
                         </span>
                       </div>
-                      {remainingPeople > 0 && !isSimulating && (
-                        <div
-                          style={{
-                            marginTop: '4px',
-                            fontSize: '0.68rem',
-                            color: '#94a3b8',
-                          }}
-                        >
-                          🔒 Deletion disabled while people remain inside (click ✏️ to edit count)
-                        </div>
-                      )}
                     </>
                   )}
                 </div>
@@ -889,7 +991,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         {activeTab === 'targets' && (
           <div className="entity-tab-content">
             <div className="tab-header-action">
-              <span className="tab-desc">Safe Shelters (Cannot be removed; can be disabled)</span>
+              <span className="tab-desc">Safe Shelters (Can be disabled or removed)</span>
               <button
                 type="button"
                 className="btn-add-entity target-add"
@@ -1016,11 +1118,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                               gap: '4px',
                               background: isDisabled
                                 ? 'rgba(16, 185, 129, 0.18)'
-                                : 'rgba(239, 68, 68, 0.16)',
-                              color: isDisabled ? '#34d399' : '#f87171',
+                                : 'rgba(245, 158, 11, 0.16)',
+                              color: isDisabled ? '#34d399' : '#fbbf24',
                               border: isDisabled
                                 ? '1px solid rgba(16, 185, 129, 0.4)'
-                                : '1px solid rgba(239, 68, 68, 0.4)',
+                                : '1px solid rgba(245, 158, 11, 0.4)',
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
@@ -1036,6 +1138,43 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                                 <Ban size={12} /> Disable
                               </>
                             )}
+                          </button>
+                          <button
+                            id={`btn-remove-target-${tgt.id}`}
+                            type="button"
+                            className="btn-entity-icon delete"
+                            disabled={isSimulating}
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: '4px',
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              background: 'rgba(239, 68, 68, 0.16)',
+                              color: '#f87171',
+                              border: '1px solid rgba(239, 68, 68, 0.4)',
+                              opacity: isSimulating ? 0.4 : 1,
+                              cursor: isSimulating ? 'not-allowed' : 'pointer',
+                            }}
+                            title={
+                              isSimulating
+                                ? 'Pause simulation to remove Target Area'
+                                : `Remove Target Area "${tgt.name}"`
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!isSimulating) {
+                                setPendingRemovalArea({
+                                  type: 'target',
+                                  id: tgt.id,
+                                  name: tgt.name,
+                                });
+                              }
+                            }}
+                          >
+                            <Trash2 size={12} /> Remove
                           </button>
                         </div>
                       </div>
@@ -1060,57 +1199,57 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           </div>
         )}
 
-        {/* TAB 3: NO-GO AREAS */}
-        {activeTab === 'nogos' && (
+        {/* TAB 3: AVOID AREAS */}
+        {activeTab === 'avoids' && (
           <div className="entity-tab-content">
             <div className="tab-header-action">
               <span className="tab-desc">Blocked / Hazard Zones</span>
               <button
                 type="button"
-                className="btn-add-entity nogo-add"
+                className="btn-add-entity avoid-add"
                 disabled={isSimulating}
-                title={isSimulating ? 'Pause simulation to add a No-Go Area' : 'Draw new No-Go Area on map'}
+                title={isSimulating ? 'Pause simulation to add an Avoid Area' : 'Draw new Avoid Area on map'}
                 onClick={() => {
-                  setNogoForm({
-                    name: `Hazard Sector #${noGoAreas.length + 1}`,
+                  setAvoidForm({
+                    name: `Avoid Area #${avoidAreas.length + 1}`,
                   });
-                  onStartDrawing('nogo');
+                  onStartDrawing('avoid');
                 }}
               >
                 <Plus size={14} />
-                <span>Add No-Go Area</span>
+                <span>Add Avoid Area</span>
               </button>
             </div>
 
-            {noGoAreas.map((nogo) => {
-              const isEditing = editingNoGoId === nogo.id;
-              const isSelected = selectedEntityId === nogo.id;
+            {avoidAreas.map((avoid) => {
+              const isEditing = editingAvoidId === avoid.id;
+              const isSelected = selectedEntityId === avoid.id;
 
               return (
                 <div
-                  key={nogo.id}
-                  className={`entity-item-card nogo-card ${isSelected ? 'selected' : ''}`}
-                  onClick={() => onSelectEntity(nogo.id)}
+                  key={avoid.id}
+                  className={`entity-item-card avoid-card ${isSelected ? 'selected' : ''}`}
+                  onClick={() => onSelectEntity(avoid.id)}
                 >
                   {isEditing ? (
                     <div className="inline-edit-form" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="text"
-                        value={nogoForm.name}
-                        onChange={(e) => setNogoForm({ name: e.target.value })}
+                        value={avoidForm.name}
+                        onChange={(e) => setAvoidForm({ name: e.target.value })}
                       />
                       <div className="inline-edit-actions">
                         <button
                           type="button"
                           className="btn-inline-save"
-                          onClick={() => saveEditNoGo(nogo)}
+                          onClick={() => saveEditAvoid(avoid)}
                         >
                           <Check size={13} /> Save
                         </button>
                         <button
                           type="button"
                           className="btn-inline-cancel"
-                          onClick={() => setEditingNoGoId(null)}
+                          onClick={() => setEditingAvoidId(null)}
                         >
                           Cancel
                         </button>
@@ -1120,33 +1259,58 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     <>
                       <div className="entity-card-top">
                         <div className="entity-title-group">
-                          <span className="entity-dot nogo-dot" />
-                          <span className="entity-name">{nogo.name}</span>
+                          <span className="entity-dot avoid-dot" />
+                          <span className="entity-name">{avoid.name}</span>
                         </div>
                         <div className="entity-actions">
                           <button
                             type="button"
                             className="btn-entity-icon"
                             disabled={isSimulating}
-                            title={isSimulating ? 'Pause simulation to modify No-Go Area' : 'Modify No-Go Area'}
+                            title={isSimulating ? 'Pause simulation to modify Avoid Area' : 'Modify Avoid Area'}
                             onClick={(e) => {
                               e.stopPropagation();
-                              startEditNoGo(nogo);
+                              startEditAvoid(avoid);
                             }}
                           >
                             <Pencil size={13} />
                           </button>
                           <button
+                            id={`btn-remove-avoid-${avoid.id}`}
                             type="button"
                             className="btn-entity-icon delete"
                             disabled={isSimulating}
-                            title={isSimulating ? 'Pause simulation to delete No-Go Area' : 'Delete No-Go Area'}
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: '4px',
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              background: 'rgba(239, 68, 68, 0.16)',
+                              color: '#f87171',
+                              border: '1px solid rgba(239, 68, 68, 0.4)',
+                              opacity: isSimulating ? 0.4 : 1,
+                              cursor: isSimulating ? 'not-allowed' : 'pointer',
+                            }}
+                            title={
+                              isSimulating
+                                ? 'Pause simulation to remove Avoid Area'
+                                : `Remove Avoid Area "${avoid.name}"`
+                            }
                             onClick={(e) => {
                               e.stopPropagation();
-                              onDeleteNoGoArea(nogo.id);
+                              if (!isSimulating) {
+                                setPendingRemovalArea({
+                                  type: 'avoid',
+                                  id: avoid.id,
+                                  name: avoid.name,
+                                });
+                              }
                             }}
                           >
-                            <Trash2 size={13} />
+                            <Trash2 size={12} /> Remove
                           </button>
                         </div>
                       </div>
@@ -1179,6 +1343,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     type: 'Bus',
                     count: 50,
                     capacityPerUnit: 50,
+                    loadUnloadTimePerPersonSeconds: 2,
+                    transitSpeedKmh: 25,
                   });
                   onStartDrawing('vehicle');
                 }}
@@ -1210,6 +1376,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         <label>Count:</label>
                         <input
                           type="number"
+                          min={1}
                           value={vehForm.count}
                           onChange={(e) =>
                             setVehForm({ ...vehForm, count: Number(e.target.value) })
@@ -1218,9 +1385,46 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         <label>Cap/Unit:</label>
                         <input
                           type="number"
+                          min={1}
                           value={vehForm.capacityPerUnit}
                           onChange={(e) =>
                             setVehForm({ ...vehForm, capacityPerUnit: Number(e.target.value) })
+                          }
+                        />
+                      </div>
+                      <div className="edit-row">
+                        <label title="Vehicle transit speed in km/h (default 25 km/h)">
+                          Transit speed (km/h):
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={200}
+                          step="0.5"
+                          value={vehForm.transitSpeedKmh}
+                          onChange={(e) =>
+                            setVehForm({
+                              ...vehForm,
+                              transitSpeedKmh: Math.max(0.5, Number(e.target.value)),
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="edit-row">
+                        <label title="Average time in seconds to load or unload 1 person">
+                          Load/Unload (s/person):
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={600}
+                          step="0.1"
+                          value={vehForm.loadUnloadTimePerPersonSeconds}
+                          onChange={(e) =>
+                            setVehForm({
+                              ...vehForm,
+                              loadUnloadTimePerPersonSeconds: Math.max(0, Number(e.target.value)),
+                            })
                           }
                         />
                       </div>
@@ -1282,6 +1486,18 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         <span className="metric-pill">
                           Total Cap: <strong>{totalCap.toLocaleString()}</strong>
                         </span>
+                        <span
+                          className="metric-pill"
+                          title="Configured vehicle transit speed in km/h"
+                        >
+                          Transit Speed: <strong>{veh.transitSpeedKmh ?? 25} km/h</strong>
+                        </span>
+                        <span
+                          className="metric-pill"
+                          title="Average time in seconds to load or unload 1 person"
+                        >
+                          Load/Unload: <strong>{veh.loadUnloadTimePerPersonSeconds ?? 2}s</strong>/pax
+                        </span>
                       </div>
                     </>
                   )}
@@ -1332,7 +1548,18 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               type="button"
               className="btn-primary-action compute-btn"
               onClick={onComputeRoutes}
-              disabled={isComputingRoutes || isSimulating || sourceAreas.length === 0 || targetAreas.length === 0}
+              disabled={
+                isComputingRoutes ||
+                isSimulating ||
+                isSimulationInProgress ||
+                sourceAreas.length === 0 ||
+                targetAreas.filter((t) => !t.disabled).length === 0
+              }
+              title={
+                isSimulating || isSimulationInProgress
+                  ? 'Disabled while simulation is running — wait until simulation finishes or click Reset simulation'
+                  : 'Compute obstacle-avoiding evacuation routes'
+              }
             >
               <Route size={16} />
               <span>
@@ -1417,7 +1644,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             <div className="sim-speed-bar">
               <span className="speed-label">Playback Speed:</span>
               <div className="speed-pills">
-                {[1, 2, 5, 10].map((spd) => (
+                {[1, 2, 5, 10, 25, 50, 100].map((spd) => (
                   <button
                     key={spd}
                     type="button"
@@ -2063,7 +2290,680 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           </>
         )}
       </section>
+
+      {/* 4. Conditional Brussels Metro Section (Appears ONLY when any Source or Target Area is within Brussels) */}
+      {hasBrusselsAreas && (
+        <section
+          id="brussels-metro-section"
+          className="panel-section brussels-metro-section"
+        >
+          <button
+            id="toggle-brussels-metro-section"
+            type="button"
+            aria-expanded={!isBrusselsMetroCollapsed}
+            onClick={() => setIsBrusselsMetroCollapsed((prev) => !prev)}
+            style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              background: 'transparent',
+              border: 'none',
+              padding: 0,
+              marginBottom: isBrusselsMetroCollapsed ? 0 : '8px',
+              cursor: 'pointer',
+              textAlign: 'left',
+            }}
+          >
+            <span
+              className="section-label"
+              style={{
+                marginBottom: 0,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+              }}
+            >
+              <TrainFront size={13} style={{ color: '#38bdf8' }} />
+              <span>Brussels Metro</span>
+            </span>
+            {isBrusselsMetroCollapsed ? (
+              <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+            ) : (
+              <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+            )}
+          </button>
+
+          {!isBrusselsMetroCollapsed && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {/* Show Brussels Metro Network button */}
+              <button
+                id="btn-show-brussels-metro-network"
+                type="button"
+                className="btn-primary-action"
+                onClick={onToggleBrusselsMetroNetworkOverlay}
+                style={{
+                  padding: '7px 10px',
+                  fontSize: '0.76rem',
+                  minHeight: '32px',
+                  background: brusselsMetroConfig.showNetworkOverlay
+                    ? 'linear-gradient(135deg, #0284c7 0%, #1d4ed8 100%)'
+                    : 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+                  border: brusselsMetroConfig.showNetworkOverlay
+                    ? '1px solid #38bdf8'
+                    : '1px solid rgba(56, 189, 248, 0.4)',
+                  color: '#f8fafc',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '7px',
+                }}
+              >
+                <TrainFront size={14} style={{ color: '#38bdf8' }} />
+                <span>Show Brussels Metro Network</span>
+                {brusselsMetroConfig.showNetworkOverlay ? (
+                  <Eye size={13} style={{ color: '#bae6fd', marginLeft: 'auto' }} />
+                ) : (
+                  <EyeOff size={13} style={{ color: '#64748b', marginLeft: 'auto' }} />
+                )}
+              </button>
+
+              {/* Metro Line Color Legend when overlay is active */}
+              {brusselsMetroConfig.showNetworkOverlay && (
+                <div
+                  id="brussels-metro-legend"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '6px',
+                    padding: '5px 8px',
+                    borderRadius: '5px',
+                    background: 'rgba(15, 23, 42, 0.78)',
+                    border: '1px solid rgba(56, 189, 248, 0.25)',
+                    fontSize: '0.68rem',
+                    color: '#cbd5e1',
+                  }}
+                >
+                  <span style={{ fontWeight: 600, color: '#94a3b8' }}>Lines:</span>
+                  {[
+                    { line: '1', color: '#B5378C' },
+                    { line: '2', color: '#ED6C23' },
+                    { line: '5', color: '#F6A90B' },
+                    { line: '6', color: '#0066A3' },
+                  ].map((item) => (
+                    <span
+                      key={item.line}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        fontWeight: 700,
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: '10px',
+                          height: '10px',
+                          borderRadius: '2px',
+                          backgroundColor: item.color,
+                          display: 'inline-block',
+                          border: '1px solid rgba(255,255,255,0.45)',
+                        }}
+                      />
+                      <span>M{item.line}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Information panel showing (1) stations in Source Areas and (2) stations in Target Areas */}
+              <div
+                id="brussels-metro-info-panel"
+                style={{
+                  padding: '8px 10px',
+                  borderRadius: '6px',
+                  background: 'rgba(15, 23, 42, 0.78)',
+                  border: '1px solid rgba(148, 163, 184, 0.24)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                  fontSize: '0.72rem',
+                  color: '#e2e8f0',
+                }}
+              >
+                {/* (1) Metro stations falling within Source Areas */}
+                <div id="brussels-metro-source-stations">
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      fontSize: '0.69rem',
+                      color: '#fca5a5',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.03em',
+                      marginBottom: '4px',
+                    }}
+                  >
+                    Stations in Source Areas — Pickup Points ({sourceMetroStations.length})
+                  </div>
+                  {sourceMetroStations.length === 0 ? (
+                    <div style={{ color: '#64748b', fontSize: '0.68rem', fontStyle: 'italic' }}>
+                      No metro stations inside current source areas
+                    </div>
+                  ) : (
+                    <ul
+                      style={{
+                        listStyle: 'none',
+                        padding: 0,
+                        margin: 0,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '4px',
+                      }}
+                    >
+                      {sourceMetroStations.map((st) => (
+                        <li
+                          key={`${st.station.id}-${st.areaId}`}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '6px',
+                            padding: '4px 6px',
+                            borderRadius: '4px',
+                            background: 'rgba(30, 41, 59, 0.65)',
+                            border: '1px solid rgba(248, 113, 113, 0.25)',
+                          }}
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: '0.72rem' }}>
+                              🚇 {st.station.name_fr}
+                              {brusselsMetroConfig.useForEvacuation && (
+                                <span
+                                  style={{
+                                    marginLeft: '5px',
+                                    padding: '1px 4px',
+                                    borderRadius: '3px',
+                                    fontSize: '0.58rem',
+                                    backgroundColor: 'rgba(14, 165, 233, 0.25)',
+                                    color: '#38bdf8',
+                                    border: '1px solid rgba(56, 189, 248, 0.45)',
+                                  }}
+                                >
+                                  PICKUP
+                                </span>
+                              )}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: '0.64rem',
+                                color: '#94a3b8',
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                              }}
+                            >
+                              {st.areaName}
+                            </div>
+                          </div>
+                          <div style={{ display: 'inline-flex', gap: '3px', flexShrink: 0 }}>
+                            {st.station.lines.map((ln) => {
+                              const bg =
+                                ln === '1'
+                                  ? '#B5378C'
+                                  : ln === '2'
+                                  ? '#ED6C23'
+                                  : ln === '5'
+                                  ? '#F6A90B'
+                                  : '#0066A3';
+                              return (
+                                <span
+                                  key={ln}
+                                  style={{
+                                    padding: '1px 5px',
+                                    borderRadius: '3px',
+                                    backgroundColor: bg,
+                                    color: ln === '5' ? '#0f172a' : '#ffffff',
+                                    fontWeight: 800,
+                                    fontSize: '0.62rem',
+                                  }}
+                                >
+                                  M{ln}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                {/* (2) Metro stations falling within Target Areas */}
+                <div
+                  id="brussels-metro-target-stations"
+                  style={{
+                    paddingTop: '6px',
+                    borderTop: '1px solid rgba(148, 163, 184, 0.18)',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      fontSize: '0.69rem',
+                      color: '#6ee7b7',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.03em',
+                      marginBottom: '4px',
+                    }}
+                  >
+                    Stations in Target Areas — Drop-Off Points ({targetMetroStations.length})
+                  </div>
+                  {targetMetroStations.length === 0 ? (
+                    <div style={{ color: '#64748b', fontSize: '0.68rem', fontStyle: 'italic' }}>
+                      No metro stations inside current target areas
+                    </div>
+                  ) : (
+                    <ul
+                      style={{
+                        listStyle: 'none',
+                        padding: 0,
+                        margin: 0,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '4px',
+                      }}
+                    >
+                      {targetMetroStations.map((st) => (
+                        <li
+                          key={`${st.station.id}-${st.areaId}`}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '6px',
+                            padding: '4px 6px',
+                            borderRadius: '4px',
+                            background: 'rgba(30, 41, 59, 0.65)',
+                            border: '1px solid rgba(52, 211, 153, 0.25)',
+                          }}
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: '0.72rem' }}>
+                              🚇 {st.station.name_fr}
+                              {brusselsMetroConfig.useForEvacuation && !st.disabled && (
+                                <span
+                                  style={{
+                                    marginLeft: '5px',
+                                    padding: '1px 4px',
+                                    borderRadius: '3px',
+                                    fontSize: '0.58rem',
+                                    backgroundColor: 'rgba(16, 185, 129, 0.25)',
+                                    color: '#34d399',
+                                    border: '1px solid rgba(52, 211, 153, 0.45)',
+                                  }}
+                                >
+                                  DROP-OFF
+                                </span>
+                              )}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: '0.64rem',
+                                color: '#94a3b8',
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                              }}
+                            >
+                              {st.areaName}
+                            </div>
+                          </div>
+                          <div style={{ display: 'inline-flex', gap: '3px', flexShrink: 0 }}>
+                            {st.station.lines.map((ln) => {
+                              const bg =
+                                ln === '1'
+                                  ? '#B5378C'
+                                  : ln === '2'
+                                  ? '#ED6C23'
+                                  : ln === '5'
+                                  ? '#F6A90B'
+                                  : '#0066A3';
+                              return (
+                                <span
+                                  key={ln}
+                                  style={{
+                                    padding: '1px 5px',
+                                    borderRadius: '3px',
+                                    backgroundColor: bg,
+                                    color: ln === '5' ? '#0f172a' : '#ffffff',
+                                    fontWeight: 800,
+                                    fontSize: '0.62rem',
+                                  }}
+                                >
+                                  M{ln}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              {/* Conditional Evacuation Controls: Appear when there are stations BOTH within source and target areas */}
+              {sourceMetroStations.length > 0 && targetMetroStations.length > 0 && (
+                <div
+                  id="brussels-metro-evacuation-controls"
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    background: brusselsMetroConfig.useForEvacuation
+                      ? 'rgba(14, 165, 233, 0.14)'
+                      : 'rgba(15, 23, 42, 0.78)',
+                    border: brusselsMetroConfig.useForEvacuation
+                      ? '1px solid rgba(56, 189, 248, 0.5)'
+                      : '1px solid rgba(148, 163, 184, 0.28)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                  }}
+                >
+                  {/* (1) Checkbox named 'Use these stations for evacuation' */}
+                  <label
+                    htmlFor="chk-use-metro-for-evacuation"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      cursor: isSimulating ? 'not-allowed' : 'pointer',
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                      color: brusselsMetroConfig.useForEvacuation ? '#38bdf8' : '#f8fafc',
+                    }}
+                  >
+                    <input
+                      id="chk-use-metro-for-evacuation"
+                      type="checkbox"
+                      checked={brusselsMetroConfig.useForEvacuation}
+                      disabled={isSimulating}
+                      onChange={(e) => onToggleUseBrusselsMetroForEvacuation(e.target.checked)}
+                      style={{
+                        width: '15px',
+                        height: '15px',
+                        accentColor: '#0ea5e9',
+                        cursor: isSimulating ? 'not-allowed' : 'pointer',
+                      }}
+                    />
+                    <span>Use these stations for evacuation</span>
+                  </label>
+
+                  {/* (2) Small form for 'number of trains available' and 'capacity of each train' */}
+                  <div
+                    id="brussels-metro-train-form"
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '6px',
+                      paddingTop: '4px',
+                      borderTop: '1px solid rgba(148, 163, 184, 0.18)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '8px',
+                        fontSize: '0.71rem',
+                        color: '#cbd5e1',
+                      }}
+                    >
+                      <label htmlFor="input-metro-trains-available" style={{ fontWeight: 500 }}>
+                        Number of trains available:
+                      </label>
+                      <input
+                        id="input-metro-trains-available"
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={brusselsMetroConfig.trainCount}
+                        disabled={isSimulating}
+                        onChange={(e) =>
+                          onChangeBrusselsMetroTrainCount(Math.max(1, Number(e.target.value) || 1))
+                        }
+                        style={{
+                          width: '72px',
+                          padding: '3px 6px',
+                          borderRadius: '4px',
+                          border: '1px solid rgba(148, 163, 184, 0.35)',
+                          background: 'rgba(15, 23, 42, 0.9)',
+                          color: '#f8fafc',
+                          fontSize: '0.73rem',
+                          fontWeight: 700,
+                          textAlign: 'right',
+                        }}
+                      />
+                    </div>
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '8px',
+                        fontSize: '0.71rem',
+                        color: '#cbd5e1',
+                      }}
+                    >
+                      <label htmlFor="input-metro-train-capacity" style={{ fontWeight: 500 }}>
+                        Capacity of each train (persons):
+                      </label>
+                      <input
+                        id="input-metro-train-capacity"
+                        type="number"
+                        min={10}
+                        max={2500}
+                        step={10}
+                        value={brusselsMetroConfig.trainCapacity}
+                        disabled={isSimulating}
+                        onChange={(e) =>
+                          onChangeBrusselsMetroTrainCapacity(
+                            Math.max(1, Number(e.target.value) || 100)
+                          )
+                        }
+                        style={{
+                          width: '72px',
+                          padding: '3px 6px',
+                          borderRadius: '4px',
+                          border: '1px solid rgba(148, 163, 184, 0.35)',
+                          background: 'rgba(15, 23, 42, 0.9)',
+                          color: '#f8fafc',
+                          fontSize: '0.73rem',
+                          fontWeight: 700,
+                          textAlign: 'right',
+                        }}
+                      />
+                    </div>
+
+                    {metroCorridors.length > 0 && (
+                      <div
+                        style={{
+                          marginTop: '2px',
+                          fontSize: '0.65rem',
+                          color: '#94a3b8',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '2px',
+                        }}
+                      >
+                        {metroCorridors.map((c) => (
+                          <div key={c.id} style={{ color: '#bae6fd' }}>
+                            🚇 Pickup: <strong>{c.sourceStation.name_fr}</strong> &rarr; Drop-Off:{' '}
+                            <strong>{c.targetStation.name_fr}</strong> ({c.lineLabel},{' '}
+                            {(c.distanceMeters / 1000).toFixed(1)} km, Immune to Avoid Areas)
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
       </div>
+
+      {/* Area Removal Confirmation Popup Modal */}
+      {pendingRemovalArea &&
+        createPortal(
+          <div
+            id="confirm-remove-area-modal-backdrop"
+            style={{
+              position: 'fixed',
+              inset: 0,
+              zIndex: 10000,
+              backgroundColor: 'rgba(4, 9, 18, 0.76)',
+              backdropFilter: 'blur(5px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '16px',
+            }}
+            onClick={() => setPendingRemovalArea(null)}
+          >
+            <div
+              id="confirm-remove-area-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="confirm-remove-area-title"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                backgroundColor: 'hsl(222, 28%, 13%)',
+                border: '1px solid rgba(239, 68, 68, 0.55)',
+                borderRadius: '10px',
+                padding: '20px 24px',
+                minWidth: '320px',
+                maxWidth: '420px',
+                boxShadow: '0 18px 44px rgba(0, 0, 0, 0.72)',
+                color: '#f8fafc',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  marginBottom: '12px',
+                  color: '#f87171',
+                  fontWeight: 700,
+                  fontSize: '0.95rem',
+                }}
+              >
+                <Trash2 size={18} />
+                <span id="confirm-remove-area-title">Confirm Area Removal</span>
+              </div>
+
+              <p
+                style={{
+                  fontSize: '0.84rem',
+                  color: '#e2e8f0',
+                  lineHeight: 1.5,
+                  marginBottom: '8px',
+                }}
+              >
+                Are you sure you want to remove the{' '}
+                <strong>
+                  {pendingRemovalArea.type === 'source'
+                    ? 'Source Area'
+                    : pendingRemovalArea.type === 'target'
+                    ? 'Target Area'
+                    : 'Avoid Area'}
+                </strong>{' '}
+                <span style={{ color: '#fbbf24', fontWeight: 700 }}>
+                  &ldquo;{pendingRemovalArea.name}&rdquo;
+                </span>
+                ?
+              </p>
+
+              <p
+                style={{
+                  fontSize: '0.75rem',
+                  color: '#94a3b8',
+                  lineHeight: 1.45,
+                  marginBottom: '18px',
+                }}
+              >
+                This will permanently remove the area from the simulation parameters, the map, and
+                active simulation memory.
+              </p>
+
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'flex-end',
+                  gap: '10px',
+                }}
+              >
+                <button
+                  id="btn-cancel-remove-area"
+                  type="button"
+                  onClick={() => setPendingRemovalArea(null)}
+                  style={{
+                    backgroundColor: 'rgba(51, 65, 85, 0.7)',
+                    color: '#e2e8f0',
+                    border: '1px solid rgba(148, 163, 184, 0.35)',
+                    borderRadius: '6px',
+                    padding: '7px 15px',
+                    fontSize: '0.78rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  id="btn-confirm-remove-area"
+                  type="button"
+                  onClick={() => {
+                    const { type, id } = pendingRemovalArea;
+                    if (type === 'source') {
+                      if (editingSourceId === id) setEditingSourceId(null);
+                      onDeleteSourceArea(id);
+                    } else if (type === 'target') {
+                      if (editingTargetId === id) setEditingTargetId(null);
+                      onDeleteTargetArea(id);
+                    } else if (type === 'avoid') {
+                      if (editingAvoidId === id) setEditingAvoidId(null);
+                      onDeleteAvoidArea(id);
+                    }
+                    setPendingRemovalArea(null);
+                  }}
+                  style={{
+                    backgroundColor: '#ef4444',
+                    color: '#ffffff',
+                    border: '1px solid #f87171',
+                    borderRadius: '6px',
+                    padding: '7px 16px',
+                    fontSize: '0.78rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}
+                >
+                  <Trash2 size={13} />
+                  <span>Confirm Remove</span>
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </aside>
   );
 };

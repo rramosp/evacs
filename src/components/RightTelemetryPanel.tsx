@@ -244,13 +244,13 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
             </div>
           </section>
 
-          {/* Blue Square Pickup Locations Live Queue & 80% Boarding Status */}
+          {/* Blue Square & Metro Station Pickup Locations Live Queue & Boarding Status */}
           {pickupStates.length > 0 && (
             <section className="telemetry-card">
               <div className="telemetry-card-header">
                 <div className="header-with-icon">
                   <MapPin size={14} style={{ color: '#3b82f6' }} />
-                  <span>BLUE SQUARE PICKUPS (80% OR 10M RULE)</span>
+                  <span>PICKUP &amp; METRO STATIONS (LIVE QUEUE)</span>
                 </div>
               </div>
 
@@ -259,7 +259,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
                   <div key={p.id} className="pickup-queue-item">
                     <div className="pickup-queue-top">
                       <span className="pickup-queue-name">
-                        🟦 #{i + 1} {p.label}
+                        {p.isMetro ? `🚇 #${i + 1} ${p.label}` : `🟦 #${i + 1} ${p.label}`}
                       </span>
                       <span className="pickup-queue-count">
                         Queue: <strong>{p.waitingPopulation}</strong>
@@ -267,11 +267,15 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
                     </div>
                     {p.boardingVehicleInfo ? (
                       <div className="pickup-boarding-status active">
-                        🚌 {p.boardingVehicleInfo}
+                        {p.isMetro ? '🚇' : '🚌'} {p.boardingVehicleInfo}
                       </div>
                     ) : (
                       <div className="pickup-boarding-status">
-                        Boarded so far: {p.totalBoardedCount.toLocaleString()} evacuees
+                        Boarded: {p.totalBoardedCount.toLocaleString()} &bull; Dropped off
+                        {p.isMetro && p.metroTargetStationName
+                          ? ` at ${p.metroTargetStationName}`
+                          : ''}
+                        : {p.evacuatedCount.toLocaleString()} evacuees
                       </div>
                     )}
                   </div>

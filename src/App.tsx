@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   SourceArea,
   TargetArea,
-  NoGoArea,
+  AvoidArea,
   VehicleFleet,
   ComputedRoute,
   PickupLocationState,
@@ -18,8 +18,17 @@ import {
   GlofasForecastState,
   GlofasForecastOverlay,
   SimulationTelemetryStats,
+  BrusselsMetroLineFeature,
+  BrusselsMetroStationFeature,
+  BrusselsMetroConfig,
 } from './types/evacuation';
 import { PRESET_SCENARIOS } from './data/presets';
+import { BRUSSELS_METRO_INITIAL_DATA } from './data/brusselsMetroData';
+import {
+  hasAnyAreaInBrussels,
+  findBrusselsMetroStationsInAreas,
+  buildBrusselsMetroEvacuationCorridors,
+} from './services/brusselsMetroService';
 import {
   computeAllEvacuationRoutes,
   computeDirectRouteToClosestTarget,
@@ -30,6 +39,7 @@ import {
   stepSimulationState,
   getRemainingPopulationBySource,
   createInitialTelemetryStats,
+  generateHeatmapFromState,
 } from './services/simulationEngine';
 import { LeftControlPanel } from './components/LeftControlPanel';
 import { EvacuationMap } from './components/EvacuationMap';
@@ -50,11 +60,16 @@ export function App() {
   const [targetAreas, setTargetAreas] = useState<TargetArea[]>(
     PRESET_SCENARIOS.brussels.targetAreas
   );
-  const [noGoAreas, setNoGoAreas] = useState<NoGoArea[]>(
-    PRESET_SCENARIOS.brussels.noGoAreas
+  const [avoidAreas, setAvoidAreas] = useState<AvoidArea[]>(
+    PRESET_SCENARIOS.brussels.avoidAreas
   );
   const [vehicleFleets, setVehicleFleets] = useState<VehicleFleet[]>(
     PRESET_SCENARIOS.brussels.vehicleFleets
+  );
+
+  // Track baseline initial populations for each Source Area so Reset / Post-Finish Compute restores them
+  const baselinePopulationsRef = useRef<Record<string, number>>(
+    Object.fromEntries(PRESET_SCENARIOS.brussels.sourceAreas.map((s) => [s.id, s.population]))
   );
 
   // Track whether topology/population/vehicle edits occurred while paused
@@ -81,6 +96,7 @@ export function App() {
   );
 
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
+  const [isSimulationInProgress, setIsSimulationInProgress] = useState<boolean>(false);
   const [simSpeed, setSimSpeed] = useState<number>(2);
   const [elapsedSimSeconds, setElapsedSimSeconds] = useState<number>(0);
   const [isSimulationReportOpen, setIsSimulationReportOpen] = useState<boolean>(false);
@@ -98,6 +114,99 @@ export function App() {
   const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState<boolean>(false);
   const [isBottomPanelCollapsed, setIsBottomPanelCollapsed] = useState<boolean>(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState<boolean>(false);
+
+  // Brussels Metro Network data loaded from data/brussels_metro_lines.parquet and data/brussels_metro_stations.parquet
+  const [brusselsMetroNetwork, setBrusselsMetroNetwork] = useState<{
+    lines: BrusselsMetroLineFeature[];
+    stations: BrusselsMetroStationFeature[];
+  }>({
+    lines: BRUSSELS_METRO_INITIAL_DATA.lines,
+    stations: BRUSSELS_METRO_INITIAL_DATA.stations,
+  });
+
+  const [brusselsMetroConfig, setBrusselsMetroConfig] = useState<BrusselsMetroConfig>({
+    showNetworkOverlay: false,
+    useForEvacuation: false,
+    trainCount: 4,
+    trainCapacity: 300,
+  });
+
+  // Load Brussels Metro parquet files via server endpoint on mount
+  useEffect(() => {
+    fetch('/api/brussels-metro/network')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data?.ok && Array.isArray(data.lines) && Array.isArray(data.stations)) {
+          setBrusselsMetroNetwork({
+            lines: data.lines,
+            stations: data.stations,
+          });
+        }
+      })
+      .catch(() => {
+        // Fallback to BRUSSELS_METRO_INITIAL_DATA generated from the same parquet files
+      });
+  }, []);
+
+  // Determine whether any Source or Target Area falls within the Region of Brussels
+  const hasBrusselsAreas = useMemo(
+    () => hasAnyAreaInBrussels(sourceAreas, targetAreas),
+    [sourceAreas, targetAreas]
+  );
+
+  // Find Metro stations falling within Source Areas and Target Areas
+  const { sourceStations: sourceMetroStations, targetStations: targetMetroStations } = useMemo(
+    () =>
+      findBrusselsMetroStationsInAreas(
+        brusselsMetroNetwork.stations,
+        sourceAreas,
+        targetAreas
+      ),
+    [brusselsMetroNetwork.stations, sourceAreas, targetAreas]
+  );
+
+  // Build static underground Metro evacuation corridors between Source stations and Target stations
+  const metroCorridors = useMemo(
+    () =>
+      buildBrusselsMetroEvacuationCorridors(
+        sourceAreas,
+        targetAreas,
+        brusselsMetroNetwork.lines,
+        brusselsMetroNetwork.stations
+      ),
+    [
+      sourceAreas,
+      targetAreas,
+      brusselsMetroNetwork.lines,
+      brusselsMetroNetwork.stations,
+    ]
+  );
+
+  const activeMetroEvacuationOptions = useMemo(() => {
+    if (
+      !hasBrusselsAreas ||
+      !brusselsMetroConfig.useForEvacuation ||
+      sourceMetroStations.length === 0 ||
+      targetMetroStations.length === 0 ||
+      metroCorridors.length === 0
+    ) {
+      return undefined;
+    }
+    return {
+      enabled: true,
+      corridors: metroCorridors,
+      trainCount: brusselsMetroConfig.trainCount,
+      trainCapacity: brusselsMetroConfig.trainCapacity,
+    };
+  }, [
+    hasBrusselsAreas,
+    brusselsMetroConfig.useForEvacuation,
+    brusselsMetroConfig.trainCount,
+    brusselsMetroConfig.trainCapacity,
+    sourceMetroStations.length,
+    targetMetroStations.length,
+    metroCorridors,
+  ]);
 
   const appendLog = useCallback(
     (level: LogEntry['level'], message: string, simSec: number = 0) => {
@@ -145,6 +254,7 @@ export function App() {
     }
 
     setIsSimulating(false);
+    setIsSimulationInProgress(false);
     setElapsedSimSeconds(0);
     setHasPendingTopologyChanges(false);
     setSelectedPreset(preset);
@@ -155,13 +265,16 @@ export function App() {
 
     if (preset === 'brussels' || preset === 'paris') {
       const data = PRESET_SCENARIOS[preset];
+      baselinePopulationsRef.current = Object.fromEntries(
+        data.sourceAreas.map((s) => [s.id, s.population])
+      );
       setMapCenter(data.center);
       setMapZoom(data.zoom);
       setSourceAreas(data.sourceAreas);
       setTargetAreas(
         data.targetAreas.map((t) => ({ ...t, currentOccupancy: 0, disabled: false }))
       );
-      setNoGoAreas(data.noGoAreas);
+      setAvoidAreas(data.avoidAreas);
       setVehicleFleets(data.vehicleFleets);
       setComputedRoutes([]);
       setClusters([]);
@@ -178,12 +291,13 @@ export function App() {
 
       appendLog(
         'INFO',
-        `Loaded preset scenario: "${data.name}" (${data.sourceAreas.length} sources, ${data.targetAreas.length} shelters, ${data.noGoAreas.length} no-go zones).`
+        `Loaded preset scenario: "${data.name}" (${data.sourceAreas.length} sources, ${data.targetAreas.length} shelters, ${data.avoidAreas.length} avoid areas).`
       );
     } else {
+      baselinePopulationsRef.current = {};
       setSourceAreas([]);
       setTargetAreas([]);
-      setNoGoAreas([]);
+      setAvoidAreas([]);
       setVehicleFleets([]);
       setComputedRoutes([]);
       setClusters([]);
@@ -203,7 +317,17 @@ export function App() {
   };
 
   // Run OSRM + Obstacle Avoidance Route Computation & Establish Blue Square Pickups
+  // Note: Only land routes over streets with the configured vehicleFleets are computed here;
+  // Brussels Metro lines remain static and unaffected by avoidAreas.
   const handleComputeRoutes = useCallback(async () => {
+    if (isSimulating || isSimulationInProgress) {
+      appendLog(
+        'WARN',
+        'Cannot compute evacuation routes while a simulation is in progress. Wait until the simulation finishes or reset the simulation first.'
+      );
+      return;
+    }
+
     const activeTargets = targetAreas.filter((t) => !t.disabled);
     if (sourceAreas.length === 0 || activeTargets.length === 0) {
       appendLog(
@@ -214,13 +338,27 @@ export function App() {
     }
 
     setIsSimulating(false);
+    setIsSimulationInProgress(false);
     setIsComputingRoutes(true);
+
+    // If computing routes after a completed simulation (where source populations reached 0), restore baseline populations
+    const allZeroPop = sourceAreas.every((s) => s.population === 0);
+    const effectiveSourceAreas = allZeroPop
+      ? sourceAreas.map((s) => ({
+          ...s,
+          population: baselinePopulationsRef.current[s.id] ?? s.population,
+        }))
+      : sourceAreas;
+
+    if (allZeroPop) {
+      setSourceAreas(effectiveSourceAreas);
+    }
 
     try {
       const result = await computeAllEvacuationRoutes(
-        sourceAreas,
+        effectiveSourceAreas,
         targetAreas,
-        noGoAreas,
+        avoidAreas,
         vehicleFleets
       );
 
@@ -231,10 +369,15 @@ export function App() {
       // Initialize micro-simulation state ready for playback
       const initialSimState = initializeSimulationState(
         result.routes,
-        sourceAreas,
+        effectiveSourceAreas,
         targetAreas,
-        vehicleFleets
+        vehicleFleets,
+        activeMetroEvacuationOptions
       );
+
+      if (initialSimState.newLogs.length > 0) {
+        initialSimState.newLogs.forEach((msg) => appendLog('ROUTING', msg, 0));
+      }
 
       setClusters(initialSimState.clusters);
       setPickupStates(initialSimState.pickupStates);
@@ -253,54 +396,145 @@ export function App() {
     } finally {
       setIsComputingRoutes(false);
     }
-  }, [sourceAreas, targetAreas, noGoAreas, vehicleFleets, appendLog]);
+  }, [
+    sourceAreas,
+    targetAreas,
+    avoidAreas,
+    vehicleFleets,
+    appendLog,
+    isSimulating,
+    isSimulationInProgress,
+    activeMetroEvacuationOptions,
+  ]);
 
   // Automatically compute routes on initial mount
   useEffect(() => {
     handleComputeRoutes();
   }, []);
 
+  // When paused at t=0 and Brussels Metro evacuation settings or Source/Target areas change,
+  // refresh the initialized simulation state so metro pickups, drop-offs, and trains are immediately ready for playback.
+  useEffect(() => {
+    if (isSimulating || isSimulationInProgress || elapsedSimSeconds > 0) return;
+    if (computedRoutes.length === 0 && !activeMetroEvacuationOptions) return;
+
+    const freshState = initializeSimulationState(
+      computedRoutes,
+      sourceAreas,
+      targetAreas,
+      vehicleFleets,
+      activeMetroEvacuationOptions
+    );
+    setClusters(freshState.clusters);
+    setPickupStates(freshState.pickupStates);
+    setVehicles(freshState.vehicles);
+    setHeatmapPoints(freshState.heatmapPoints);
+    setTelemetryStats(freshState.telemetryStats);
+    setTotalRemainingAtSource(freshState.totalRemainingAtSource);
+  }, [
+    activeMetroEvacuationOptions,
+    sourceAreas,
+    targetAreas,
+    vehicleFleets,
+    computedRoutes,
+    isSimulating,
+    isSimulationInProgress,
+    elapsedSimSeconds,
+  ]);
+
   // Run / Resume Simulation (with automatic mid-simulation route recomputation & vehicle diversion if topology changed)
   const handleRunSimulation = async () => {
+    if (sourceAreas.length === 0) {
+      appendLog('WARN', 'Cannot run simulation: At least 1 Source Area is required.');
+      return;
+    }
     const activeTargets = targetAreas.filter((t) => !t.disabled);
     if (activeTargets.length === 0) {
-      appendLog('WARN', 'Cannot run simulation: All Target Shelters are disabled! Enable at least one Target Shelter.');
+      appendLog('WARN', 'Cannot run simulation: No active Target Shelters available! Add or enable at least one Target Shelter.');
       return;
     }
 
-    // If topology/population/fleets were modified while paused, recompute routes before resuming!
-    if (hasPendingTopologyChanges || computedRoutes.length === 0) {
+    // If restarting after a previous simulation finished (where source populations reached 0), restore baseline populations first
+    const isRestartingCompletedSim =
+      (totalRemainingAtSource === 0 && totalInTransit === 0 && totalEvacuated > 0) ||
+      sourceAreas.every((s) => s.population === 0);
+
+    const effectiveSourceAreas = isRestartingCompletedSim
+      ? sourceAreas.map((s) => ({
+          ...s,
+          population: baselinePopulationsRef.current[s.id] ?? s.population,
+        }))
+      : sourceAreas;
+
+    if (isRestartingCompletedSim) {
+      setSourceAreas(effectiveSourceAreas);
+      setTargetAreas((prev) => prev.map((t) => ({ ...t, currentOccupancy: 0 })));
+      setElapsedSimSeconds(0);
+      setTotalEvacuated(0);
+      setTotalInTransit(0);
+      setTotalWaitingAtPickups(0);
+    }
+
+    const effectiveElapsedSimSec = isRestartingCompletedSim ? 0 : elapsedSimSeconds;
+
+    // Determine which Source Areas still need street routes (those not covered by active Metro Corridors)
+    const metroCoveredSourceIds = new Set(
+      activeMetroEvacuationOptions?.enabled
+        ? activeMetroEvacuationOptions.corridors.map((c) => c.sourceId)
+        : []
+    );
+    const needsStreetRoutes =
+      vehicleFleets.length > 0 &&
+      effectiveSourceAreas.some((s) => !metroCoveredSourceIds.has(s.id));
+
+    // If topology/population/fleets were modified while paused (or routes/vehicles not yet initialized), recompute & initialize before resuming!
+    if (
+      hasPendingTopologyChanges ||
+      isRestartingCompletedSim ||
+      (needsStreetRoutes && computedRoutes.length === 0) ||
+      vehicles.length === 0
+    ) {
       setIsComputingRoutes(true);
       try {
-        appendLog(
-          'ROUTING',
-          'Topology/population changes detected while paused — recomputing evacuation routes for remaining & new populations across active Target Areas...',
-          elapsedSimSeconds
-        );
+        let nextStreetRoutes = computedRoutes;
 
-        const routeResult = await computeAllEvacuationRoutes(
-          sourceAreas,
-          targetAreas,
-          noGoAreas,
-          vehicleFleets
-        );
+        if (needsStreetRoutes && (hasPendingTopologyChanges || computedRoutes.length === 0)) {
+          appendLog(
+            'ROUTING',
+            'Computing street evacuation routes for Source Areas served by street vehicle fleets...',
+            effectiveElapsedSimSec
+          );
 
-        setComputedRoutes(routeResult.routes);
-        setLogs((prev) => [...prev, ...routeResult.logs]);
+          const routeResult = await computeAllEvacuationRoutes(
+            effectiveSourceAreas,
+            targetAreas,
+            avoidAreas,
+            vehicleFleets
+          );
 
-        if (elapsedSimSeconds > 0 && vehicles.length > 0) {
-          // Compute direct routes from each loaded vehicle's current position to the CLOSEST active Target Area
+          nextStreetRoutes = routeResult.routes;
+          setComputedRoutes(routeResult.routes);
+          setLogs((prev) => [...prev, ...routeResult.logs]);
+        } else if (!needsStreetRoutes && computedRoutes.length > 0 && vehicleFleets.length === 0) {
+          nextStreetRoutes = [];
+          setComputedRoutes([]);
+        }
+
+        if (effectiveElapsedSimSec > 0 && vehicles.length > 0) {
+          // Compute direct routes from each loaded street vehicle's current position to the CLOSEST active Target Area
           const directRoutesToClosestTarget: Record<
             string,
             { target: TargetArea; coordinates: [number, number][] }
           > = {};
 
-          const loadedVehicles = vehicles.filter((v) => v.currentOccupancy > 0);
+          const loadedVehicles = vehicles.filter(
+            (v) => v.currentOccupancy > 0 && v.vehicleType !== 'Metro'
+          );
           for (const veh of loadedVehicles) {
             directRoutesToClosestTarget[veh.id] = await computeDirectRouteToClosestTarget(
               veh.currentPosition,
               targetAreas,
-              noGoAreas
+              avoidAreas
             );
           }
 
@@ -310,15 +544,16 @@ export function App() {
           });
 
           const reconciled = reconcileSimulationOnRestart(
-            routeResult.routes,
-            sourceAreas,
+            nextStreetRoutes,
+            effectiveSourceAreas,
             targetAreas,
             vehicleFleets,
             vehicles,
             currentTargetOccupancies,
             directRoutesToClosestTarget,
             telemetryStats,
-            pickupStates
+            pickupStates,
+            activeMetroEvacuationOptions
           );
 
           setClusters(reconciled.clusters);
@@ -332,15 +567,16 @@ export function App() {
           setTotalWaitingAtPickups(reconciled.totalWaitingAtPickups);
 
           reconciled.newLogs.forEach((msg) =>
-            appendLog('SIMULATION', msg, elapsedSimSeconds)
+            appendLog('SIMULATION', msg, effectiveElapsedSimSec)
           );
         } else {
           // Fresh start at t = 0
           const initialSimState = initializeSimulationState(
-            routeResult.routes,
-            sourceAreas,
+            nextStreetRoutes,
+            effectiveSourceAreas,
             targetAreas,
-            vehicleFleets
+            vehicleFleets,
+            activeMetroEvacuationOptions
           );
           setClusters(initialSimState.clusters);
           setPickupStates(initialSimState.pickupStates);
@@ -351,11 +587,15 @@ export function App() {
           setTotalInTransit(0);
           setTotalRemainingAtSource(initialSimState.totalRemainingAtSource);
           setTotalWaitingAtPickups(0);
+
+          initialSimState.newLogs.forEach((msg) =>
+            appendLog('SIMULATION', msg, 0)
+          );
         }
 
         setHasPendingTopologyChanges(false);
       } catch (err) {
-        appendLog('WARN', `Failed to recompute routes on restart: ${String(err)}`);
+        appendLog('WARN', `Failed to initialize routes on start: ${String(err)}`);
         setIsComputingRoutes(false);
         return;
       } finally {
@@ -363,16 +603,17 @@ export function App() {
       }
     }
 
-    if (totalRemainingAtSource === 0 && totalInTransit === 0 && totalEvacuated > 0) {
-      handleResetSimulation();
-    }
-
     setIsSimulationReportOpen(false);
+    setIsSimulationInProgress(true);
     setIsSimulating(true);
     appendLog(
       'SIMULATION',
-      `Simulation running (${simSpeed}x). Evacuees moving within source zones toward Blue Square pickup locations; vehicles board until 80% occupancy or 10 minutes waiting time (with >=1 passenger).`,
-      elapsedSimSeconds
+      `Simulation running (${simSpeed}x). Evacuees moving within source zones toward pickup locations${
+        activeMetroEvacuationOptions
+          ? ` (Brussels Metro Active: ${activeMetroEvacuationOptions.corridors.length} station corridor(s), ${activeMetroEvacuationOptions.trainCount} train(s) × ${activeMetroEvacuationOptions.trainCapacity} pax)`
+          : ''
+      }.`,
+      effectiveElapsedSimSec
     );
   };
 
@@ -397,7 +638,7 @@ export function App() {
 
     appendLog(
       'SIMULATION',
-      'Simulation paused. You can now modify Source/Target/No-Go areas, adjust population counts, disable Target Shelters, or add/remove vehicles.',
+      'Simulation paused. You can now modify Source/Target/Avoid areas, adjust population counts, disable Target Shelters, or add/remove vehicles.',
       elapsedSimSeconds
     );
   };
@@ -405,14 +646,22 @@ export function App() {
   // Reset Simulation back to t = 0
   const handleResetSimulation = () => {
     setIsSimulating(false);
+    setIsSimulationInProgress(false);
     setElapsedSimSeconds(0);
     setHasPendingTopologyChanges(false);
 
+    const restoredSources = sourceAreas.map((s) => ({
+      ...s,
+      population: baselinePopulationsRef.current[s.id] ?? s.population,
+    }));
+    setSourceAreas(restoredSources);
+
     const freshState = initializeSimulationState(
       computedRoutes,
-      sourceAreas,
+      restoredSources,
       targetAreas,
-      vehicleFleets
+      vehicleFleets,
+      activeMetroEvacuationOptions
     );
     setClusters(freshState.clusters);
     setPickupStates(freshState.pickupStates);
@@ -477,9 +726,17 @@ export function App() {
     if (!isSimulating) return;
 
     const intervalMs = 100; // 10 ticks per second
+    let lastTickMs = performance.now();
+
     const timer = setInterval(() => {
+      const nowMs = performance.now();
+      // Compute true wall-clock elapsed seconds (clamped to prevent huge jumps if tab was backgrounded)
+      const wallDeltaSec = Math.min(0.5, Math.max(0.01, (nowMs - lastTickMs) / 1000));
+      lastTickMs = nowMs;
+
       const state = simStateRef.current;
-      const deltaSimSec = (intervalMs / 1000) * state.simSpeed * 4.5;
+      // 1x playback = 1 simulation second per 1 real-time second
+      const deltaSimSec = wallDeltaSec * state.simSpeed;
       const nextElapsed = state.elapsedSimSeconds + deltaSimSec;
 
       const stepResult = stepSimulationState(
@@ -534,6 +791,7 @@ export function App() {
         stepResult.totalEvacuated > 0
       ) {
         setIsSimulating(false);
+        setIsSimulationInProgress(false);
         setSourceAreas((prev) => prev.map((s) => ({ ...s, population: 0 })));
         appendLog(
           'SIMULATION',
@@ -553,6 +811,7 @@ export function App() {
       return;
     }
     const newSrc: SourceArea = { ...src, id: `src-${Date.now()}` };
+    baselinePopulationsRef.current[newSrc.id] = newSrc.population;
     setSourceAreas((prev) => [...prev, newSrc]);
     setHasPendingTopologyChanges(true);
     setTotalRemainingAtSource((prev) => prev + newSrc.population);
@@ -567,6 +826,14 @@ export function App() {
     if (isSimulating) {
       appendLog('WARN', 'Pause simulation before modifying a Source Area.');
       return;
+    }
+    if (!isSimulationInProgress && elapsedSimSeconds === 0) {
+      baselinePopulationsRef.current[updatedSrc.id] = updatedSrc.population;
+    } else {
+      baselinePopulationsRef.current[updatedSrc.id] = Math.max(
+        baselinePopulationsRef.current[updatedSrc.id] ?? 0,
+        updatedSrc.population
+      );
     }
     setSourceAreas((prev) => prev.map((s) => (s.id === updatedSrc.id ? updatedSrc : s)));
     setHasPendingTopologyChanges(true);
@@ -586,26 +853,62 @@ export function App() {
 
   const handleDeleteSourceArea = (id: string) => {
     if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before deleting a Source Area.');
+      appendLog('WARN', 'Pause simulation before removing a Source Area.');
       return;
     }
+    delete baselinePopulationsRef.current[id];
     const target = sourceAreas.find((s) => s.id === id);
-    const remaining = remainingBySource[id] ?? target?.population ?? 0;
+    const nextSources = sourceAreas.filter((s) => s.id !== id);
+    const nextRoutes = computedRoutes.filter((r) => r.sourceId !== id);
+    const nextClusters = clusters.filter((c) => c.sourceId !== id);
+    const nextPickups = pickupStates.filter((p) => p.sourceId !== id);
+    const nextVehicles = vehicles.filter((v) => v.sourceId !== id);
 
-    if (remaining > 0) {
-      appendLog(
-        'WARN',
-        `Cannot remove Source Area "${target?.name || id}": There are still ${remaining.toLocaleString()} people remaining inside!`,
-        elapsedSimSeconds
-      );
-      return;
+    setSourceAreas(nextSources);
+    setComputedRoutes(nextRoutes);
+    setClusters(nextClusters);
+    setPickupStates(nextPickups);
+    setVehicles(nextVehicles);
+    if (selectedEntityId === id) {
+      setSelectedEntityId(null);
     }
 
-    setSourceAreas((prev) => prev.filter((s) => s.id !== id));
+    const occMap: Record<string, number> = {};
+    targetAreas.forEach((t) => {
+      occMap[t.id] = t.currentOccupancy;
+    });
+
+    setHeatmapPoints(
+      generateHeatmapFromState(
+        nextClusters,
+        nextPickups,
+        nextVehicles,
+        targetAreas,
+        occMap
+      )
+    );
+
+    const nextTotalRemaining = nextSources.reduce((acc, s) => acc + s.population, 0);
+    const nextWaitingInQueues = nextPickups.reduce((acc, p) => acc + p.waitingPopulation, 0);
+    const nextBoarding = nextVehicles
+      .filter((v) => v.status === 'waiting_for_80_pct')
+      .reduce((acc, v) => acc + v.currentOccupancy, 0);
+    const nextInTransit = nextVehicles
+      .filter((v) => v.status === 'to_target' || v.status === 'unloading')
+      .reduce((acc, v) => acc + v.currentOccupancy, 0);
+
+    setTotalRemainingAtSource(nextTotalRemaining);
+    setTotalWaitingAtPickups(nextWaitingInQueues + nextBoarding);
+    setTotalInTransit(nextInTransit);
+
+    if (elapsedSimSeconds === 0) {
+      setTelemetryStats(createInitialTelemetryStats(nextSources, nextClusters));
+    }
+
     setHasPendingTopologyChanges(true);
     appendLog(
       'WARN',
-      `Removed empty Source Area "${target?.name || id}" (0 people remaining).`,
+      `Removed Source Area "${target?.name || id}" from simulation configuration and map.`,
       elapsedSimSeconds
     );
   };
@@ -667,40 +970,104 @@ export function App() {
     );
   };
 
-  const handleAddNoGoArea = (nogo: Omit<NoGoArea, 'id'>) => {
+  const handleDeleteTargetArea = (id: string) => {
     if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before adding a No-Go Area.');
+      appendLog('WARN', 'Pause simulation before removing a Target Area.');
       return;
     }
-    const newNoGo: NoGoArea = { ...nogo, id: `nogo-${Date.now()}` };
-    setNoGoAreas((prev) => [...prev, newNoGo]);
+    const target = targetAreas.find((t) => t.id === id);
+    const nextTargets = targetAreas.filter((t) => t.id !== id);
+    const nextRoutes = computedRoutes.filter((r) => r.targetId !== id);
+    const nextPickups = pickupStates.filter((p) => p.targetId !== id);
+    const nextVehicles = vehicles.filter(
+      (v) => !(v.targetId === id && (v.currentOccupancy === 0 || v.status === 'unloading'))
+    );
+
+    setTargetAreas(nextTargets);
+    setComputedRoutes(nextRoutes);
+    setPickupStates(nextPickups);
+    setVehicles(nextVehicles);
+    if (selectedEntityId === id) {
+      setSelectedEntityId(null);
+    }
+
+    const occMap: Record<string, number> = {};
+    nextTargets.forEach((t) => {
+      occMap[t.id] = t.currentOccupancy;
+    });
+
+    setHeatmapPoints(
+      generateHeatmapFromState(
+        clusters,
+        nextPickups,
+        nextVehicles,
+        nextTargets,
+        occMap
+      )
+    );
+
+    const nextTotalEvacuated = nextTargets.reduce((acc, t) => acc + t.currentOccupancy, 0);
+    const nextWaitingInQueues = nextPickups.reduce((acc, p) => acc + p.waitingPopulation, 0);
+    const nextBoarding = nextVehicles
+      .filter((v) => v.status === 'waiting_for_80_pct')
+      .reduce((acc, v) => acc + v.currentOccupancy, 0);
+    const nextInTransit = nextVehicles
+      .filter((v) => v.status === 'to_target' || v.status === 'unloading')
+      .reduce((acc, v) => acc + v.currentOccupancy, 0);
+
+    setTotalEvacuated(nextTotalEvacuated);
+    setTotalWaitingAtPickups(nextWaitingInQueues + nextBoarding);
+    setTotalInTransit(nextInTransit);
+
     setHasPendingTopologyChanges(true);
     appendLog(
       'WARN',
-      `Defined No-Go Hazard Zone "${newNoGo.name}". Routes will detour around it on restart.`,
+      `Removed Target Area "${target?.name || id}" from simulation configuration and map.`,
       elapsedSimSeconds
     );
   };
 
-  const handleUpdateNoGoArea = (updatedNoGo: NoGoArea) => {
+  const handleAddAvoidArea = (avoid: Omit<AvoidArea, 'id'>) => {
     if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before modifying a No-Go Area.');
+      appendLog('WARN', 'Pause simulation before adding an Avoid Area.');
       return;
     }
-    setNoGoAreas((prev) => prev.map((n) => (n.id === updatedNoGo.id ? updatedNoGo : n)));
+    const newAvoid: AvoidArea = { ...avoid, id: `avoid-${Date.now()}` };
+    setAvoidAreas((prev) => [...prev, newAvoid]);
     setHasPendingTopologyChanges(true);
-    appendLog('INFO', `Modified No-Go Hazard Zone "${updatedNoGo.name}".`, elapsedSimSeconds);
+    appendLog(
+      'WARN',
+      `Defined Avoid Area "${newAvoid.name}". Routes will detour around it on restart.`,
+      elapsedSimSeconds
+    );
   };
 
-  const handleDeleteNoGoArea = (id: string) => {
+  const handleUpdateAvoidArea = (updatedAvoid: AvoidArea) => {
     if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before removing a No-Go Area.');
+      appendLog('WARN', 'Pause simulation before modifying an Avoid Area.');
       return;
     }
-    const target = noGoAreas.find((n) => n.id === id);
-    setNoGoAreas((prev) => prev.filter((n) => n.id !== id));
+    setAvoidAreas((prev) => prev.map((a) => (a.id === updatedAvoid.id ? updatedAvoid : a)));
     setHasPendingTopologyChanges(true);
-    appendLog('INFO', `Removed No-Go Hazard Zone "${target?.name || id}".`, elapsedSimSeconds);
+    appendLog('INFO', `Modified Avoid Area "${updatedAvoid.name}".`, elapsedSimSeconds);
+  };
+
+  const handleDeleteAvoidArea = (id: string) => {
+    if (isSimulating) {
+      appendLog('WARN', 'Pause simulation before removing an Avoid Area.');
+      return;
+    }
+    const target = avoidAreas.find((a) => a.id === id);
+    setAvoidAreas((prev) => prev.filter((a) => a.id !== id));
+    if (selectedEntityId === id) {
+      setSelectedEntityId(null);
+    }
+    setHasPendingTopologyChanges(true);
+    appendLog(
+      'INFO',
+      `Removed Avoid Area "${target?.name || id}" from simulation configuration and map.`,
+      elapsedSimSeconds
+    );
   };
 
   const handleAddVehicleFleet = (fleet: Omit<VehicleFleet, 'id'>) => {
@@ -713,7 +1080,7 @@ export function App() {
     setHasPendingTopologyChanges(true);
     appendLog(
       'INFO',
-      `Added Vehicle Fleet "${newFleet.name}" (${newFleet.count}x ${newFleet.type}). Will be deployed on simulation restart.`,
+      `Added Vehicle Fleet "${newFleet.name}" (${newFleet.count}x ${newFleet.type}, ${newFleet.capacityPerUnit} seats/unit, ${newFleet.transitSpeedKmh ?? 25} km/h transit speed, ${newFleet.loadUnloadTimePerPersonSeconds}s/person load/unload). Will be deployed on simulation restart.`,
       elapsedSimSeconds
     );
   };
@@ -723,11 +1090,44 @@ export function App() {
       appendLog('WARN', 'Pause simulation before modifying a Vehicle Fleet.');
       return;
     }
+    const prevFleet = vehicleFleets.find((v) => v.id === updatedFleet.id);
+    const topologyChanged =
+      !prevFleet ||
+      prevFleet.count !== updatedFleet.count ||
+      prevFleet.location[0] !== updatedFleet.location[0] ||
+      prevFleet.location[1] !== updatedFleet.location[1];
+
+    const speedKmh = Math.max(1, updatedFleet.transitSpeedKmh ?? 25);
+    const speedMps = (speedKmh * 1000) / 3600;
+
     setVehicleFleets((prev) =>
       prev.map((v) => (v.id === updatedFleet.id ? updatedFleet : v))
     );
-    setHasPendingTopologyChanges(true);
-    appendLog('INFO', `Modified Vehicle Fleet "${updatedFleet.name}".`, elapsedSimSeconds);
+    setVehicles((prev) =>
+      prev.map((v) =>
+        v.fleetId === updatedFleet.id
+          ? {
+              ...v,
+              capacityPerUnit: updatedFleet.capacityPerUnit,
+              maxCapacity: Math.max(
+                v.currentOccupancy,
+                v.unitCount * updatedFleet.capacityPerUnit
+              ),
+              loadUnloadTimePerPersonSeconds: updatedFleet.loadUnloadTimePerPersonSeconds,
+              transitSpeedKmh: speedKmh,
+              speedMps,
+            }
+          : v
+      )
+    );
+    if (topologyChanged) {
+      setHasPendingTopologyChanges(true);
+    }
+    appendLog(
+      'INFO',
+      `Modified Vehicle Fleet "${updatedFleet.name}" (${updatedFleet.count}x ${updatedFleet.type}, ${updatedFleet.capacityPerUnit} seats/unit, ${speedKmh} km/h transit speed, ${updatedFleet.loadUnloadTimePerPersonSeconds}s/person load/unload).`,
+      elapsedSimSeconds
+    );
   };
 
   const handleDeleteVehicleFleet = (id: string) => {
@@ -742,7 +1142,7 @@ export function App() {
   };
 
   // Drawing Handlers
-  const handleStartDrawing = (type: 'source' | 'target' | 'nogo' | 'vehicle') => {
+  const handleStartDrawing = (type: 'source' | 'target' | 'avoid' | 'vehicle') => {
     if (isSimulating) {
       appendLog('WARN', 'Pause simulation before drawing or placing entities.');
       return;
@@ -1155,6 +1555,57 @@ export function App() {
     setSentinel1Layer((prev) => ({ ...prev, opacity }));
   };
 
+  // Brussels Metro Handlers
+  const handleToggleBrusselsMetroNetworkOverlay = () => {
+    setBrusselsMetroConfig((prev) => {
+      const next = !prev.showNetworkOverlay;
+      appendLog(
+        'INFO',
+        next
+          ? `Brussels Metro Network overlay enabled on map (${brusselsMetroNetwork.lines.filter((l) => l.variant === 1).length} lines, ${brusselsMetroNetwork.stations.length} stations).`
+          : 'Brussels Metro Network overlay hidden on map.',
+        elapsedSimSeconds
+      );
+      return { ...prev, showNetworkOverlay: next };
+    });
+  };
+
+  const handleToggleUseBrusselsMetroForEvacuation = (checked: boolean) => {
+    if (isSimulating) {
+      appendLog('WARN', 'Pause simulation before toggling Brussels Metro evacuation.');
+      return;
+    }
+    setBrusselsMetroConfig((prev) => ({ ...prev, useForEvacuation: checked }));
+    if (elapsedSimSeconds > 0) {
+      setHasPendingTopologyChanges(true);
+    }
+    appendLog(
+      'INFO',
+      checked
+        ? `Brussels Metro Evacuation enabled: ${brusselsMetroConfig.trainCount} train(s) × ${brusselsMetroConfig.trainCapacity} pax across ${metroCorridors.length} underground corridor(s) (${metroCorridors.map((c) => `${c.sourceStation.name_fr} → ${c.targetStation.name_fr}`).join(', ')}).`
+        : 'Brussels Metro Evacuation disabled.',
+      elapsedSimSeconds
+    );
+  };
+
+  const handleChangeBrusselsMetroTrainCount = (count: number) => {
+    if (isSimulating) return;
+    const validCount = Math.max(1, Math.round(count));
+    setBrusselsMetroConfig((prev) => ({ ...prev, trainCount: validCount }));
+    if (elapsedSimSeconds > 0) {
+      setHasPendingTopologyChanges(true);
+    }
+  };
+
+  const handleChangeBrusselsMetroTrainCapacity = (capacity: number) => {
+    if (isSimulating) return;
+    const validCap = Math.max(1, Math.round(capacity));
+    setBrusselsMetroConfig((prev) => ({ ...prev, trainCapacity: validCap }));
+    if (elapsedSimSeconds > 0) {
+      setHasPendingTopologyChanges(true);
+    }
+  };
+
   return (
     <div className="cockpit-grid-layout">
       {/* 1. LEFT SIDE PANEL (25% Width x 100% Height, Collapsible) */}
@@ -1165,7 +1616,7 @@ export function App() {
         onSelectPreset={handleSelectPreset}
         sourceAreas={sourceAreas}
         targetAreas={targetAreas}
-        noGoAreas={noGoAreas}
+        avoidAreas={avoidAreas}
         vehicleFleets={vehicleFleets}
         remainingBySource={remainingBySource}
         onAddSourceArea={handleAddSourceArea}
@@ -1174,9 +1625,10 @@ export function App() {
         onAddTargetArea={handleAddTargetArea}
         onUpdateTargetArea={handleUpdateTargetArea}
         onToggleDisableTargetArea={handleToggleDisableTargetArea}
-        onAddNoGoArea={handleAddNoGoArea}
-        onUpdateNoGoArea={handleUpdateNoGoArea}
-        onDeleteNoGoArea={handleDeleteNoGoArea}
+        onDeleteTargetArea={handleDeleteTargetArea}
+        onAddAvoidArea={handleAddAvoidArea}
+        onUpdateAvoidArea={handleUpdateAvoidArea}
+        onDeleteAvoidArea={handleDeleteAvoidArea}
         onAddVehicleFleet={handleAddVehicleFleet}
         onUpdateVehicleFleet={handleUpdateVehicleFleet}
         onDeleteVehicleFleet={handleDeleteVehicleFleet}
@@ -1192,6 +1644,7 @@ export function App() {
           }
         }}
         isSimulating={isSimulating}
+        isSimulationInProgress={isSimulationInProgress}
         simSpeed={simSpeed}
         onChangeSimSpeed={setSimSpeed}
         activeDrawMode={activeDrawMode}
@@ -1218,6 +1671,15 @@ export function App() {
         onFetchGlofasForecast={handleFetchGlofasForecast}
         onToggleGlofasOverlayVisibility={handleToggleGlofasOverlayVisibility}
         onChangeGlofasOverlayOpacity={handleChangeGlofasOverlayOpacity}
+        hasBrusselsAreas={hasBrusselsAreas}
+        brusselsMetroConfig={brusselsMetroConfig}
+        sourceMetroStations={sourceMetroStations}
+        targetMetroStations={targetMetroStations}
+        metroCorridors={metroCorridors}
+        onToggleBrusselsMetroNetworkOverlay={handleToggleBrusselsMetroNetworkOverlay}
+        onToggleUseBrusselsMetroForEvacuation={handleToggleUseBrusselsMetroForEvacuation}
+        onChangeBrusselsMetroTrainCount={handleChangeBrusselsMetroTrainCount}
+        onChangeBrusselsMetroTrainCapacity={handleChangeBrusselsMetroTrainCapacity}
       />
 
       {/* 2. CENTER AREA COLUMN (Dynamic Flex Width) -> TOP MAP (Flex Height) + BOTTOM LOGS (Collapsible) */}
@@ -1228,7 +1690,7 @@ export function App() {
             zoom={mapZoom}
             sourceAreas={sourceAreas}
             targetAreas={targetAreas}
-            noGoAreas={noGoAreas}
+            avoidAreas={avoidAreas}
             vehicleFleets={vehicleFleets}
             computedRoutes={computedRoutes}
             pickupStates={pickupStates}
@@ -1248,6 +1710,10 @@ export function App() {
             onMapViewportChange={(c) => {
               liveViewportPoiRef.current = c;
             }}
+            showBrusselsMetroNetwork={hasBrusselsAreas && brusselsMetroConfig.showNetworkOverlay}
+            brusselsMetroLines={brusselsMetroNetwork.lines}
+            brusselsMetroStations={brusselsMetroNetwork.stations}
+            activeMetroCorridors={activeMetroEvacuationOptions ? metroCorridors : []}
           />
         </div>
 
@@ -1291,7 +1757,7 @@ export function App() {
         simSpeed={simSpeed}
         sourceAreas={sourceAreas}
         targetAreas={targetAreas}
-        noGoAreas={noGoAreas}
+        avoidAreas={avoidAreas}
         vehicleFleets={vehicleFleets}
         computedRoutes={computedRoutes}
         clusters={clusters}

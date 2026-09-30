@@ -23,13 +23,13 @@ export interface TargetArea {
   disabled?: boolean; // When true, receives no more people and is excluded from route computation
 }
 
-export interface NoGoArea {
+export interface AvoidArea {
   id: string;
   name: string;
   polygon: [number, number][]; // Array of [lat, lng]
 }
 
-export type VehicleType = 'Bus' | 'Private Car' | 'Shuttle';
+export type VehicleType = 'Bus' | 'Private Car' | 'Shuttle' | 'Metro';
 
 export interface VehicleFleet {
   id: string;
@@ -38,6 +38,8 @@ export interface VehicleFleet {
   location: [number, number]; // [lat, lng] staging point
   count: number;
   capacityPerUnit: number;
+  loadUnloadTimePerPersonSeconds: number; // Average time in seconds to load or unload 1 person
+  transitSpeedKmh: number; // Vehicle transit speed in km/h (default 25 km/h)
 }
 
 export interface ComputedRoute {
@@ -54,7 +56,7 @@ export interface ComputedRoute {
   distanceMeters: number;
   estimatedDurationSeconds: number;
   assignedPopulation: number;
-  avoidedNoGoNames: string[];
+  avoidedAreaNames: string[];
   isDetour: boolean;
   vehicleFleetId?: string;
   vehicleCountUsed?: number;
@@ -105,6 +107,12 @@ export interface PickupLocationState {
   maxVehicleWaitSeconds: number;
   totalDepartureOccupancyRatioSum: number;
   boardingVehicleInfo?: string; // e.g., "STIB Bus #1 (64% | Wait 06:15/10:00)"
+  isMetro?: boolean;
+  metroLine?: string;
+  metroColor?: string;
+  metroStationName?: string;
+  metroTargetStationName?: string;
+  dropOffLocation?: [number, number];
 }
 
 export interface SourceInternalCluster {
@@ -128,6 +136,8 @@ export interface ActiveVehicleUnit {
   unitCount: number;
   capacityPerUnit: number;
   maxCapacity: number; // unitCount * capacityPerUnit
+  loadUnloadTimePerPersonSeconds: number; // Average time in seconds to load or unload 1 person per vehicle
+  transitSpeedKmh: number; // Configured vehicle transit speed in km/h (default 25 km/h)
   currentOccupancy: number;
   occupancyByBehavior: BehaviorCounts;
   assignedRouteId: string;
@@ -135,8 +145,13 @@ export interface ActiveVehicleUnit {
   sourceId: string;
   targetId: string;
   targetName: string;
-  status: 'to_pickup' | 'waiting_for_80_pct' | 'to_target' | 'completed';
+  status: 'to_pickup' | 'waiting_for_80_pct' | 'to_target' | 'unloading' | 'completed';
   waitingAtPickupSeconds: number; // Elapsed seconds waiting at pickup location (departs at 600s if >=1 passenger)
+  loadingProgressRemainder?: number; // Fractional boarding progress accumulator
+  loadingElapsedSeconds?: number; // Cumulative seconds spent actively loading passengers on current trip
+  unloadingProgressRemainder?: number; // Fractional alighting progress accumulator
+  unloadingElapsedSeconds?: number; // Elapsed seconds spent unloading at Target Shelter
+  unloadingInitialOccupancy?: number; // Occupancy upon arrival at Target Shelter when unloading began
   currentPosition: [number, number];
   progressMeters: number;
   speedMps: number;
@@ -148,6 +163,11 @@ export interface ActiveVehicleUnit {
   postOffloadEvacCoords?: [number, number][];
   postOffloadTargetId?: string;
   postOffloadTargetName?: string;
+  isMetro?: boolean;
+  metroLine?: string;
+  metroColor?: string;
+  sourceStationName?: string;
+  targetStationName?: string;
 }
 
 export interface SimulationStateSnapshot {
@@ -173,7 +193,7 @@ export interface HeatmapPoint {
 
 export type ActiveDrawMode =
   | null
-  | { type: 'source' | 'target' | 'nogo'; points: [number, number][] }
+  | { type: 'source' | 'target' | 'avoid'; points: [number, number][] }
   | { type: 'vehicle'; point: [number, number] | null };
 
 export type PresetScenarioId = 'brussels' | 'paris' | 'custom';
@@ -245,3 +265,53 @@ export interface GlofasForecastState {
   clipMax: number;
   overlays: GlofasForecastOverlay[];
 }
+
+export interface BrusselsMetroLineFeature {
+  id: string;
+  line: string;
+  mode: string;
+  variant: number;
+  color: string;
+  coordinates: [number, number][]; // [lat, lng]
+  segments: [number, number][][];
+}
+
+export interface BrusselsMetroStationFeature {
+  id: string;
+  name_fr: string;
+  name_nl: string;
+  stop_id: string;
+  line: string;
+  lines: string[];
+  position: [number, number]; // [lat, lng]
+}
+
+export interface BrusselsMetroMatchedStation {
+  station: BrusselsMetroStationFeature;
+  areaId: string;
+  areaName: string;
+  areaType: 'source' | 'target';
+  disabled?: boolean;
+}
+
+export interface BrusselsMetroCorridor {
+  id: string;
+  sourceId: string;
+  sourceName: string;
+  sourceStation: BrusselsMetroStationFeature;
+  targetId: string;
+  targetName: string;
+  targetStation: BrusselsMetroStationFeature;
+  lineLabel: string;
+  color: string;
+  coordinates: [number, number][]; // [lat, lng] along metro line(s) from sourceStation -> targetStation
+  distanceMeters: number;
+}
+
+export interface BrusselsMetroConfig {
+  showNetworkOverlay: boolean;
+  useForEvacuation: boolean;
+  trainCount: number;
+  trainCapacity: number;
+}
+

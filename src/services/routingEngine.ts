@@ -2,7 +2,7 @@ import * as turf from '@turf/turf';
 import {
   SourceArea,
   TargetArea,
-  NoGoArea,
+  AvoidArea,
   VehicleFleet,
   ComputedRoute,
   LogEntry,
@@ -33,14 +33,14 @@ export function toTurfPolygon(coords: [number, number][]) {
 }
 
 /**
- * Check if a point ([lat, lng]) lies inside any No-Go polygon
+ * Check if a point ([lat, lng]) lies inside any Avoid Area polygon
  */
-export function isPointInAnyNoGo(pt: [number, number], noGoAreas: NoGoArea[]): boolean {
+export function isPointInAnyAvoidArea(pt: [number, number], avoidAreas: AvoidArea[]): boolean {
   const turfPt = turf.point([pt[1], pt[0]]);
-  for (const nogo of noGoAreas) {
-    if (nogo.polygon.length < 3) continue;
+  for (const avoid of avoidAreas) {
+    if (avoid.polygon.length < 3) continue;
     try {
-      const poly = toTurfPolygon(nogo.polygon);
+      const poly = toTurfPolygon(avoid.polygon);
       if (turf.booleanPointInPolygon(turfPt, poly)) {
         return true;
       }
@@ -52,23 +52,23 @@ export function isPointInAnyNoGo(pt: [number, number], noGoAreas: NoGoArea[]): b
 }
 
 /**
- * Check if a single line segment ([lat1, lng1] -> [lat2, lng2]) intersects a No-Go polygon
+ * Check if a single line segment ([lat1, lng1] -> [lat2, lng2]) intersects an Avoid Area polygon
  */
-export function doesSegmentIntersectNoGo(
+export function doesSegmentIntersectAvoidArea(
   p1: [number, number],
   p2: [number, number],
-  noGo: NoGoArea
+  avoid: AvoidArea
 ): boolean {
-  if (noGo.polygon.length < 3) return false;
+  if (avoid.polygon.length < 3) return false;
   if (p1[0] === p2[0] && p1[1] === p2[1]) {
-    return isPointInAnyNoGo(p1, [noGo]);
+    return isPointInAnyAvoidArea(p1, [avoid]);
   }
   try {
     const seg = turf.lineString([
       [p1[1], p1[0]],
       [p2[1], p2[0]],
     ]);
-    const poly = toTurfPolygon(noGo.polygon);
+    const poly = toTurfPolygon(avoid.polygon);
     return turf.booleanIntersects(seg, poly);
   } catch {
     return false;
@@ -76,15 +76,15 @@ export function doesSegmentIntersectNoGo(
 }
 
 /**
- * Check if a single line segment intersects ANY No-Go polygon
+ * Check if a single line segment intersects ANY Avoid Area polygon
  */
-export function doesSegmentIntersectAnyNoGo(
+export function doesSegmentIntersectAnyAvoidArea(
   p1: [number, number],
   p2: [number, number],
-  noGoAreas: NoGoArea[]
+  avoidAreas: AvoidArea[]
 ): boolean {
-  for (const nogo of noGoAreas) {
-    if (doesSegmentIntersectNoGo(p1, p2, nogo)) {
+  for (const avoid of avoidAreas) {
+    if (doesSegmentIntersectAvoidArea(p1, p2, avoid)) {
       return true;
     }
   }
@@ -92,16 +92,16 @@ export function doesSegmentIntersectAnyNoGo(
 }
 
 /**
- * Check if a polyline ([lat, lng][]) intersects a No-Go polygon
+ * Check if a polyline ([lat, lng][]) intersects an Avoid Area polygon
  */
-export function doesRouteIntersectNoGo(
+export function doesRouteIntersectAvoidArea(
   routeCoords: [number, number][],
-  noGo: NoGoArea
+  avoid: AvoidArea
 ): boolean {
-  if (routeCoords.length < 2 || noGo.polygon.length < 3) return false;
+  if (routeCoords.length < 2 || avoid.polygon.length < 3) return false;
   try {
     const line = turf.lineString(routeCoords.map((c) => [c[1], c[0]]));
-    const poly = toTurfPolygon(noGo.polygon);
+    const poly = toTurfPolygon(avoid.polygon);
     return turf.booleanIntersects(line, poly);
   } catch {
     return false;
@@ -109,30 +109,30 @@ export function doesRouteIntersectNoGo(
 }
 
 /**
- * Return all No-Go areas intersected by a polyline
+ * Return all Avoid Areas intersected by a polyline
  */
-export function findIntersectingNoGoAreas(
+export function findIntersectingAvoidAreas(
   routeCoords: [number, number][],
-  noGoAreas: NoGoArea[]
-): NoGoArea[] {
-  return noGoAreas.filter((nogo) => doesRouteIntersectNoGo(routeCoords, nogo));
+  avoidAreas: AvoidArea[]
+): AvoidArea[] {
+  return avoidAreas.filter((avoid) => doesRouteIntersectAvoidArea(routeCoords, avoid));
 }
 
 /**
- * If a point falls inside a No-Go polygon, project it to the nearest safe exterior position
+ * If a point falls inside an Avoid Area polygon, project it to the nearest safe exterior position
  */
-export function ensurePointOutsideNoGo(
+export function ensurePointOutsideAvoidAreas(
   pt: [number, number],
-  noGoAreas: NoGoArea[]
+  avoidAreas: AvoidArea[]
 ): [number, number] {
-  if (!isPointInAnyNoGo(pt, noGoAreas)) return pt;
+  if (!isPointInAnyAvoidArea(pt, avoidAreas)) return pt;
 
-  const safeCandidates = buildSafeObstacleVertices(noGoAreas);
+  const safeCandidates = buildSafeObstacleVertices(avoidAreas);
   let bestPt: [number, number] = pt;
   let bestDist = Infinity;
 
   for (const cand of safeCandidates) {
-    if (!isPointInAnyNoGo(cand, noGoAreas)) {
+    if (!isPointInAnyAvoidArea(cand, avoidAreas)) {
       const d = turf.distance([pt[1], pt[0]], [cand[1], cand[0]]);
       if (d < bestDist) {
         bestDist = d;
@@ -146,17 +146,17 @@ export function ensurePointOutsideNoGo(
 /**
  * Compute a specific, distinct Pickup Location ([lat, lng]) on/near the perimeter boundary
  * of the Source Area polygon so each route has its own dedicated assembly square,
- * ensuring the pickup location is never placed inside a No-Go zone.
+ * ensuring the pickup location is never placed inside an Avoid Area.
  */
 export function computeSpecificPickupPoint(
   source: SourceArea,
   targetCenter: [number, number],
   slotIndex: number,
-  noGoAreas: NoGoArea[] = []
+  avoidAreas: AvoidArea[] = []
 ): [number, number] {
   const poly = source.polygon;
   const centroid = getPolygonCentroid(poly);
-  if (!poly || poly.length < 3) return ensurePointOutsideNoGo(centroid, noGoAreas);
+  if (!poly || poly.length < 3) return ensurePointOutsideAvoidAreas(centroid, avoidAreas);
 
   // Generate candidate perimeter anchor points (vertices + edge midpoints)
   const anchors: [number, number][] = [];
@@ -174,7 +174,7 @@ export function computeSpecificPickupPoint(
     return dA - dB;
   });
 
-  // Try candidate anchors starting from slotIndex offset, picking the first that does not fall in a No-Go area
+  // Try candidate anchors starting from slotIndex offset, picking the first that does not fall in an Avoid Area
   for (let offset = 0; offset < sortedByTarget.length; offset++) {
     const chosenAnchor =
       sortedByTarget[(slotIndex * 2 + offset) % sortedByTarget.length] || centroid;
@@ -182,28 +182,28 @@ export function computeSpecificPickupPoint(
     const lat = Number((centroid[0] + (chosenAnchor[0] - centroid[0]) * t).toFixed(5));
     const lng = Number((centroid[1] + (chosenAnchor[1] - centroid[1]) * t).toFixed(5));
     const candidate: [number, number] = [lat, lng];
-    if (!isPointInAnyNoGo(candidate, noGoAreas)) {
+    if (!isPointInAnyAvoidArea(candidate, avoidAreas)) {
       return candidate;
     }
   }
 
-  return ensurePointOutsideNoGo(centroid, noGoAreas);
+  return ensurePointOutsideAvoidAreas(centroid, avoidAreas);
 }
 
 /**
- * Build a set of safe exterior obstacle vertices around all No-Go polygons.
+ * Build a set of safe exterior obstacle vertices around all Avoid Area polygons.
  * Uses multi-tier buffered rings and outward vertex offsets so that shortest-path
- * visibility routing can cleanly circumnavigate any convex, concave, or overlapping No-Go zone.
+ * visibility routing can cleanly circumnavigate any convex, concave, or overlapping Avoid Area.
  */
-function buildSafeObstacleVertices(noGoAreas: NoGoArea[]): [number, number][] {
+function buildSafeObstacleVertices(avoidAreas: AvoidArea[]): [number, number][] {
   const vertices: [number, number][] = [];
 
-  for (const nogo of noGoAreas) {
-    if (nogo.polygon.length < 3) continue;
-    const poly = toTurfPolygon(nogo.polygon);
-    const centroid = getPolygonCentroid(nogo.polygon);
+  for (const avoid of avoidAreas) {
+    if (avoid.polygon.length < 3) continue;
+    const poly = toTurfPolygon(avoid.polygon);
+    const centroid = getPolygonCentroid(avoid.polygon);
 
-    // 1. Multi-tier buffered exterior rings around the No-Go polygon (80m and 220m clearance)
+    // 1. Multi-tier buffered exterior rings around the Avoid Area polygon (80m and 220m clearance)
     for (const bufferKm of [0.08, 0.22]) {
       try {
         const buffered = turf.buffer(poly, bufferKm, { units: 'kilometers', steps: 8 });
@@ -220,7 +220,7 @@ function buildSafeObstacleVertices(noGoAreas: NoGoArea[]): [number, number][] {
             const step = Math.max(1, Math.floor(ring.length / 18));
             for (let i = 0; i < ring.length; i += step) {
               const pt: [number, number] = [ring[i][1], ring[i][0]];
-              if (!isPointInAnyNoGo(pt, noGoAreas)) {
+              if (!isPointInAnyAvoidArea(pt, avoidAreas)) {
                 vertices.push(pt);
               }
             }
@@ -232,9 +232,9 @@ function buildSafeObstacleVertices(noGoAreas: NoGoArea[]): [number, number][] {
     }
 
     // 2. Outward-projected vertices & edge midpoints from original polygon
-    for (let i = 0; i < nogo.polygon.length; i++) {
-      const p1 = nogo.polygon[i];
-      const p2 = nogo.polygon[(i + 1) % nogo.polygon.length];
+    for (let i = 0; i < avoid.polygon.length; i++) {
+      const p1 = avoid.polygon[i];
+      const p2 = avoid.polygon[(i + 1) % avoid.polygon.length];
       const mid: [number, number] = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
 
       for (const rawPt of [p1, mid]) {
@@ -246,7 +246,7 @@ function buildSafeObstacleVertices(noGoAreas: NoGoArea[]): [number, number][] {
             rawPt[0] + (dLat / dist) * padDeg,
             rawPt[1] + (dLng / dist) * padDeg,
           ];
-          if (!isPointInAnyNoGo(extPt, noGoAreas)) {
+          if (!isPointInAnyAvoidArea(extPt, avoidAreas)) {
             vertices.push(extPt);
           }
         }
@@ -268,7 +268,7 @@ function buildSafeObstacleVertices(noGoAreas: NoGoArea[]): [number, number][] {
       [(bbox[1] + bbox[3]) / 2, bbox[2] + lngPad],
     ];
     for (const bc of boxCorners) {
-      if (!isPointInAnyNoGo(bc, noGoAreas)) {
+      if (!isPointInAnyAvoidArea(bc, avoidAreas)) {
         vertices.push(bc);
       }
     }
@@ -281,22 +281,22 @@ function buildSafeObstacleVertices(noGoAreas: NoGoArea[]): [number, number][] {
  * Compute the exact shortest collision-free path between `start` and `end`
  * using a Visibility Graph over safe exterior obstacle vertices + Dijkstra's algorithm.
  * Every edge in the returned path is mathematically verified to have ZERO intersection
- * with all No-Go polygons (`doesSegmentIntersectAnyNoGo === false`).
+ * with all Avoid Area polygons (`doesSegmentIntersectAnyAvoidArea === false`).
  */
 export function computeShortestCollisionFreePath(
   start: [number, number],
   end: [number, number],
-  noGoAreas: NoGoArea[],
+  avoidAreas: AvoidArea[],
   sidePreference: 'primary' | 'alternate' = 'primary'
 ): [number, number][] {
-  const safeStart = ensurePointOutsideNoGo(start, noGoAreas);
-  const safeEnd = ensurePointOutsideNoGo(end, noGoAreas);
+  const safeStart = ensurePointOutsideAvoidAreas(start, avoidAreas);
+  const safeEnd = ensurePointOutsideAvoidAreas(end, avoidAreas);
 
-  if (noGoAreas.length === 0 || !doesSegmentIntersectAnyNoGo(safeStart, safeEnd, noGoAreas)) {
+  if (avoidAreas.length === 0 || !doesSegmentIntersectAnyAvoidArea(safeStart, safeEnd, avoidAreas)) {
     return [safeStart, safeEnd];
   }
 
-  const obstacleNodes = buildSafeObstacleVertices(noGoAreas);
+  const obstacleNodes = buildSafeObstacleVertices(avoidAreas);
   const nodes: [number, number][] = [safeStart, ...obstacleNodes, safeEnd];
   const startIdx = 0;
   const endIdx = nodes.length - 1;
@@ -347,8 +347,8 @@ export function computeShortestCollisionFreePath(
 
       if (dist[u] + weight >= dist[v]) continue;
 
-      // Strictly forbid any edge that intersects ANY No-Go polygon
-      if (!doesSegmentIntersectAnyNoGo(uPt, vPt, noGoAreas)) {
+      // Strictly forbid any edge that intersects ANY Avoid Area polygon
+      if (!doesSegmentIntersectAnyAvoidArea(uPt, vPt, avoidAreas)) {
         dist[v] = dist[u] + weight;
         prev[v] = u;
       }
@@ -372,27 +372,27 @@ export function computeShortestCollisionFreePath(
 
 /**
  * Surgically inspect a polyline and replace any segment or contiguous sub-path
- * that enters or crosses any No-Go polygon with the shortest collision-free visibility-graph detour.
- * Guarantees 100% that the returned polyline has ZERO intersections with all No-Go areas.
+ * that enters or crosses any Avoid Area polygon with the shortest collision-free visibility-graph detour.
+ * Guarantees 100% that the returned polyline has ZERO intersections with all Avoid Areas.
  */
-export function enforceStrictNoGoAvoidance(
+export function enforceStrictAvoidAreaAvoidance(
   coords: [number, number][],
-  noGoAreas: NoGoArea[]
+  avoidAreas: AvoidArea[]
 ): [number, number][] {
-  if (noGoAreas.length === 0 || coords.length < 2) return coords;
+  if (avoidAreas.length === 0 || coords.length < 2) return coords;
 
-  // Ensure all vertices are outside No-Go areas first
-  let current: [number, number][] = coords.map((pt) => ensurePointOutsideNoGo(pt, noGoAreas));
+  // Ensure all vertices are outside Avoid Areas first
+  let current: [number, number][] = coords.map((pt) => ensurePointOutsideAvoidAreas(pt, avoidAreas));
 
-  // If the entire polyline already has zero intersections with all No-Go areas, return immediately
-  if (findIntersectingNoGoAreas(current, noGoAreas).length === 0) {
+  // If the entire polyline already has zero intersections with all Avoid Areas, return immediately
+  if (findIntersectingAvoidAreas(current, avoidAreas).length === 0) {
     return current;
   }
 
-  // Iteratively repair any segment that intersects a No-Go area by bridging safe anchors around it
+  // Iteratively repair any segment that intersects an Avoid Area by bridging safe anchors around it
   const maxPasses = 4;
   for (let pass = 0; pass < maxPasses; pass++) {
-    if (findIntersectingNoGoAreas(current, noGoAreas).length === 0) {
+    if (findIntersectingAvoidAreas(current, avoidAreas).length === 0) {
       break;
     }
 
@@ -405,14 +405,14 @@ export function enforceStrictNoGoAvoidance(
 
       if (i === current.length - 1) break;
 
-      // Check if segment (current[i] -> current[i+1]) intersects any No-Go polygon
-      if (doesSegmentIntersectAnyNoGo(current[i], current[i + 1], noGoAreas)) {
+      // Check if segment (current[i] -> current[i+1]) intersects any Avoid Area polygon
+      if (doesSegmentIntersectAnyAvoidArea(current[i], current[i + 1], avoidAreas)) {
         // Look ahead to find the first safe vertex j > i whose onward path clears the obstacle
         let j = i + 1;
         while (
           j < current.length - 1 &&
-          (isPointInAnyNoGo(current[j], noGoAreas) ||
-            doesSegmentIntersectAnyNoGo(current[j], current[j + 1], noGoAreas))
+          (isPointInAnyAvoidArea(current[j], avoidAreas) ||
+            doesSegmentIntersectAnyAvoidArea(current[j], current[j + 1], avoidAreas))
         ) {
           j++;
         }
@@ -422,7 +422,7 @@ export function enforceStrictNoGoAvoidance(
         const entryPt = current[i];
         const exitPt = current[exitIdx];
 
-        const detour = computeShortestCollisionFreePath(entryPt, exitPt, noGoAreas);
+        const detour = computeShortestCollisionFreePath(entryPt, exitPt, avoidAreas);
         // Append interior detour vertices + exitPt
         for (let k = 1; k < detour.length; k++) {
           repaired.push(detour[k]);
@@ -516,49 +516,49 @@ function synthesizeUrbanRoadPath(waypoints: [number, number][]): {
 
 /**
  * Full obstacle-avoiding route generator between `start` and `end`:
- * 1. Computes collision-free visibility waypoints around any No-Go polygons in the corridor.
+ * 1. Computes collision-free visibility waypoints around any Avoid Area polygons in the corridor.
  * 2. Requests an OSRM street route through those waypoints.
- * 3. If OSRM's road geometry still touches/crosses any No-Go polygon, applies
- *    `enforceStrictNoGoAvoidance` so that every segment is 100% outside all No-Go zones.
+ * 3. If OSRM's road geometry still touches/crosses any Avoid Area polygon, applies
+ *    `enforceStrictAvoidAreaAvoidance` so that every segment is 100% outside all Avoid Areas.
  */
 export async function computeObstacleAvoidingRoute(
   start: [number, number],
   end: [number, number],
-  noGoAreas: NoGoArea[],
+  avoidAreas: AvoidArea[],
   sidePreference: 'primary' | 'alternate' = 'primary'
 ): Promise<{
   coordinates: [number, number][];
-  avoidedNoGoNames: string[];
+  avoidedAreaNames: string[];
   isDetour: boolean;
 }> {
-  const safeStart = ensurePointOutsideNoGo(start, noGoAreas);
-  const safeEnd = ensurePointOutsideNoGo(end, noGoAreas);
+  const safeStart = ensurePointOutsideAvoidAreas(start, avoidAreas);
+  const safeEnd = ensurePointOutsideAvoidAreas(end, avoidAreas);
 
   const avoidedSet = new Set<string>();
-  for (const nogo of findIntersectingNoGoAreas([safeStart, safeEnd], noGoAreas)) {
-    avoidedSet.add(nogo.name);
+  for (const avoid of findIntersectingAvoidAreas([safeStart, safeEnd], avoidAreas)) {
+    avoidedSet.add(avoid.name);
   }
 
   // Compute collision-free waypoints via Visibility Graph
   const visWaypoints = computeShortestCollisionFreePath(
     safeStart,
     safeEnd,
-    noGoAreas,
+    avoidAreas,
     sidePreference
   );
 
   // Query OSRM with the visibility waypoints
   const osrmResult = await fetchOSRMRoute(visWaypoints);
-  for (const nogo of findIntersectingNoGoAreas(osrmResult.coordinates, noGoAreas)) {
-    avoidedSet.add(nogo.name);
+  for (const avoid of findIntersectingAvoidAreas(osrmResult.coordinates, avoidAreas)) {
+    avoidedSet.add(avoid.name);
   }
 
-  // Enforce 100% strict No-Go polygon avoidance across every segment of the route
-  const strictCoords = enforceStrictNoGoAvoidance(osrmResult.coordinates, noGoAreas);
+  // Enforce 100% strict Avoid Area polygon avoidance across every segment of the route
+  const strictCoords = enforceStrictAvoidAreaAvoidance(osrmResult.coordinates, avoidAreas);
 
   return {
     coordinates: strictCoords,
-    avoidedNoGoNames: Array.from(avoidedSet),
+    avoidedAreaNames: Array.from(avoidedSet),
     isDetour: avoidedSet.size > 0 || visWaypoints.length > 2,
   };
 }
@@ -582,7 +582,7 @@ export function calculatePathDistanceMeters(coords: [number, number][]): number 
 export async function computeDirectRouteToClosestTarget(
   currentPos: [number, number],
   targetAreas: TargetArea[],
-  noGoAreas: NoGoArea[]
+  avoidAreas: AvoidArea[]
 ): Promise<{ target: TargetArea; coordinates: [number, number][] }> {
   const activeTargets = targetAreas.filter((t) => !t.disabled);
   const candidates = activeTargets.length > 0 ? activeTargets : targetAreas;
@@ -601,7 +601,7 @@ export async function computeDirectRouteToClosestTarget(
   const result = await computeObstacleAvoidingRoute(
     currentPos,
     tgtCenter,
-    noGoAreas,
+    avoidAreas,
     'primary'
   );
 
@@ -620,7 +620,7 @@ export interface RoutingComputationResult {
 export async function computeAllEvacuationRoutes(
   sourceAreas: SourceArea[],
   targetAreas: TargetArea[],
-  noGoAreas: NoGoArea[],
+  avoidAreas: AvoidArea[],
   vehicleFleets: VehicleFleet[]
 ): Promise<RoutingComputationResult> {
   const routes: ComputedRoute[] = [];
@@ -641,7 +641,7 @@ export async function computeAllEvacuationRoutes(
 
   pushLog(
     'ROUTING',
-    `Initiating obstacle-avoiding routing & pickup location establishment across ${sourceAreas.length} source zones, ${activeTargets.length} active shelters (${targetAreas.length - activeTargets.length} disabled), and ${noGoAreas.length} no-go areas.`
+    `Initiating obstacle-avoiding routing & pickup location establishment across ${sourceAreas.length} source zones, ${activeTargets.length} active shelters (${targetAreas.length - activeTargets.length} disabled), and ${avoidAreas.length} avoid areas.`
   );
 
   if (activeTargets.length === 0) {
@@ -684,8 +684,8 @@ export async function computeAllEvacuationRoutes(
 
     // Establish 2 distinct Pickup Locations (Blue Squares) on this Source Area:
     // Pickup #1 (Primary Gate) & Pickup #2 (Secondary Gate)
-    const pickupAlpha = computeSpecificPickupPoint(source, tgtCenter, 0, noGoAreas);
-    const pickupBravo = computeSpecificPickupPoint(source, secTgtCenter, 1, noGoAreas);
+    const pickupAlpha = computeSpecificPickupPoint(source, tgtCenter, 0, avoidAreas);
+    const pickupBravo = computeSpecificPickupPoint(source, secTgtCenter, 1, avoidAreas);
 
     const fleetForAlpha = vehicleFleets[sIdx % Math.max(1, vehicleFleets.length)];
     const fleetForBravo = vehicleFleets[(sIdx + 1) % Math.max(1, vehicleFleets.length)];
@@ -693,20 +693,26 @@ export async function computeAllEvacuationRoutes(
     const depotAlpha = fleetForAlpha ? fleetForAlpha.location : defaultDepot;
     const depotBravo = fleetForBravo ? fleetForBravo.location : defaultDepot;
 
+    const alphaSpeedKmh = Math.max(0.5, fleetForAlpha?.transitSpeedKmh ?? 25);
+    const alphaSpeedMps = (alphaSpeedKmh * 1000) / 3600;
+    const bravoSpeedKmh = Math.max(0.5, fleetForBravo?.transitSpeedKmh ?? 25);
+    const bravoSpeedMps = (bravoSpeedKmh * 1000) / 3600;
+
     // --- CORRIDOR ALPHA (Pickup Alpha -> Primary Target Shelter) ---
     const approachAlpha = await computeObstacleAvoidingRoute(
       depotAlpha,
       pickupAlpha,
-      noGoAreas,
+      avoidAreas,
       'primary'
     );
     const evacAlpha = await computeObstacleAvoidingRoute(
       pickupAlpha,
       tgtCenter,
-      noGoAreas,
+      avoidAreas,
       'primary'
     );
     const alphaDist = calculatePathDistanceMeters(evacAlpha.coordinates);
+    const alphaDurationSec = Math.round(alphaDist / alphaSpeedMps);
 
     routes.push({
       id: `route-${source.id}-alpha`,
@@ -720,32 +726,33 @@ export async function computeAllEvacuationRoutes(
       coordinates: evacAlpha.coordinates,
       approachCoordinates: approachAlpha.coordinates,
       distanceMeters: alphaDist,
-      estimatedDurationSeconds: Math.round(alphaDist / 8.5),
+      estimatedDurationSeconds: alphaDurationSec,
       assignedPopulation: Math.round(source.population * 0.6),
-      avoidedNoGoNames: evacAlpha.avoidedNoGoNames,
+      avoidedAreaNames: evacAlpha.avoidedAreaNames,
       isDetour: evacAlpha.isDetour,
       vehicleFleetId: fleetForAlpha?.id,
     });
 
     pushLog(
       'ROUTING',
-      `Established Pickup Square Alpha [Blue Square] at [${pickupAlpha[0]}, ${pickupAlpha[1]}] on ${source.name} -> ${primaryTarget.name} (${(alphaDist / 1000).toFixed(2)} km, 0 No-Go crossings).`
+      `Established Pickup Square Alpha [Blue Square] at [${pickupAlpha[0]}, ${pickupAlpha[1]}] on ${source.name} -> ${primaryTarget.name} (${(alphaDist / 1000).toFixed(2)} km, est. transit ${Math.floor(alphaDurationSec / 60)}m ${alphaDurationSec % 60}s @ ${alphaSpeedKmh} km/h, 0 Avoid Area crossings).`
     );
 
     // --- CORRIDOR BRAVO (Pickup Bravo -> Secondary Target Shelter) ---
     const approachBravo = await computeObstacleAvoidingRoute(
       depotBravo,
       pickupBravo,
-      noGoAreas,
+      avoidAreas,
       'alternate'
     );
     const evacBravo = await computeObstacleAvoidingRoute(
       pickupBravo,
       secTgtCenter,
-      noGoAreas,
+      avoidAreas,
       'alternate'
     );
     const bravoDist = calculatePathDistanceMeters(evacBravo.coordinates);
+    const bravoDurationSec = Math.round(bravoDist / bravoSpeedMps);
 
     routes.push({
       id: `route-${source.id}-bravo`,
@@ -759,22 +766,22 @@ export async function computeAllEvacuationRoutes(
       coordinates: evacBravo.coordinates,
       approachCoordinates: approachBravo.coordinates,
       distanceMeters: bravoDist,
-      estimatedDurationSeconds: Math.round(bravoDist / 8.5),
+      estimatedDurationSeconds: bravoDurationSec,
       assignedPopulation: source.population - Math.round(source.population * 0.6),
-      avoidedNoGoNames: evacBravo.avoidedNoGoNames,
+      avoidedAreaNames: evacBravo.avoidedAreaNames,
       isDetour: evacBravo.isDetour,
       vehicleFleetId: fleetForBravo?.id,
     });
 
     pushLog(
       'ROUTING',
-      `Established Pickup Square Bravo [Blue Square] at [${pickupBravo[0]}, ${pickupBravo[1]}] on ${source.name} -> ${secondaryTarget.name} (${(bravoDist / 1000).toFixed(2)} km, 0 No-Go crossings).`
+      `Established Pickup Square Bravo [Blue Square] at [${pickupBravo[0]}, ${pickupBravo[1]}] on ${source.name} -> ${secondaryTarget.name} (${(bravoDist / 1000).toFixed(2)} km, est. transit ${Math.floor(bravoDurationSec / 60)}m ${bravoDurationSec % 60}s @ ${bravoSpeedKmh} km/h, 0 Avoid Area crossings).`
     );
   }
 
   pushLog(
     'ROUTING',
-    `Route computation complete: ${routes.length} Blue Square Pickup Locations established across all Source Areas (all routes verified 100% No-Go free).`
+    `Route computation complete: ${routes.length} Blue Square Pickup Locations established across all Source Areas (all routes verified 100% Avoid Area free).`
   );
 
   return { routes, logs };
