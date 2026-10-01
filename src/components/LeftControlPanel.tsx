@@ -49,8 +49,11 @@ import evacLogoUrl from '../../imgs/evac-logo.png';
 interface LeftControlPanelProps {
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
+  presetScenarios: { id: PresetScenarioId; name: string }[];
   selectedPreset: PresetScenarioId;
   onSelectPreset: (preset: PresetScenarioId) => void;
+  showLabels: boolean;
+  onToggleShowLabels: () => void;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
   avoidAreas: AvoidArea[];
@@ -118,8 +121,11 @@ interface LeftControlPanelProps {
 export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   isCollapsed = false,
   onToggleCollapse,
+  presetScenarios,
   selectedPreset,
   onSelectPreset,
+  showLabels,
+  onToggleShowLabels,
   sourceAreas,
   targetAreas,
   avoidAreas,
@@ -205,9 +211,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   const [srcForm, setSrcForm] = useState({
     name: '',
     population: 1000,
-    obedient: 70,
-    autonomous: 20,
-    random: 10,
+    compliant: 70,
+    selfDirected: 20,
+    disoriented: 10,
   });
 
   const [tgtForm, setTgtForm] = useState({
@@ -240,9 +246,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         population: Math.max(0, Number(srcForm.population) || 0),
         polygon: pendingDrawnPolygon,
         behavior: {
-          obedient: Number(srcForm.obedient),
-          autonomous: Number(srcForm.autonomous),
-          random: Number(srcForm.random),
+          compliant: Number(srcForm.compliant),
+          'self-directed': Number(srcForm.selfDirected),
+          disoriented: Number(srcForm.disoriented),
         },
       });
     } else if (pendingDrawnPolygon && activeDrawMode?.type === 'target') {
@@ -288,9 +294,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     setSrcForm({
       name: src.name,
       population: currentRemaining,
-      obedient: src.behavior.obedient,
-      autonomous: src.behavior.autonomous,
-      random: src.behavior.random,
+      compliant: src.behavior.compliant,
+      selfDirected: src.behavior['self-directed'],
+      disoriented: src.behavior.disoriented,
     });
   };
 
@@ -301,9 +307,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
       name: srcForm.name,
       population: Math.max(0, Number(srcForm.population)),
       behavior: {
-        obedient: Number(srcForm.obedient),
-        autonomous: Number(srcForm.autonomous),
-        random: Number(srcForm.random),
+        compliant: Number(srcForm.compliant),
+        'self-directed': Number(srcForm.selfDirected),
+        disoriented: Number(srcForm.disoriented),
       },
     });
     setEditingSourceId(null);
@@ -450,7 +456,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         <p className="brand-subtitle">OSM Tactical Routing & Crowd Simulation</p>
       </header>
 
-      {/* Preset Scenario Selector */}
+      {/* Preset Scenario Selector & Show Labels Toggle */}
       <section className="panel-section scenario-selector-section">
         <label htmlFor="preset-scenario-select" className="section-label">
           PRESET SCENARIO
@@ -462,10 +468,103 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           disabled={isSimulating}
           onChange={(e) => onSelectPreset(e.target.value as PresetScenarioId)}
         >
-          <option value="brussels">Brussels — Capital Region Evacuation</option>
-          <option value="paris">Paris — Seine Bridges Closure Scenario</option>
+          {presetScenarios.map((scenario) => (
+            <option key={scenario.id} value={scenario.id}>
+              {scenario.name}
+            </option>
+          ))}
           <option value="custom">Custom / Blank Scenario</option>
         </select>
+
+        {/* Show Labels On/Off Toggle */}
+        <div
+          style={{
+            marginTop: '10px',
+            paddingTop: '10px',
+            borderTop: '1px solid rgba(148, 163, 184, 0.16)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <label
+            htmlFor="toggle-show-labels"
+            onClick={onToggleShowLabels}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '7px',
+              fontSize: '0.76rem',
+              fontWeight: 700,
+              color: showLabels ? '#f8fafc' : '#94a3b8',
+              cursor: 'pointer',
+              userSelect: 'none',
+            }}
+          >
+            {showLabels ? (
+              <Eye size={14} style={{ color: '#38bdf8' }} />
+            ) : (
+              <EyeOff size={14} style={{ color: '#64748b' }} />
+            )}
+            <span>Show labels</span>
+          </label>
+          <button
+            id="toggle-show-labels"
+            type="button"
+            role="switch"
+            aria-checked={showLabels}
+            onClick={onToggleShowLabels}
+            title={
+              showLabels
+                ? 'Hide area boxes, vehicle fleet boxes, and metro stations on the map'
+                : 'Show area boxes, vehicle fleet boxes, and metro stations on the map'
+            }
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '3px 8px 3px 6px',
+              borderRadius: '999px',
+              border: showLabels
+                ? '1px solid rgba(56, 189, 248, 0.6)'
+                : '1px solid rgba(148, 163, 184, 0.35)',
+              background: showLabels
+                ? 'rgba(14, 165, 233, 0.22)'
+                : 'rgba(15, 23, 42, 0.75)',
+              color: showLabels ? '#38bdf8' : '#94a3b8',
+              fontSize: '0.68rem',
+              fontWeight: 700,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <span
+              style={{
+                width: '24px',
+                height: '13px',
+                borderRadius: '999px',
+                background: showLabels ? '#0284c7' : '#334155',
+                position: 'relative',
+                display: 'inline-block',
+                transition: 'background 0.15s ease',
+              }}
+            >
+              <span
+                style={{
+                  position: 'absolute',
+                  top: '2px',
+                  left: showLabels ? '13px' : '2px',
+                  width: '9px',
+                  height: '9px',
+                  borderRadius: '50%',
+                  background: '#ffffff',
+                  transition: 'left 0.15s ease',
+                }}
+              />
+            </span>
+            <span>{showLabels ? 'ON' : 'OFF'}</span>
+          </button>
+        </div>
       </section>
 
       {/* Top-Justified Stack of 3 Collapsible Sections: 1. Parameters, 2. Execution & Simulation, 3. Space Data */}
@@ -574,44 +673,44 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                   />
                 </div>
                 <div className="form-group">
-                  <label>Behavioral Split (Obedient / Autonomous / Random %)</label>
+                  <label>Behavioral Split (Compliant / Self-Directed / Disoriented %)</label>
                   <div className="behavior-inputs-row">
                     <input
                       type="number"
                       min={0}
                       max={100}
-                      value={srcForm.obedient}
+                      value={srcForm.compliant}
                       onChange={(e) => {
-                        const ob = Number(e.target.value);
-                        const rem = Math.max(0, 100 - ob);
+                        const cp = Number(e.target.value);
+                        const rem = Math.max(0, 100 - cp);
                         setSrcForm({
                           ...srcForm,
-                          obedient: ob,
-                          autonomous: Math.round(rem * 0.65),
-                          random: rem - Math.round(rem * 0.65),
+                          compliant: cp,
+                          selfDirected: Math.round(rem * 0.65),
+                          disoriented: rem - Math.round(rem * 0.65),
                         });
                       }}
-                      title="Obedient %"
+                      title="Compliant %"
                     />
                     <input
                       type="number"
                       min={0}
                       max={100}
-                      value={srcForm.autonomous}
+                      value={srcForm.selfDirected}
                       onChange={(e) => {
-                        const au = Number(e.target.value);
-                        const rd = Math.max(0, 100 - srcForm.obedient - au);
-                        setSrcForm({ ...srcForm, autonomous: au, random: rd });
+                        const sd = Number(e.target.value);
+                        const ds = Math.max(0, 100 - srcForm.compliant - sd);
+                        setSrcForm({ ...srcForm, selfDirected: sd, disoriented: ds });
                       }}
-                      title="Autonomous %"
+                      title="Self-Directed %"
                     />
                     <input
                       type="number"
                       min={0}
                       max={100}
-                      value={srcForm.random}
+                      value={srcForm.disoriented}
                       readOnly
-                      title="Random %"
+                      title="Disoriented %"
                     />
                   </div>
                 </div>
@@ -822,9 +921,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                   setSrcForm({
                     name: `Source Zone #${sourceAreas.length + 1}`,
                     population: 1200,
-                    obedient: 70,
-                    autonomous: 20,
-                    random: 10,
+                    compliant: 70,
+                    selfDirected: 20,
+                    disoriented: 10,
                   });
                   onStartDrawing('source');
                 }}
@@ -865,27 +964,27 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         />
                       </div>
                       <div className="edit-row">
-                        <label>Ob/Au/Rd %:</label>
+                        <label>Cp/Sd/Ds %:</label>
                         <div className="mini-3-inputs">
                           <input
                             type="number"
-                            value={srcForm.obedient}
+                            value={srcForm.compliant}
                             onChange={(e) =>
-                              setSrcForm({ ...srcForm, obedient: Number(e.target.value) })
+                              setSrcForm({ ...srcForm, compliant: Number(e.target.value) })
                             }
                           />
                           <input
                             type="number"
-                            value={srcForm.autonomous}
+                            value={srcForm.selfDirected}
                             onChange={(e) =>
-                              setSrcForm({ ...srcForm, autonomous: Number(e.target.value) })
+                              setSrcForm({ ...srcForm, selfDirected: Number(e.target.value) })
                             }
                           />
                           <input
                             type="number"
-                            value={srcForm.random}
+                            value={srcForm.disoriented}
                             onChange={(e) =>
-                              setSrcForm({ ...srcForm, random: Number(e.target.value) })
+                              setSrcForm({ ...srcForm, disoriented: Number(e.target.value) })
                             }
                           />
                         </div>
@@ -975,8 +1074,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           Remaining: <strong>{remainingPeople.toLocaleString()}</strong> people
                         </span>
                         <span className="metric-pill behavior-pill">
-                          Ob {src.behavior.obedient}% · Au {src.behavior.autonomous}% · Rd{' '}
-                          {src.behavior.random}%
+                          Cp {src.behavior.compliant}% · Sd {src.behavior['self-directed']}% · Ds{' '}
+                          {src.behavior.disoriented}%
                         </span>
                       </div>
                     </>

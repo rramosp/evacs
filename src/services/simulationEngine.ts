@@ -27,7 +27,7 @@ export interface MetroEvacuationOptions {
  * Create a zeroed BehaviorCounts object
  */
 export function createZeroBehaviorCounts(): BehaviorCounts {
-  return { obedient: 0, autonomous: 0, random: 0 };
+  return { compliant: 0, 'self-directed': 0, disoriented: 0 };
 }
 
 /**
@@ -40,8 +40,8 @@ export function computeBehaviorCountsFromSources(sourceAreas: SourceArea[]): Beh
     if (totalPop === 0) return;
 
     const numClusters = Math.min(75, Math.max(1, totalPop));
-    const obCount = Math.round((numClusters * src.behavior.obedient) / 100);
-    const auCount = Math.round((numClusters * src.behavior.autonomous) / 100);
+    const cpCount = Math.round((numClusters * src.behavior.compliant) / 100);
+    const sdCount = Math.round((numClusters * src.behavior['self-directed']) / 100);
 
     const baseHeadcount = Math.floor(totalPop / numClusters);
     const remainder = totalPop % numClusters;
@@ -50,12 +50,12 @@ export function computeBehaviorCountsFromSources(sourceAreas: SourceArea[]): Beh
       const headcount = baseHeadcount + (i < remainder ? 1 : 0);
       if (headcount <= 0) continue;
 
-      if (i < obCount) {
-        counts.obedient += headcount;
-      } else if (i < obCount + auCount) {
-        counts.autonomous += headcount;
+      if (i < cpCount) {
+        counts.compliant += headcount;
+      } else if (i < cpCount + sdCount) {
+        counts['self-directed'] += headcount;
       } else {
-        counts.random += headcount;
+        counts.disoriented += headcount;
       }
     }
   });
@@ -64,23 +64,23 @@ export function computeBehaviorCountsFromSources(sourceAreas: SourceArea[]): Beh
 
 /**
  * Allocate `boardedNow` passengers proportionally from `waiting` BehaviorCounts
- * while guaranteeing exact integer sum (`taken.obedient + taken.autonomous + taken.random === boardedNow`)
+ * while guaranteeing exact integer sum (`taken.compliant + taken['self-directed'] + taken.disoriented === boardedNow`)
  * and `0 <= taken[b] <= waiting[b]`.
  */
 function allocateBoardedByBehavior(waiting: BehaviorCounts, boardedNow: number): BehaviorCounts {
-  const totalAvail = waiting.obedient + waiting.autonomous + waiting.random;
+  const totalAvail = waiting.compliant + waiting['self-directed'] + waiting.disoriented;
   if (boardedNow <= 0 || totalAvail <= 0) {
     return createZeroBehaviorCounts();
   }
   if (boardedNow >= totalAvail) {
     return {
-      obedient: waiting.obedient,
-      autonomous: waiting.autonomous,
-      random: waiting.random,
+      compliant: waiting.compliant,
+      'self-directed': waiting['self-directed'],
+      disoriented: waiting.disoriented,
     };
   }
 
-  const keys: PopulationBehaviorType[] = ['obedient', 'autonomous', 'random'];
+  const keys: PopulationBehaviorType[] = ['compliant', 'self-directed', 'disoriented'];
   const exactShares = keys.map((k) => ({
     key: k,
     avail: waiting[k],
@@ -133,9 +133,9 @@ export function createInitialTelemetryStats(
     });
   } else {
     const computed = computeBehaviorCountsFromSources(sourceAreas);
-    initialByBehavior.obedient = computed.obedient;
-    initialByBehavior.autonomous = computed.autonomous;
-    initialByBehavior.random = computed.random;
+    initialByBehavior.compliant = computed.compliant;
+    initialByBehavior['self-directed'] = computed['self-directed'];
+    initialByBehavior.disoriented = computed.disoriented;
   }
 
   return {
@@ -286,41 +286,140 @@ function getEmptyApproachAlongExistingRoute(
 }
 
 /**
- * Sample a point inside a polygon deterministically using Halton-like sequence
+ * Sample `count` points spatially uniformly inside a polygon using a 2D Roberts R2
+ * low-discrepancy sequence over the polygon interior refined by discrete Centroidal
+ * Voronoi Tessellation (Lloyd relaxation) in isotropic metric coordinates.
  */
-function samplePointInsidePolygon(
+function sampleUniformPointsInsidePolygon(
   polygonCoords: [number, number][],
-  index: number
-): [number, number] {
+  count: number
+): [number, number][] {
+  if (count <= 0) return [];
   const centroid = getPolygonCentroid(polygonCoords);
-  if (polygonCoords.length < 3) return centroid;
+  if (!polygonCoords || polygonCoords.length < 3) {
+    return Array.from({ length: count }, () => [...centroid] as [number, number]);
+  }
 
   try {
     const poly = toTurfPolygon(polygonCoords);
     const bbox = turf.bbox(poly); // [minLng, minLat, maxLng, maxLat]
+    const minLng = bbox[0];
+    const minLat = bbox[1];
+    const maxLng = bbox[2];
+    const maxLat = bbox[3];
+    const spanLat = maxLat - minLat;
+    const spanLng = maxLng - minLng;
 
-    for (let attempt = 0; attempt < 25; attempt++) {
-      const seed = index * 17 + attempt * 31 + 1;
-      const u = ((seed * 16807) % 2147483647) / 2147483647;
-      const v = (((seed + 7) * 48271) % 2147483647) / 2147483647;
+    if (spanLat > 0 && spanLng > 0) {
+      const cosLat = Math.max(0.1, Math.cos(((minLat + maxLat) * 0.5 * Math.PI) / 180));
 
-      const lat = bbox[1] + u * (bbox[3] - bbox[1]);
-      const lng = bbox[0] + v * (bbox[2] - bbox[0]);
+      // 2D Roberts R2 low-discrepancy quasi-random sequence constants (plastic constant phi_2)
+      const phi2 = 1.324717957244746;
+      const alpha1 = 1 / phi2;
+      const alpha2 = 1 / (phi2 * phi2);
 
-      if (turf.booleanPointInPolygon(turf.point([lng, lat]), poly)) {
-        return [lat, lng];
+      const targetSamples = Math.max(count * 8, 450);
+      const maxAttempts = targetSamples * 12;
+      const samples: [number, number][] = [];
+
+      for (let k = 1; k <= maxAttempts && samples.length < targetSamples; k++) {
+        const u = (0.5 + k * alpha1) % 1;
+        const v = (0.5 + k * alpha2) % 1;
+        const lat = minLat + u * spanLat;
+        const lng = minLng + v * spanLng;
+        if (turf.booleanPointInPolygon(turf.point([lng, lat]), poly)) {
+          samples.push([lat, lng]);
+        }
+      }
+
+      if (samples.length >= count) {
+        // Initialize cluster centers from the first `count` R2 low-discrepancy interior points
+        // (naturally uncorrelated in index order, keeping behavioral groups uniformly interleaved)
+        const centers: [number, number][] = [];
+        for (let i = 0; i < count; i++) {
+          centers.push([samples[i][0], samples[i][1]]);
+        }
+
+        const assignment = new Int32Array(samples.length);
+
+        // 3 iterations of discrete Centroidal Voronoi (Lloyd) relaxation for even spatial spacing
+        for (let iter = 0; iter < 3; iter++) {
+          const sumLat = new Float64Array(count);
+          const sumLng = new Float64Array(count);
+          const cellCounts = new Int32Array(count);
+
+          for (let s = 0; s < samples.length; s++) {
+            const sLat = samples[s][0];
+            const sLng = samples[s][1];
+            let bestIdx = 0;
+            let bestDistSq = Infinity;
+            for (let c = 0; c < count; c++) {
+              const dLat = sLat - centers[c][0];
+              const dLng = (sLng - centers[c][1]) * cosLat;
+              const dSq = dLat * dLat + dLng * dLng;
+              if (dSq < bestDistSq) {
+                bestDistSq = dSq;
+                bestIdx = c;
+              }
+            }
+            assignment[s] = bestIdx;
+            sumLat[bestIdx] += sLat;
+            sumLng[bestIdx] += sLng;
+            cellCounts[bestIdx] += 1;
+          }
+
+          for (let c = 0; c < count; c++) {
+            if (cellCounts[c] <= 0) continue;
+            const meanLat = sumLat[c] / cellCounts[c];
+            const meanLng = sumLng[c] / cellCounts[c];
+
+            if (turf.booleanPointInPolygon(turf.point([meanLng, meanLat]), poly)) {
+              centers[c] = [meanLat, meanLng];
+            } else {
+              // Concave boundary fallback: snap to the interior sample in cell `c` closest to the cell mean
+              let bestSampleLat = centers[c][0];
+              let bestSampleLng = centers[c][1];
+              let bestDistSq = Infinity;
+              for (let s = 0; s < samples.length; s++) {
+                if (assignment[s] !== c) continue;
+                const dLat = samples[s][0] - meanLat;
+                const dLng = (samples[s][1] - meanLng) * cosLat;
+                const dSq = dLat * dLat + dLng * dLng;
+                if (dSq < bestDistSq) {
+                  bestDistSq = dSq;
+                  bestSampleLat = samples[s][0];
+                  bestSampleLng = samples[s][1];
+                }
+              }
+              centers[c] = [bestSampleLat, bestSampleLng];
+            }
+          }
+        }
+
+        return centers;
+      } else if (samples.length > 0) {
+        return Array.from(
+          { length: count },
+          (_, i) => [...samples[i % samples.length]] as [number, number]
+        );
       }
     }
   } catch {
-    // Fallback to centroid interpolation
+    // Fallback below
   }
 
-  const corner = polygonCoords[index % polygonCoords.length];
-  const t = 0.25 + ((index * 13) % 55) / 100;
-  return [
-    centroid[0] + (corner[0] - centroid[0]) * t,
-    centroid[1] + (corner[1] - centroid[1]) * t,
-  ];
+  // Fallback: evenly distributed around full perimeter with area-uniform radial factor
+  return Array.from({ length: count }, (_, i) => {
+    const vertexIdx =
+      Math.floor((i * polygonCoords.length) / Math.max(1, count)) % polygonCoords.length;
+    const corner = polygonCoords[vertexIdx];
+    const radialU = ((i + 0.5) * 0.61803398875) % 1;
+    const t = 0.15 + 0.75 * Math.sqrt(radialU);
+    return [
+      centroid[0] + (corner[0] - centroid[0]) * t,
+      centroid[1] + (corner[1] - centroid[1]) * t,
+    ] as [number, number];
+  });
 }
 
 /**
@@ -427,7 +526,7 @@ export function generateHeatmapFromState(
         lat: v.currentPosition[0],
         lng: v.currentPosition[1],
         intensity,
-        behavior: 'obedient',
+        behavior: 'compliant',
       });
     });
 
@@ -441,7 +540,7 @@ export function generateHeatmapFromState(
         lat: centroid[0],
         lng: centroid[1],
         intensity,
-        behavior: 'obedient',
+        behavior: 'compliant',
       });
     }
   });
@@ -451,8 +550,9 @@ export function generateHeatmapFromState(
 
 /**
  * Helper to generate internal clusters for a list of Source Areas
+ * with spatially uniform distribution across each Source Area polygon.
  */
-function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalCluster[] {
+export function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalCluster[] {
   const clusters: SourceInternalCluster[] = [];
 
   sourceAreas.forEach((src) => {
@@ -460,26 +560,43 @@ function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalClust
     if (totalPop === 0) return;
 
     const numClusters = Math.min(75, Math.max(1, totalPop));
-    const obCount = Math.round((numClusters * src.behavior.obedient) / 100);
-    const auCount = Math.round((numClusters * src.behavior.autonomous) / 100);
+    const cpCount = Math.round((numClusters * src.behavior.compliant) / 100);
+    const sdCount = Math.round((numClusters * src.behavior['self-directed']) / 100);
 
     const baseHeadcount = Math.floor(totalPop / numClusters);
     const remainder = totalPop % numClusters;
+
+    const uniformPositions = sampleUniformPointsInsidePolygon(src.polygon, numClusters);
 
     for (let i = 0; i < numClusters; i++) {
       const headcount = baseHeadcount + (i < remainder ? 1 : 0);
 
       if (headcount <= 0) continue;
 
-      let behavior: PopulationBehaviorType = 'random';
-      if (i < obCount) {
-        behavior = 'obedient';
-      } else if (i < obCount + auCount) {
-        behavior = 'autonomous';
+      let behavior: PopulationBehaviorType = 'disoriented';
+      if (i < cpCount) {
+        behavior = 'compliant';
+      } else if (i < cpCount + sdCount) {
+        behavior = 'self-directed';
       }
 
-      const startPos = samplePointInsidePolygon(src.polygon, i);
-      const nearestEdgeIdx = i % Math.max(1, src.polygon.length);
+      const startPos = uniformPositions[i] || getPolygonCentroid(src.polygon);
+
+      // Find the perimeter vertex closest to startPos so self-directed walkers join the nearest boundary edge
+      let nearestEdgeIdx = 0;
+      let nearestDistSq = Infinity;
+      for (let vIdx = 0; vIdx < src.polygon.length; vIdx++) {
+        const dLat = src.polygon[vIdx][0] - startPos[0];
+        const dLng = src.polygon[vIdx][1] - startPos[1];
+        const dSq = dLat * dLat + dLng * dLng;
+        if (dSq < nearestDistSq) {
+          nearestDistSq = dSq;
+          nearestEdgeIdx = vIdx;
+        }
+      }
+
+      const initialSide: 1 | -1 = i % 2 === 0 ? 1 : -1;
+      const initialTackDeg = 36 + ((i * 19) % 28); // 36 deg to 63 deg
 
       clusters.push({
         id: `cluster-${src.id}-${i}-${Date.now()}`,
@@ -490,7 +607,11 @@ function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalClust
         targetPickupId: null,
         perimeterEdgeIndex: nearestEdgeIdx,
         perimeterProgress: 0,
-        randomHeadingRad: ((i * 73) % 360) * (Math.PI / 180),
+        disorientedHeadingRad: ((i * 73) % 360) * (Math.PI / 180),
+        zigZagSide: initialSide,
+        zigZagTimerSeconds: 3.0 + ((i * 11) % 6),
+        zigZagAngleOffsetRad: initialSide * ((initialTackDeg * Math.PI) / 180),
+        isReversingBrief: false,
         status: 'moving_in_zone',
       });
     }
@@ -944,7 +1065,7 @@ export function reconcileSimulationOnRestart(
         speedMps: updatedSpeedMps,
         occupancyByBehavior: veh.occupancyByBehavior
           ? { ...veh.occupancyByBehavior }
-          : { obedient: veh.currentOccupancy, autonomous: 0, random: 0 },
+          : { compliant: veh.currentOccupancy, 'self-directed': 0, disoriented: 0 },
         status: preserveUnloadingAtSameTarget ? 'unloading' : 'to_target',
         waitingAtPickupSeconds: 0,
         loadingProgressRemainder: 0,
@@ -1105,27 +1226,27 @@ export function reconcileSimulationOnRestart(
   const inTransitByBehavior = createZeroBehaviorCounts();
   updatedVehicles.forEach((v) => {
     if (v.currentOccupancy > 0 && v.occupancyByBehavior) {
-      inTransitByBehavior.obedient += v.occupancyByBehavior.obedient;
-      inTransitByBehavior.autonomous += v.occupancyByBehavior.autonomous;
-      inTransitByBehavior.random += v.occupancyByBehavior.random;
+      inTransitByBehavior.compliant += v.occupancyByBehavior.compliant;
+      inTransitByBehavior['self-directed'] += v.occupancyByBehavior['self-directed'];
+      inTransitByBehavior.disoriented += v.occupancyByBehavior.disoriented;
     }
   });
 
   const baseTelemetry = existingTelemetryStats || createInitialTelemetryStats(sourceAreas, clusters);
   const reconciledTelemetry: SimulationTelemetryStats = {
     initialByBehavior: {
-      obedient:
-        baseTelemetry.evacuatedByBehavior.obedient +
-        inTransitByBehavior.obedient +
-        newClustersByBehavior.obedient,
-      autonomous:
-        baseTelemetry.evacuatedByBehavior.autonomous +
-        inTransitByBehavior.autonomous +
-        newClustersByBehavior.autonomous,
-      random:
-        baseTelemetry.evacuatedByBehavior.random +
-        inTransitByBehavior.random +
-        newClustersByBehavior.random,
+      compliant:
+        baseTelemetry.evacuatedByBehavior.compliant +
+        inTransitByBehavior.compliant +
+        newClustersByBehavior.compliant,
+      'self-directed':
+        baseTelemetry.evacuatedByBehavior['self-directed'] +
+        inTransitByBehavior['self-directed'] +
+        newClustersByBehavior['self-directed'],
+      disoriented:
+        baseTelemetry.evacuatedByBehavior.disoriented +
+        inTransitByBehavior.disoriented +
+        newClustersByBehavior.disoriented,
     },
     evacuatedByBehavior: { ...baseTelemetry.evacuatedByBehavior },
     evacuatedPersonSecondsByBehavior: { ...baseTelemetry.evacuatedPersonSecondsByBehavior },
@@ -1158,17 +1279,91 @@ export function reconcileSimulationOnRestart(
 }
 
 /**
+ * Strictly enforce that a cluster's next position stays inside its initial designated Source Area polygon.
+ * If `candidatePos` steps outside `srcTurfPoly`, attempts angular deflections along the interior boundary,
+ * inward reflection toward `interiorTarget`, and fractional steps before falling back to `prevPos`.
+ */
+function ensurePointInsideSourcePolygon(
+  prevPos: [number, number],
+  candidatePos: [number, number],
+  srcTurfPoly: ReturnType<typeof toTurfPolygon> | undefined,
+  interiorTarget: [number, number]
+): { position: [number, number]; bounced: boolean } {
+  if (!srcTurfPoly) {
+    return { position: candidatePos, bounced: false };
+  }
+
+  try {
+    if (turf.booleanPointInPolygon(turf.point([candidatePos[1], candidatePos[0]]), srcTurfPoly)) {
+      return { position: candidatePos, bounced: false };
+    }
+
+    const dLat = candidatePos[0] - prevPos[0];
+    const dLng = candidatePos[1] - prevPos[1];
+    const cosLat = Math.max(0.1, Math.cos((prevPos[0] * Math.PI) / 180));
+
+    // 1. Try inward reflection with gentle bias toward interiorTarget
+    const reflLat =
+      prevPos[0] - dLat * 0.65 + (interiorTarget[0] - prevPos[0]) * 0.14;
+    const reflLng =
+      prevPos[1] - dLng * 0.65 + (interiorTarget[1] - prevPos[1]) * 0.14;
+    if (turf.booleanPointInPolygon(turf.point([reflLng, reflLat]), srcTurfPoly)) {
+      return { position: [reflLat, reflLng], bounced: true };
+    }
+
+    // 2. Try rotated deflections so clusters near a concave boundary slide smoothly inside the Source Area
+    const stepLat = dLat;
+    const stepLngScaled = dLng * cosLat;
+    for (const deg of [35, -35, 65, -65, 95, -95, 130, -130, 165]) {
+      const rad = (deg * Math.PI) / 180;
+      const c = Math.cos(rad);
+      const s = Math.sin(rad);
+      const rotLat = stepLat * c - stepLngScaled * s;
+      const rotLng = (stepLat * s + stepLngScaled * c) / cosLat;
+      const candLat = prevPos[0] + rotLat * 0.8;
+      const candLng = prevPos[1] + rotLng * 0.8;
+      if (turf.booleanPointInPolygon(turf.point([candLng, candLat]), srcTurfPoly)) {
+        return { position: [candLat, candLng], bounced: true };
+      }
+    }
+
+    // 3. Try fractional step along prevPos -> candidatePos or prevPos -> interiorTarget
+    for (const alpha of [0.5, 0.25, 0.1]) {
+      const subLat = prevPos[0] + dLat * alpha;
+      const subLng = prevPos[1] + dLng * alpha;
+      if (turf.booleanPointInPolygon(turf.point([subLng, subLat]), srcTurfPoly)) {
+        return { position: [subLat, subLng], bounced: true };
+      }
+    }
+
+    for (const beta of [0.08, 0.2]) {
+      const inLat = prevPos[0] + (interiorTarget[0] - prevPos[0]) * beta;
+      const inLng = prevPos[1] + (interiorTarget[1] - prevPos[1]) * beta;
+      if (turf.booleanPointInPolygon(turf.point([inLng, inLat]), srcTurfPoly)) {
+        return { position: [inLat, inLng], bounced: true };
+      }
+    }
+  } catch {
+    // Fallback to prevPos below
+  }
+
+  return { position: prevPos, bounced: true };
+}
+
+/**
  * Step simulation forward by `deltaSimSeconds` implementing:
- * 1. Obedient population moving immediately to closest pickup location
- * 2. Random population diffusing inside Source Area via true 2D Brownian motion (independent Gaussian random walk)
+ * 1. Compliant population moving immediately to closest pickup location (strictly within Source Area)
+ * 2. Disoriented population diffusing inside Source Area via true 2D Brownian motion (independent Gaussian random walk)
  *    until within capture range of a pickup location, at which point they direct themselves straight to it
- * 3. Autonomous population wandering along Source Area perimeter limits until reaching a pickup location
- * 4. Vehicles waiting at pickup locations until EITHER:
+ * 3. Self-Directed population moving towards the closest pickup point in a random zig-zag pattern,
+ *    sometimes walking in the opposite direction for very short periods of time (strictly within Source Area)
+ * 4. All populations always stay within their initial designated Source Areas
+ * 5. Vehicles waiting at pickup locations until EITHER:
  *    - Occupancy reaches >= 80%, OR
  *    - Waiting time reaches 10 minutes (600s) (or Metro platform dispatch cadence for Metro Trains)
  *    Whichever happens first, departing to Target Area provided there is at least 1 passenger onboard!
- * 5. When vehicles depart empty to pick up population, they ALWAYS follow the existing computed route polyline!
- * 6. Dynamic heatmap updating (hotter around pickup locations as queues build, cooler over time as source empties)
+ * 6. When vehicles depart empty to pick up population, they ALWAYS follow the existing computed route polyline!
+ * 7. Dynamic heatmap updating (hotter around pickup locations as queues build, cooler over time as source empties)
  */
 export function stepSimulationState(
   prevState: SimulationStateSnapshot,
@@ -1208,9 +1403,21 @@ export function stepSimulationState(
   });
 
   const sourceMap = new Map<string, SourceArea>();
-  sourceAreas.forEach((s) => sourceMap.set(s.id, s));
+  const sourceTurfPolyMap = new Map<string, ReturnType<typeof toTurfPolygon>>();
+  const sourceCentroidMap = new Map<string, [number, number]>();
+  sourceAreas.forEach((s) => {
+    sourceMap.set(s.id, s);
+    sourceCentroidMap.set(s.id, getPolygonCentroid(s.polygon));
+    if (s.polygon && s.polygon.length >= 3) {
+      try {
+        sourceTurfPolyMap.set(s.id, toTurfPolygon(s.polygon));
+      } catch {
+        // Ignore invalid polygon
+      }
+    }
+  });
 
-  // Speed of pedestrians moving inside Source Area (scaled so Obedient arrive quickly and Random/Autonomous trickle in over minutes)
+  // Speed of pedestrians moving inside Source Area (scaled so Compliant arrive quickly and Disoriented/Self-Directed trickle in over minutes)
   const walkSpeedMetersPerSec = 3.2;
 
   // --- STEP 1: Move internal Source Area crowd clusters ---
@@ -1219,7 +1426,8 @@ export function stepSimulationState(
       return cluster;
     }
 
-    const src = sourceMap.get(cluster.sourceId);
+    const srcTurfPoly = sourceTurfPolyMap.get(cluster.sourceId);
+    const srcCentroid = sourceCentroidMap.get(cluster.sourceId) || cluster.position;
     const allPickupsInZone = Array.from(pickupMap.values()).filter(
       (p) => p.sourceId === cluster.sourceId
     );
@@ -1259,47 +1467,68 @@ export function stepSimulationState(
       updatedTelemetry.pickupArrivalPersonSecondsByBehavior[cluster.behavior] +=
         cluster.headcount * elapsedSimSeconds;
 
+      const safeArrivalPos = ensurePointInsideSourcePolygon(
+        cluster.position,
+        closest.pickup.location,
+        srcTurfPoly,
+        srcCentroid
+      ).position;
+
       return {
         ...cluster,
-        position: [...closest.pickup.location] as [number, number],
+        position: safeArrivalPos,
         status: 'waiting_at_pickup' as const,
         targetPickupId: closest.pickup.id,
       };
     }
 
-    // --- BEHAVIOR 1: OBEDIENT ---
-    // Immediately go straight to the closest pickup location
-    if (cluster.behavior === 'obedient') {
+    // --- BEHAVIOR 1: COMPLIANT ---
+    // Immediately go straight to the closest pickup location (always remaining inside the Source Area)
+    if (cluster.behavior === 'compliant') {
       const stepDist = walkSpeedMetersPerSec * deltaSimSeconds;
       const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
-      const nextLat =
+      const rawLat =
         cluster.position[0] + (closest.pickup.location[0] - cluster.position[0]) * ratio;
-      const nextLng =
+      const rawLng =
         cluster.position[1] + (closest.pickup.location[1] - cluster.position[1]) * ratio;
+
+      const { position: safePos } = ensurePointInsideSourcePolygon(
+        cluster.position,
+        [rawLat, rawLng],
+        srcTurfPoly,
+        srcCentroid
+      );
 
       return {
         ...cluster,
-        position: [nextLat, nextLng] as [number, number],
+        position: safePos,
         targetPickupId: closest.pickup.id,
       };
     }
 
-    // --- BEHAVIOR 2: RANDOM (2D BROWNIAN MOTION) ---
+    // --- BEHAVIOR 2: DISORIENTED (2D BROWNIAN MOTION) ---
     // Diffuse via true stochastic 2D Brownian motion (independent zero-mean Gaussian displacements at every tick)
-    // until within capture distance of a pickup point, then direct straight to it!
-    if (cluster.behavior === 'random') {
+    // until within capture distance of a pickup point, then direct straight to it (always staying inside Source Area)!
+    if (cluster.behavior === 'disoriented') {
       const captureDistMeters = closest.pickup.isMetro ? 75.0 : 50.0;
       if (closest.distMeters <= captureDistMeters) {
         const stepDist = walkSpeedMetersPerSec * 1.15 * deltaSimSeconds;
         const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
-        const nextLat =
+        const rawLat =
           cluster.position[0] + (closest.pickup.location[0] - cluster.position[0]) * ratio;
-        const nextLng =
+        const rawLng =
           cluster.position[1] + (closest.pickup.location[1] - cluster.position[1]) * ratio;
+
+        const { position: safePos } = ensurePointInsideSourcePolygon(
+          cluster.position,
+          [rawLat, rawLng],
+          srcTurfPoly,
+          srcCentroid
+        );
 
         return {
           ...cluster,
-          position: [nextLat, nextLng] as [number, number],
+          position: safePos,
           targetPickupId: closest.pickup.id,
         };
       } else {
@@ -1337,103 +1566,105 @@ export function stepSimulationState(
           candidateLng += (closest.pickup.location[1] - cluster.position[1]) * driftRatio;
         }
 
-        // Reflect Brownian step back inside polygon if it crosses the boundary (without persistent straight-line drift)
-        if (src && src.polygon.length >= 3) {
-          try {
-            const poly = toTurfPolygon(src.polygon);
-            if (!turf.booleanPointInPolygon(turf.point([candidateLng, candidateLat]), poly)) {
-              const targetRef = closest.pickup.isMetro
-                ? closest.pickup.location
-                : getPolygonCentroid(src.polygon);
-              candidateLat =
-                cluster.position[0] - dLat * 0.65 + (targetRef[0] - cluster.position[0]) * 0.12;
-              candidateLng =
-                cluster.position[1] - dLng * 0.65 + (targetRef[1] - cluster.position[1]) * 0.12;
-            }
-          } catch {
-            // Ignore turf error
-          }
-        }
+        const targetRef = closest.pickup.isMetro ? closest.pickup.location : srcCentroid;
+        const { position: safePos } = ensurePointInsideSourcePolygon(
+          cluster.position,
+          [candidateLat, candidateLng],
+          srcTurfPoly,
+          targetRef
+        );
 
         return {
           ...cluster,
-          position: [candidateLat, candidateLng] as [number, number],
+          position: safePos,
         };
       }
     }
 
-    // --- BEHAVIOR 3: AUTONOMOUS ---
-    // Wander around the LIMITS (perimeter boundary) of the source area until stumbling upon a pickup location
-    // (or curve inward from the perimeter when the pickup is an interior Metro Station)
-    if (cluster.behavior === 'autonomous') {
-      const captureDistMeters = closest.pickup.isMetro ? 75.0 : 55.0;
-      if (closest.distMeters <= captureDistMeters) {
-        const stepDist = walkSpeedMetersPerSec * 1.1 * deltaSimSeconds;
-        const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
-        const nextLat =
-          cluster.position[0] + (closest.pickup.location[0] - cluster.position[0]) * ratio;
-        const nextLng =
-          cluster.position[1] + (closest.pickup.location[1] - cluster.position[1]) * ratio;
+    // --- BEHAVIOR 3: SELF-DIRECTED (RANDOM ZIG-ZAG TOWARDS CLOSEST PICKUP WITH BRIEF OPPOSITE-DIRECTION WALKS) ---
+    // Move towards the closest pickup point in a random zig-zag pattern, sometimes walking in the
+    // opposite direction for very short periods of time, while always staying within the Source Area.
+    if (cluster.behavior === 'self-directed') {
+      const metersPerDegLat = 111320;
+      const metersPerDegLng = Math.max(
+        1000,
+        111320 * Math.cos((cluster.position[0] * Math.PI) / 180)
+      );
 
-        return {
-          ...cluster,
-          position: [nextLat, nextLng] as [number, number],
-          targetPickupId: closest.pickup.id,
-        };
+      const toPickupNorth =
+        (closest.pickup.location[0] - cluster.position[0]) * metersPerDegLat;
+      const toPickupEast =
+        (closest.pickup.location[1] - cluster.position[1]) * metersPerDegLng;
+      const targetBearingRad = Math.atan2(toPickupEast, toPickupNorth);
+
+      let zigZagSide: 1 | -1 = cluster.zigZagSide ?? 1;
+      let zigZagTimerSeconds = (cluster.zigZagTimerSeconds ?? 0) - deltaSimSeconds;
+      let zigZagAngleOffsetRad =
+        cluster.zigZagAngleOffsetRad ?? zigZagSide * ((45 * Math.PI) / 180);
+      let isReversingBrief = Boolean(cluster.isReversingBrief);
+
+      if (zigZagTimerSeconds <= 0) {
+        // Switch lateral zig-zag tack (left <-> right)
+        zigZagSide = zigZagSide === 1 ? -1 : 1;
+
+        // Sometimes (~20% of legs when not already reversing and >24m from pickup),
+        // walk in the opposite direction (away from pickup) for a very short period (1.6s to 3.8s)
+        if (!isReversingBrief && closest.distMeters > 24 && Math.random() < 0.20) {
+          isReversingBrief = true;
+          zigZagTimerSeconds = 1.6 + Math.random() * 2.2;
+          const revCantRad = zigZagSide * (((15 + Math.random() * 30) * Math.PI) / 180);
+          zigZagAngleOffsetRad = Math.PI + revCantRad;
+        } else {
+          isReversingBrief = false;
+          zigZagTimerSeconds = 3.8 + Math.random() * 5.2;
+          const tackAngleDeg = 35 + Math.random() * 30; // 35 deg to 65 deg zig-zag tack
+          zigZagAngleOffsetRad = zigZagSide * ((tackAngleDeg * Math.PI) / 180);
+        }
       }
 
-      if (src && src.polygon.length >= 3) {
-        const poly = src.polygon;
-        const pStart = poly[cluster.perimeterEdgeIndex % poly.length];
-        const pEnd = poly[(cluster.perimeterEdgeIndex + 1) % poly.length];
+      // Damp lateral offset slightly only when right on the doorstep (<22m) so the zig-zag converges into the pickup
+      const effectiveOffsetRad =
+        closest.distMeters <= 22 && !isReversingBrief
+          ? zigZagAngleOffsetRad * 0.4
+          : zigZagAngleOffsetRad;
 
-        const edgeDistMeters =
-          turf.distance([pStart[1], pStart[0]], [pEnd[1], pEnd[0]], { units: 'kilometers' }) *
-          1000;
-        const stepMeters = walkSpeedMetersPerSec * 0.85 * deltaSimSeconds;
-        const progressDelta = edgeDistMeters > 0 ? stepMeters / edgeDistMeters : 0.15;
+      // Add organic random angular jitter on each step
+      const stepJitterRad = (Math.random() - 0.5) * 0.22;
+      const headingRad = targetBearingRad + effectiveOffsetRad + stepJitterRad;
 
-        let nextProgress = cluster.perimeterProgress + progressDelta;
-        let nextEdgeIdx = cluster.perimeterEdgeIndex;
+      const stepDistMeters =
+        walkSpeedMetersPerSec * (isReversingBrief ? 0.85 : 0.95) * deltaSimSeconds;
+      const dNorthMeters = stepDistMeters * Math.cos(headingRad);
+      const dEastMeters = stepDistMeters * Math.sin(headingRad);
 
-        if (nextProgress >= 1.0) {
-          nextProgress = nextProgress - 1.0;
-          nextEdgeIdx = (cluster.perimeterEdgeIndex + 1) % poly.length;
-        }
+      const candidateLat = cluster.position[0] + dNorthMeters / metersPerDegLat;
+      const candidateLng = cluster.position[1] + dEastMeters / metersPerDegLng;
 
-        const edgeA = poly[nextEdgeIdx];
-        const edgeB = poly[(nextEdgeIdx + 1) % poly.length];
-        const perimLat = edgeA[0] + (edgeB[0] - edgeA[0]) * nextProgress;
-        const perimLng = edgeA[1] + (edgeB[1] - edgeA[1]) * nextProgress;
+      const targetRef = closest.pickup.isMetro ? closest.pickup.location : srcCentroid;
+      const { position: safePos, bounced } = ensurePointInsideSourcePolygon(
+        cluster.position,
+        [candidateLat, candidateLng],
+        srcTurfPoly,
+        targetRef
+      );
 
-        if (closest.pickup.isMetro) {
-          // Interior Metro Station: follow a curved path guided by the perimeter while steadily converging on the Metro Station
-          const stepToMetro = walkSpeedMetersPerSec * 0.9 * deltaSimSeconds;
-          const directRatio = Math.min(1.0, stepToMetro / Math.max(1, closest.distMeters));
-          const directLat =
-            cluster.position[0] + (closest.pickup.location[0] - cluster.position[0]) * directRatio;
-          const directLng =
-            cluster.position[1] + (closest.pickup.location[1] - cluster.position[1]) * directRatio;
-
-          return {
-            ...cluster,
-            position: [directLat, directLng] as [number, number],
-            perimeterEdgeIndex: nextEdgeIdx,
-            perimeterProgress: nextProgress,
-            targetPickupId: closest.pickup.id,
-          };
-        }
-
-        const nextLat = cluster.position[0] * 0.35 + perimLat * 0.65;
-        const nextLng = cluster.position[1] * 0.35 + perimLng * 0.65;
-
-        return {
-          ...cluster,
-          position: [nextLat, nextLng] as [number, number],
-          perimeterEdgeIndex: nextEdgeIdx,
-          perimeterProgress: nextProgress,
-        };
+      if (bounced) {
+        // Flip tack away from boundary and cancel any outward reversal
+        zigZagSide = zigZagSide === 1 ? -1 : 1;
+        isReversingBrief = false;
+        zigZagAngleOffsetRad = zigZagSide * ((38 * Math.PI) / 180);
+        zigZagTimerSeconds = Math.max(2.5, zigZagTimerSeconds);
       }
+
+      return {
+        ...cluster,
+        position: safePos,
+        zigZagSide,
+        zigZagTimerSeconds,
+        zigZagAngleOffsetRad,
+        isReversingBrief,
+        targetPickupId: closest.pickup.id,
+      };
     }
 
     return cluster;
@@ -1615,23 +1846,23 @@ export function stepSimulationState(
                 transferCount
               );
               otherPickup.waitingPopulation -= transferCount;
-              otherPickup.waitingByBehavior.obedient = Math.max(
+              otherPickup.waitingByBehavior.compliant = Math.max(
                 0,
-                otherPickup.waitingByBehavior.obedient - transferredByBehavior.obedient
+                otherPickup.waitingByBehavior.compliant - transferredByBehavior.compliant
               );
-              otherPickup.waitingByBehavior.autonomous = Math.max(
+              otherPickup.waitingByBehavior['self-directed'] = Math.max(
                 0,
-                otherPickup.waitingByBehavior.autonomous - transferredByBehavior.autonomous
+                otherPickup.waitingByBehavior['self-directed'] - transferredByBehavior['self-directed']
               );
-              otherPickup.waitingByBehavior.random = Math.max(
+              otherPickup.waitingByBehavior.disoriented = Math.max(
                 0,
-                otherPickup.waitingByBehavior.random - transferredByBehavior.random
+                otherPickup.waitingByBehavior.disoriented - transferredByBehavior.disoriented
               );
 
               pickup.waitingPopulation += transferCount;
-              pickup.waitingByBehavior.obedient += transferredByBehavior.obedient;
-              pickup.waitingByBehavior.autonomous += transferredByBehavior.autonomous;
-              pickup.waitingByBehavior.random += transferredByBehavior.random;
+              pickup.waitingByBehavior.compliant += transferredByBehavior.compliant;
+              pickup.waitingByBehavior['self-directed'] += transferredByBehavior['self-directed'];
+              pickup.waitingByBehavior.disoriented += transferredByBehavior.disoriented;
             }
           }
         }
@@ -1669,28 +1900,28 @@ export function stepSimulationState(
           );
 
           veh.currentOccupancy += boardedNow;
-          veh.occupancyByBehavior.obedient += boardedBreakdown.obedient;
-          veh.occupancyByBehavior.autonomous += boardedBreakdown.autonomous;
-          veh.occupancyByBehavior.random += boardedBreakdown.random;
+          veh.occupancyByBehavior.compliant += boardedBreakdown.compliant;
+          veh.occupancyByBehavior['self-directed'] += boardedBreakdown['self-directed'];
+          veh.occupancyByBehavior.disoriented += boardedBreakdown.disoriented;
 
           pickup.waitingPopulation -= boardedNow;
-          pickup.waitingByBehavior.obedient = Math.max(
+          pickup.waitingByBehavior.compliant = Math.max(
             0,
-            pickup.waitingByBehavior.obedient - boardedBreakdown.obedient
+            pickup.waitingByBehavior.compliant - boardedBreakdown.compliant
           );
-          pickup.waitingByBehavior.autonomous = Math.max(
+          pickup.waitingByBehavior['self-directed'] = Math.max(
             0,
-            pickup.waitingByBehavior.autonomous - boardedBreakdown.autonomous
+            pickup.waitingByBehavior['self-directed'] - boardedBreakdown['self-directed']
           );
-          pickup.waitingByBehavior.random = Math.max(
+          pickup.waitingByBehavior.disoriented = Math.max(
             0,
-            pickup.waitingByBehavior.random - boardedBreakdown.random
+            pickup.waitingByBehavior.disoriented - boardedBreakdown.disoriented
           );
 
           pickup.totalBoardedCount += boardedNow;
-          pickup.boardedByBehavior.obedient += boardedBreakdown.obedient;
-          pickup.boardedByBehavior.autonomous += boardedBreakdown.autonomous;
-          pickup.boardedByBehavior.random += boardedBreakdown.random;
+          pickup.boardedByBehavior.compliant += boardedBreakdown.compliant;
+          pickup.boardedByBehavior['self-directed'] += boardedBreakdown['self-directed'];
+          pickup.boardedByBehavior.disoriented += boardedBreakdown.disoriented;
         }
       } else {
         veh.loadingProgressRemainder = 0;
@@ -1827,7 +2058,7 @@ export function stepSimulationState(
           updatedTargetOccupancies[veh.targetId] =
             (updatedTargetOccupancies[veh.targetId] || 0) + veh.currentOccupancy;
 
-          (['obedient', 'autonomous', 'random'] as PopulationBehaviorType[]).forEach((beh) => {
+          (['compliant', 'self-directed', 'disoriented'] as PopulationBehaviorType[]).forEach((beh) => {
             const countB = veh.occupancyByBehavior[beh] || 0;
             updatedTelemetry.evacuatedByBehavior[beh] += countB;
             updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] +=
@@ -1835,9 +2066,9 @@ export function stepSimulationState(
           });
 
           pickup.evacuatedCount += veh.currentOccupancy;
-          pickup.evacuatedByBehavior.obedient += veh.occupancyByBehavior.obedient;
-          pickup.evacuatedByBehavior.autonomous += veh.occupancyByBehavior.autonomous;
-          pickup.evacuatedByBehavior.random += veh.occupancyByBehavior.random;
+          pickup.evacuatedByBehavior.compliant += veh.occupancyByBehavior.compliant;
+          pickup.evacuatedByBehavior['self-directed'] += veh.occupancyByBehavior['self-directed'];
+          pickup.evacuatedByBehavior.disoriented += veh.occupancyByBehavior.disoriented;
 
           newLogs.push(
             `${veh.fleetName} arrived at ${veh.targetName} (${distKmStr} km @ ${transitSpeedKmh} km/h), offloading ${veh.currentOccupancy.toLocaleString()} evacuees safely.`
@@ -1903,24 +2134,24 @@ export function stepSimulationState(
         );
 
         veh.currentOccupancy -= unloadedNow;
-        veh.occupancyByBehavior.obedient = Math.max(
+        veh.occupancyByBehavior.compliant = Math.max(
           0,
-          veh.occupancyByBehavior.obedient - unloadedBreakdown.obedient
+          veh.occupancyByBehavior.compliant - unloadedBreakdown.compliant
         );
-        veh.occupancyByBehavior.autonomous = Math.max(
+        veh.occupancyByBehavior['self-directed'] = Math.max(
           0,
-          veh.occupancyByBehavior.autonomous - unloadedBreakdown.autonomous
+          veh.occupancyByBehavior['self-directed'] - unloadedBreakdown['self-directed']
         );
-        veh.occupancyByBehavior.random = Math.max(
+        veh.occupancyByBehavior.disoriented = Math.max(
           0,
-          veh.occupancyByBehavior.random - unloadedBreakdown.random
+          veh.occupancyByBehavior.disoriented - unloadedBreakdown.disoriented
         );
 
         updatedTargetOccupancies[veh.targetId] =
           (updatedTargetOccupancies[veh.targetId] || 0) + unloadedNow;
 
         // Credit evacuated counts & cumulative person-seconds by behavior as evacuees step off into shelter
-        (['obedient', 'autonomous', 'random'] as PopulationBehaviorType[]).forEach((beh) => {
+        (['compliant', 'self-directed', 'disoriented'] as PopulationBehaviorType[]).forEach((beh) => {
           const countB = unloadedBreakdown[beh] || 0;
           updatedTelemetry.evacuatedByBehavior[beh] += countB;
           updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] +=
@@ -1929,9 +2160,9 @@ export function stepSimulationState(
 
         // Credit pickup location shelter delivery statistics
         pickup.evacuatedCount += unloadedNow;
-        pickup.evacuatedByBehavior.obedient += unloadedBreakdown.obedient;
-        pickup.evacuatedByBehavior.autonomous += unloadedBreakdown.autonomous;
-        pickup.evacuatedByBehavior.random += unloadedBreakdown.random;
+        pickup.evacuatedByBehavior.compliant += unloadedBreakdown.compliant;
+        pickup.evacuatedByBehavior['self-directed'] += unloadedBreakdown['self-directed'];
+        pickup.evacuatedByBehavior.disoriented += unloadedBreakdown.disoriented;
       }
 
       if (veh.currentOccupancy <= 0) {

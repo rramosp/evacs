@@ -58,20 +58,20 @@ const BEHAVIOR_LABELS: Record<
   PopulationBehaviorType,
   { title: string; subtitle: string; color: string; badgeBg: string }
 > = {
-  obedient: {
-    title: 'Obedient',
+  compliant: {
+    title: 'Compliant',
     subtitle: 'Direct to Closest Pickup Location',
     color: '#38bdf8',
     badgeBg: 'rgba(56, 189, 248, 0.16)',
   },
-  autonomous: {
-    title: 'Autonomous',
-    subtitle: 'Perimeter Boundary Exploration',
+  'self-directed': {
+    title: 'Self-Directed',
+    subtitle: 'Random Zig-Zag to Closest Pickup (Brief Reversals)',
     color: '#fbbf24',
     badgeBg: 'rgba(251, 191, 36, 0.16)',
   },
-  random: {
-    title: 'Random',
+  disoriented: {
+    title: 'Disoriented',
     subtitle: '2D Brownian Motion Diffusion',
     color: '#f472b6',
     badgeBg: 'rgba(244, 114, 182, 0.16)',
@@ -109,7 +109,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
 
   if (!isOpen) return null;
 
-  const behaviors: PopulationBehaviorType[] = ['obedient', 'autonomous', 'random'];
+  const behaviors: PopulationBehaviorType[] = ['compliant', 'self-directed', 'disoriented'];
 
   // 1. Compute live population by behavior in each state
   const movingInZoneByBehavior: BehaviorCounts = createZeroBehaviorCounts();
@@ -122,9 +122,9 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
   const waitingInQueueByBehavior: BehaviorCounts = createZeroBehaviorCounts();
   pickupStates.forEach((p) => {
     if (p.waitingByBehavior) {
-      waitingInQueueByBehavior.obedient += p.waitingByBehavior.obedient || 0;
-      waitingInQueueByBehavior.autonomous += p.waitingByBehavior.autonomous || 0;
-      waitingInQueueByBehavior.random += p.waitingByBehavior.random || 0;
+      waitingInQueueByBehavior.compliant += p.waitingByBehavior.compliant || 0;
+      waitingInQueueByBehavior['self-directed'] += p.waitingByBehavior['self-directed'] || 0;
+      waitingInQueueByBehavior.disoriented += p.waitingByBehavior.disoriented || 0;
     }
   });
 
@@ -134,13 +134,13 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
   vehicles.forEach((v) => {
     const occ = v.occupancyByBehavior || createZeroBehaviorCounts();
     if (v.status === 'waiting_for_80_pct' && v.currentOccupancy > 0) {
-      boardingInVehiclesByBehavior.obedient += occ.obedient || 0;
-      boardingInVehiclesByBehavior.autonomous += occ.autonomous || 0;
-      boardingInVehiclesByBehavior.random += occ.random || 0;
+      boardingInVehiclesByBehavior.compliant += occ.compliant || 0;
+      boardingInVehiclesByBehavior['self-directed'] += occ['self-directed'] || 0;
+      boardingInVehiclesByBehavior.disoriented += occ.disoriented || 0;
     } else if ((v.status === 'to_target' || v.status === 'unloading') && v.currentOccupancy > 0) {
-      inTransitByBehavior.obedient += occ.obedient || 0;
-      inTransitByBehavior.autonomous += occ.autonomous || 0;
-      inTransitByBehavior.random += occ.random || 0;
+      inTransitByBehavior.compliant += occ.compliant || 0;
+      inTransitByBehavior['self-directed'] += occ['self-directed'] || 0;
+      inTransitByBehavior.disoriented += occ.disoriented || 0;
     }
   });
 
@@ -150,44 +150,46 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
   const fallbackSourceByBehavior = computeBehaviorCountsFromSources(sourceAreas);
 
   const waitingAtPickupsByBehavior: BehaviorCounts = {
-    obedient: waitingInQueueByBehavior.obedient + boardingInVehiclesByBehavior.obedient,
-    autonomous: waitingInQueueByBehavior.autonomous + boardingInVehiclesByBehavior.autonomous,
-    random: waitingInQueueByBehavior.random + boardingInVehiclesByBehavior.random,
+    compliant: waitingInQueueByBehavior.compliant + boardingInVehiclesByBehavior.compliant,
+    'self-directed':
+      waitingInQueueByBehavior['self-directed'] + boardingInVehiclesByBehavior['self-directed'],
+    disoriented: waitingInQueueByBehavior.disoriented + boardingInVehiclesByBehavior.disoriented,
   };
 
   const notEvacuatedByBehavior: BehaviorCounts = hasActiveSimulationEntities
     ? {
-        obedient:
-          movingInZoneByBehavior.obedient +
-          waitingAtPickupsByBehavior.obedient +
-          inTransitByBehavior.obedient,
-        autonomous:
-          movingInZoneByBehavior.autonomous +
-          waitingAtPickupsByBehavior.autonomous +
-          inTransitByBehavior.autonomous,
-        random:
-          movingInZoneByBehavior.random +
-          waitingAtPickupsByBehavior.random +
-          inTransitByBehavior.random,
+        compliant:
+          movingInZoneByBehavior.compliant +
+          waitingAtPickupsByBehavior.compliant +
+          inTransitByBehavior.compliant,
+        'self-directed':
+          movingInZoneByBehavior['self-directed'] +
+          waitingAtPickupsByBehavior['self-directed'] +
+          inTransitByBehavior['self-directed'],
+        disoriented:
+          movingInZoneByBehavior.disoriented +
+          waitingAtPickupsByBehavior.disoriented +
+          inTransitByBehavior.disoriented,
       }
     : fallbackSourceByBehavior;
 
   const evacuatedByBehavior: BehaviorCounts = telemetryStats?.evacuatedByBehavior || {
-    obedient: 0,
-    autonomous: 0,
-    random: 0,
+    compliant: 0,
+    'self-directed': 0,
+    disoriented: 0,
   };
 
   const initialByBehavior: BehaviorCounts = {
-    obedient: evacuatedByBehavior.obedient + notEvacuatedByBehavior.obedient,
-    autonomous: evacuatedByBehavior.autonomous + notEvacuatedByBehavior.autonomous,
-    random: evacuatedByBehavior.random + notEvacuatedByBehavior.random,
+    compliant: evacuatedByBehavior.compliant + notEvacuatedByBehavior.compliant,
+    'self-directed':
+      evacuatedByBehavior['self-directed'] + notEvacuatedByBehavior['self-directed'],
+    disoriented: evacuatedByBehavior.disoriented + notEvacuatedByBehavior.disoriented,
   };
 
   const totalNotEvacuated =
-    notEvacuatedByBehavior.obedient +
-    notEvacuatedByBehavior.autonomous +
-    notEvacuatedByBehavior.random;
+    notEvacuatedByBehavior.compliant +
+    notEvacuatedByBehavior['self-directed'] +
+    notEvacuatedByBehavior.disoriented;
   const totalInitialPopulation = totalEvacuated + totalNotEvacuated;
   const overallEvacuatedPct =
     totalInitialPopulation > 0 ? (totalEvacuated / totalInitialPopulation) * 100 : 0;
@@ -203,9 +205,9 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
       : 240;
 
   const estWalkTimeByBehavior: Record<PopulationBehaviorType, number> = {
-    obedient: 115,
-    autonomous: 245,
-    random: 340,
+    compliant: 115,
+    'self-directed': 245,
+    disoriented: 340,
   };
 
   const getBehaviorMeanEvacTime = (
@@ -239,33 +241,33 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
   };
 
   const behaviorTimeStats = {
-    obedient: getBehaviorMeanEvacTime('obedient'),
-    autonomous: getBehaviorMeanEvacTime('autonomous'),
-    random: getBehaviorMeanEvacTime('random'),
+    compliant: getBehaviorMeanEvacTime('compliant'),
+    'self-directed': getBehaviorMeanEvacTime('self-directed'),
+    disoriented: getBehaviorMeanEvacTime('disoriented'),
   };
 
   const totalEvacPersonSeconds =
-    (telemetryStats?.evacuatedPersonSecondsByBehavior?.obedient || 0) +
-    (telemetryStats?.evacuatedPersonSecondsByBehavior?.autonomous || 0) +
-    (telemetryStats?.evacuatedPersonSecondsByBehavior?.random || 0);
+    (telemetryStats?.evacuatedPersonSecondsByBehavior?.compliant || 0) +
+    (telemetryStats?.evacuatedPersonSecondsByBehavior?.['self-directed'] || 0) +
+    (telemetryStats?.evacuatedPersonSecondsByBehavior?.disoriented || 0);
 
   const totalEvacTrackedCount =
-    evacuatedByBehavior.obedient +
-    evacuatedByBehavior.autonomous +
-    evacuatedByBehavior.random;
+    evacuatedByBehavior.compliant +
+    evacuatedByBehavior['self-directed'] +
+    evacuatedByBehavior.disoriented;
 
   const overallMeanEvacTimeSec =
     totalEvacTrackedCount > 0 ? totalEvacPersonSeconds / totalEvacTrackedCount : null;
 
   const totalPickupArrivedCount =
-    (telemetryStats?.pickupArrivedByBehavior?.obedient || 0) +
-    (telemetryStats?.pickupArrivedByBehavior?.autonomous || 0) +
-    (telemetryStats?.pickupArrivedByBehavior?.random || 0);
+    (telemetryStats?.pickupArrivedByBehavior?.compliant || 0) +
+    (telemetryStats?.pickupArrivedByBehavior?.['self-directed'] || 0) +
+    (telemetryStats?.pickupArrivedByBehavior?.disoriented || 0);
 
   const totalPickupPersonSeconds =
-    (telemetryStats?.pickupArrivalPersonSecondsByBehavior?.obedient || 0) +
-    (telemetryStats?.pickupArrivalPersonSecondsByBehavior?.autonomous || 0) +
-    (telemetryStats?.pickupArrivalPersonSecondsByBehavior?.random || 0);
+    (telemetryStats?.pickupArrivalPersonSecondsByBehavior?.compliant || 0) +
+    (telemetryStats?.pickupArrivalPersonSecondsByBehavior?.['self-directed'] || 0) +
+    (telemetryStats?.pickupArrivalPersonSecondsByBehavior?.disoriented || 0);
 
   const overallMeanPickupTimeSec =
     totalPickupArrivedCount > 0 ? totalPickupPersonSeconds / totalPickupArrivedCount : null;
@@ -744,9 +746,9 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                   </span>
                 </div>
                 <div style={{ fontSize: '0.71rem', color: '#cbd5e1', marginTop: '4px' }}>
-                  Ob: <strong>{notEvacuatedByBehavior.obedient.toLocaleString()}</strong> &bull; Au:{' '}
-                  <strong>{notEvacuatedByBehavior.autonomous.toLocaleString()}</strong> &bull; Rd:{' '}
-                  <strong>{notEvacuatedByBehavior.random.toLocaleString()}</strong>
+                  Cp: <strong>{notEvacuatedByBehavior.compliant.toLocaleString()}</strong> &bull; Sd:{' '}
+                  <strong>{notEvacuatedByBehavior['self-directed'].toLocaleString()}</strong> &bull; Ds:{' '}
+                  <strong>{notEvacuatedByBehavior.disoriented.toLocaleString()}</strong>
                 </div>
               </div>
 
@@ -839,7 +841,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
             </div>
           </section>
 
-          {/* 2. Population Behaviour Breakdown Table (Obedient, Autonomous, Random) */}
+          {/* 2. Population Behaviour Breakdown Table (Compliant, Self-Directed, Disoriented) */}
           <section
             style={{
               background: 'rgba(15, 23, 42, 0.78)',
@@ -872,7 +874,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                 </h3>
               </div>
               <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
-                Detailed by Behavioural Profile: Obedient, Autonomous, and Random
+                Detailed by Behavioural Profile: Compliant, Self-Directed, and Disoriented
               </span>
             </div>
 
@@ -1096,16 +1098,16 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                     >
                       Zone:{' '}
                       {(hasActiveSimulationEntities
-                        ? movingInZoneByBehavior.obedient +
-                          movingInZoneByBehavior.autonomous +
-                          movingInZoneByBehavior.random
+                        ? movingInZoneByBehavior.compliant +
+                          movingInZoneByBehavior['self-directed'] +
+                          movingInZoneByBehavior.disoriented
                         : totalInitialPopulation
                       ).toLocaleString()}{' '}
                       | Pickup:{' '}
                       {(
-                        waitingAtPickupsByBehavior.obedient +
-                        waitingAtPickupsByBehavior.autonomous +
-                        waitingAtPickupsByBehavior.random
+                        waitingAtPickupsByBehavior.compliant +
+                        waitingAtPickupsByBehavior['self-directed'] +
+                        waitingAtPickupsByBehavior.disoriented
                       ).toLocaleString()}{' '}
                       | Transit: {totalInTransit.toLocaleString()}
                     </td>
@@ -1273,7 +1275,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                               {row.totalBoardedAtPickup.toLocaleString()} pax
                             </div>
                             <div style={{ fontSize: '0.66rem', color: '#94a3b8' }}>
-                              Ob:{bb.obedient} Au:{bb.autonomous} Rd:{bb.random}
+                              Cp:{bb.compliant} Sd:{bb['self-directed']} Ds:{bb.disoriented}
                             </div>
                           </td>
                           <td

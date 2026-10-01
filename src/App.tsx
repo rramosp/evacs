@@ -22,7 +22,7 @@ import {
   BrusselsMetroStationFeature,
   BrusselsMetroConfig,
 } from './types/evacuation';
-import { PRESET_SCENARIOS } from './data/presets';
+import { PresetScenarioData } from './data/presets';
 import { BRUSSELS_METRO_INITIAL_DATA } from './data/brusselsMetroData';
 import {
   hasAnyAreaInBrussels,
@@ -48,29 +48,24 @@ import { RightTelemetryPanel } from './components/RightTelemetryPanel';
 import { SimulationReportModal } from './components/SimulationReportModal';
 
 export function App() {
-  // Preset scenario selection
-  const [selectedPreset, setSelectedPreset] = useState<PresetScenarioId>('brussels');
-  const [mapCenter, setMapCenter] = useState<[number, number]>(PRESET_SCENARIOS.brussels.center);
-  const [mapZoom, setMapZoom] = useState<number>(PRESET_SCENARIOS.brussels.zoom);
+  // Dynamic preset scenarios loaded exclusively at runtime from data/scenarios/*.pkl
+  const [presetScenarios, setPresetScenarios] = useState<
+    Record<string, PresetScenarioData>
+  >({});
 
-  // Core domain entities
-  const [sourceAreas, setSourceAreas] = useState<SourceArea[]>(
-    PRESET_SCENARIOS.brussels.sourceAreas
-  );
-  const [targetAreas, setTargetAreas] = useState<TargetArea[]>(
-    PRESET_SCENARIOS.brussels.targetAreas
-  );
-  const [avoidAreas, setAvoidAreas] = useState<AvoidArea[]>(
-    PRESET_SCENARIOS.brussels.avoidAreas
-  );
-  const [vehicleFleets, setVehicleFleets] = useState<VehicleFleet[]>(
-    PRESET_SCENARIOS.brussels.vehicleFleets
-  );
+  // Preset scenario selection
+  const [selectedPreset, setSelectedPreset] = useState<PresetScenarioId>('custom');
+  const [mapCenter, setMapCenter] = useState<[number, number]>([50.8503, 4.3517]);
+  const [mapZoom, setMapZoom] = useState<number>(12);
+
+  // Core domain entities (populated dynamically from /api/scenarios on startup)
+  const [sourceAreas, setSourceAreas] = useState<SourceArea[]>([]);
+  const [targetAreas, setTargetAreas] = useState<TargetArea[]>([]);
+  const [avoidAreas, setAvoidAreas] = useState<AvoidArea[]>([]);
+  const [vehicleFleets, setVehicleFleets] = useState<VehicleFleet[]>([]);
 
   // Track baseline initial populations for each Source Area so Reset / Post-Finish Compute restores them
-  const baselinePopulationsRef = useRef<Record<string, number>>(
-    Object.fromEntries(PRESET_SCENARIOS.brussels.sourceAreas.map((s) => [s.id, s.population]))
-  );
+  const baselinePopulationsRef = useRef<Record<string, number>>({});
 
   // Track whether topology/population/vehicle edits occurred while paused
   const [hasPendingTopologyChanges, setHasPendingTopologyChanges] = useState<boolean>(false);
@@ -92,7 +87,7 @@ export function App() {
   const [vehicles, setVehicles] = useState<ActiveVehicleUnit[]>([]);
   const [heatmapPoints, setHeatmapPoints] = useState<HeatmapPoint[]>([]);
   const [telemetryStats, setTelemetryStats] = useState<SimulationTelemetryStats>(() =>
-    createInitialTelemetryStats(PRESET_SCENARIOS.brussels.sourceAreas)
+    createInitialTelemetryStats([])
   );
 
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
@@ -110,10 +105,11 @@ export function App() {
   // System & Simulation Logs
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
-  // Independent Cockpit Panel Collapse States
+  // Independent Cockpit Panel Collapse States & Map Labels Visibility
   const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState<boolean>(false);
   const [isBottomPanelCollapsed, setIsBottomPanelCollapsed] = useState<boolean>(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState<boolean>(false);
+  const [showLabels, setShowLabels] = useState<boolean>(true);
 
   // Brussels Metro Network data loaded from data/brussels_metro_lines.parquet and data/brussels_metro_stations.parquet
   const [brusselsMetroNetwork, setBrusselsMetroNetwork] = useState<{
@@ -130,6 +126,138 @@ export function App() {
     trainCount: 4,
     trainCapacity: 300,
   });
+
+  // Dynamically load Preset Scenarios from data/scenarios/*.pkl via server endpoint on application startup
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch('/api/scenarios')
+      .then((r) => r.json())
+      .then(async (data) => {
+        if (cancelled) return;
+        if (data?.ok && Array.isArray(data.scenarios) && data.scenarios.length > 0) {
+          const scenarios = data.scenarios as PresetScenarioData[];
+          const map: Record<string, PresetScenarioData> = {};
+          for (const s of scenarios) {
+            map[s.id] = s;
+          }
+          setPresetScenarios(map);
+
+          const firstScenario = scenarios[0];
+          const freshTargets = firstScenario.targetAreas.map((t) => ({
+            ...t,
+            currentOccupancy: 0,
+            disabled: false,
+          }));
+
+          baselinePopulationsRef.current = Object.fromEntries(
+            firstScenario.sourceAreas.map((s) => [s.id, s.population])
+          );
+
+          const initialSim = initializeSimulationState(
+            [],
+            firstScenario.sourceAreas,
+            freshTargets,
+            firstScenario.vehicleFleets
+          );
+
+          setSelectedPreset(firstScenario.id);
+          setMapCenter(firstScenario.center);
+          setMapZoom(firstScenario.zoom);
+          setSourceAreas(firstScenario.sourceAreas);
+          setTargetAreas(freshTargets);
+          setAvoidAreas(firstScenario.avoidAreas);
+          setVehicleFleets(firstScenario.vehicleFleets);
+          setComputedRoutes([]);
+          setClusters(initialSim.clusters);
+          setPickupStates(initialSim.pickupStates);
+          setVehicles(initialSim.vehicles);
+          setHeatmapPoints(initialSim.heatmapPoints);
+          setTelemetryStats(initialSim.telemetryStats);
+          setTotalEvacuated(0);
+          setTotalInTransit(0);
+          setTotalRemainingAtSource(initialSim.totalRemainingAtSource);
+          setTotalWaitingAtPickups(0);
+
+          const nowFormatted = new Date().toLocaleTimeString();
+          setLogs((prev) => [
+            ...prev,
+            {
+              id: `log-startup-${Date.now()}`,
+              timestamp: nowFormatted,
+              simTimeFormatted: '00:00',
+              level: 'INFO',
+              message: `Dynamically loaded ${scenarios.length} scenario(s) from data/scenarios/*.pkl. Active scenario: "${firstScenario.name}" (${firstScenario.sourceAreas.length} sources, ${freshTargets.length} shelters, ${firstScenario.avoidAreas.length} avoid areas, ${firstScenario.vehicleFleets.length} vehicle fleets).`,
+            },
+          ]);
+
+          // Compute initial evacuation routes for the dynamically loaded startup scenario
+          const activeTargets = freshTargets.filter((t) => !t.disabled);
+          if (firstScenario.sourceAreas.length > 0 && activeTargets.length > 0) {
+            setIsComputingRoutes(true);
+            try {
+              const routeResult = await computeAllEvacuationRoutes(
+                firstScenario.sourceAreas,
+                freshTargets,
+                firstScenario.avoidAreas,
+                firstScenario.vehicleFleets
+              );
+              if (cancelled) return;
+              setComputedRoutes(routeResult.routes);
+              setLogs((prev) => [...prev, ...routeResult.logs]);
+
+              const routedSim = initializeSimulationState(
+                routeResult.routes,
+                firstScenario.sourceAreas,
+                freshTargets,
+                firstScenario.vehicleFleets
+              );
+              setClusters(routedSim.clusters);
+              setPickupStates(routedSim.pickupStates);
+              setVehicles(routedSim.vehicles);
+              setHeatmapPoints(routedSim.heatmapPoints);
+              setTelemetryStats(routedSim.telemetryStats);
+              setTotalRemainingAtSource(routedSim.totalRemainingAtSource);
+            } catch (err) {
+              if (!cancelled) {
+                setLogs((prev) => [
+                  ...prev,
+                  {
+                    id: `log-startup-err-${Date.now()}`,
+                    timestamp: new Date().toLocaleTimeString(),
+                    simTimeFormatted: '00:00',
+                    level: 'WARN',
+                    message: `Initial route computation encountered an error: ${String(err)}`,
+                  },
+                ]);
+              }
+            } finally {
+              if (!cancelled) {
+                setIsComputingRoutes(false);
+              }
+            }
+          }
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLogs((prev) => [
+            ...prev,
+            {
+              id: `log-scenarios-err-${Date.now()}`,
+              timestamp: new Date().toLocaleTimeString(),
+              simTimeFormatted: '00:00',
+              level: 'WARN',
+              message: `Could not load preset scenarios from /api/scenarios: ${String(err)}`,
+            },
+          ]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Load Brussels Metro parquet files via server endpoint on mount
   useEffect(() => {
@@ -263,35 +391,44 @@ export function App() {
     setPendingDrawnPolygon(null);
     setPendingPlacedPoint(null);
 
-    if (preset === 'brussels' || preset === 'paris') {
-      const data = PRESET_SCENARIOS[preset];
+    const data = preset !== 'custom' ? presetScenarios[preset] : undefined;
+    if (data) {
       baselinePopulationsRef.current = Object.fromEntries(
         data.sourceAreas.map((s) => [s.id, s.population])
       );
+      const freshTargets = data.targetAreas.map((t) => ({
+        ...t,
+        currentOccupancy: 0,
+        disabled: false,
+      }));
+      const initialSim = initializeSimulationState(
+        [],
+        data.sourceAreas,
+        freshTargets,
+        data.vehicleFleets
+      );
+
       setMapCenter(data.center);
       setMapZoom(data.zoom);
       setSourceAreas(data.sourceAreas);
-      setTargetAreas(
-        data.targetAreas.map((t) => ({ ...t, currentOccupancy: 0, disabled: false }))
-      );
+      setTargetAreas(freshTargets);
       setAvoidAreas(data.avoidAreas);
       setVehicleFleets(data.vehicleFleets);
       setComputedRoutes([]);
-      setClusters([]);
-      setPickupStates([]);
-      setVehicles([]);
-      setHeatmapPoints([]);
-      setTelemetryStats(createInitialTelemetryStats(data.sourceAreas));
+      setClusters(initialSim.clusters);
+      setPickupStates(initialSim.pickupStates);
+      setVehicles(initialSim.vehicles);
+      setHeatmapPoints(initialSim.heatmapPoints);
+      setTelemetryStats(initialSim.telemetryStats);
 
-      const totalPop = data.sourceAreas.reduce((acc, s) => acc + s.population, 0);
       setTotalEvacuated(0);
       setTotalInTransit(0);
-      setTotalRemainingAtSource(totalPop);
+      setTotalRemainingAtSource(initialSim.totalRemainingAtSource);
       setTotalWaitingAtPickups(0);
 
       appendLog(
         'INFO',
-        `Loaded preset scenario: "${data.name}" (${data.sourceAreas.length} sources, ${data.targetAreas.length} shelters, ${data.avoidAreas.length} avoid areas).`
+        `Loaded preset scenario: "${data.name}" (${data.sourceAreas.length} sources, ${data.targetAreas.length} shelters, ${data.avoidAreas.length} avoid areas, ${data.vehicleFleets.length} vehicle fleets).`
       );
     } else {
       baselinePopulationsRef.current = {};
@@ -407,16 +544,11 @@ export function App() {
     activeMetroEvacuationOptions,
   ]);
 
-  // Automatically compute routes on initial mount
-  useEffect(() => {
-    handleComputeRoutes();
-  }, []);
-
-  // When paused at t=0 and Brussels Metro evacuation settings or Source/Target areas change,
-  // refresh the initialized simulation state so metro pickups, drop-offs, and trains are immediately ready for playback.
+  // When paused at t=0 and scenario / Source/Target areas or Brussels Metro evacuation settings change,
+  // refresh the initialized simulation state so spatially uniform evacuee clusters, heatmaps,
+  // metro pickups, drop-offs, and trains are immediately distributed and ready on the map.
   useEffect(() => {
     if (isSimulating || isSimulationInProgress || elapsedSimSeconds > 0) return;
-    if (computedRoutes.length === 0 && !activeMetroEvacuationOptions) return;
 
     const freshState = initializeSimulationState(
       computedRoutes,
@@ -1612,8 +1744,11 @@ export function App() {
       <LeftControlPanel
         isCollapsed={isLeftPanelCollapsed}
         onToggleCollapse={() => setIsLeftPanelCollapsed((prev) => !prev)}
+        presetScenarios={Object.values(presetScenarios)}
         selectedPreset={selectedPreset}
         onSelectPreset={handleSelectPreset}
+        showLabels={showLabels}
+        onToggleShowLabels={() => setShowLabels((prev) => !prev)}
         sourceAreas={sourceAreas}
         targetAreas={targetAreas}
         avoidAreas={avoidAreas}
@@ -1688,6 +1823,7 @@ export function App() {
           <EvacuationMap
             center={mapCenter}
             zoom={mapZoom}
+            showLabels={showLabels}
             sourceAreas={sourceAreas}
             targetAreas={targetAreas}
             avoidAreas={avoidAreas}
@@ -1747,11 +1883,9 @@ export function App() {
         isOpen={isSimulationReportOpen && !isSimulating}
         onClose={() => setIsSimulationReportOpen(false)}
         scenarioName={
-          selectedPreset === 'brussels'
-            ? PRESET_SCENARIOS.brussels.name
-            : selectedPreset === 'paris'
-            ? PRESET_SCENARIOS.paris.name
-            : 'Custom Scenario'
+          selectedPreset === 'custom'
+            ? 'Custom Scenario'
+            : presetScenarios[selectedPreset]?.name ?? selectedPreset
         }
         elapsedSimSeconds={elapsedSimSeconds}
         simSpeed={simSpeed}

@@ -1,9 +1,9 @@
-export type PopulationBehaviorType = 'obedient' | 'autonomous' | 'random';
+export type PopulationBehaviorType = 'compliant' | 'self-directed' | 'disoriented';
 
 export interface BehavioralDistribution {
-  obedient: number;   // percentage 0-100
-  autonomous: number; // percentage 0-100
-  random: number;     // percentage 0-100
+  compliant: number;        // percentage 0-100
+  'self-directed': number;  // percentage 0-100
+  disoriented: number;      // percentage 0-100
 }
 
 export interface SourceArea {
@@ -73,9 +73,9 @@ export interface LogEntry {
 }
 
 export interface BehaviorCounts {
-  obedient: number;
-  autonomous: number;
-  random: number;
+  compliant: number;
+  'self-directed': number;
+  disoriented: number;
 }
 
 export interface SimulationTelemetryStats {
@@ -124,7 +124,11 @@ export interface SourceInternalCluster {
   targetPickupId: string | null;
   perimeterEdgeIndex: number;
   perimeterProgress: number;
-  randomHeadingRad: number;
+  disorientedHeadingRad: number;
+  zigZagSide?: 1 | -1;
+  zigZagTimerSeconds?: number;
+  zigZagAngleOffsetRad?: number;
+  isReversingBrief?: boolean;
   status: 'moving_in_zone' | 'waiting_at_pickup' | 'boarded';
 }
 
@@ -196,7 +200,7 @@ export type ActiveDrawMode =
   | { type: 'source' | 'target' | 'avoid'; points: [number, number][] }
   | { type: 'vehicle'; point: [number, number] | null };
 
-export type PresetScenarioId = 'brussels' | 'paris' | 'custom';
+export type PresetScenarioId = string;
 
 export type Sentinel2AggregationPeriod =
   | 'last week'

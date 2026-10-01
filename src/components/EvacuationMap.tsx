@@ -52,6 +52,7 @@ const OSM_TILE_PROVIDERS: Record<
 interface EvacuationMapProps {
   center: [number, number];
   zoom: number;
+  showLabels?: boolean;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
   avoidAreas: AvoidArea[];
@@ -81,6 +82,7 @@ interface EvacuationMapProps {
 export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   center,
   zoom,
+  showLabels = true,
   sourceAreas,
   targetAreas,
   avoidAreas,
@@ -398,25 +400,26 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             <strong>${currentRemaining.toLocaleString()}</strong> / ${src.population.toLocaleString()} in zone
           </div>
           <div class="zone-badge-split">
-            <span>Ob: ${src.behavior.obedient}%</span>
-            <span>Au: ${src.behavior.autonomous}%</span>
-            <span>Rd: ${src.behavior.random}%</span>
+            <span>Cp: ${src.behavior.compliant}%</span>
+            <span>Sd: ${src.behavior['self-directed']}%</span>
+            <span>Ds: ${src.behavior.disoriented}%</span>
           </div>
         </div>
       `;
 
-      const marker = L.marker(centroid, {
-        icon: L.divIcon({
-          className: 'custom-div-icon',
-          html: labelHtml,
-          iconSize: [170, 56],
-          iconAnchor: [85, 28],
-        }),
-      });
-      marker.on('click', () => onSelectEntity(src.id));
-
       poly.addTo(group);
-      marker.addTo(group);
+      if (showLabels) {
+        const marker = L.marker(centroid, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: labelHtml,
+            iconSize: [170, 56],
+            iconAnchor: [85, 28],
+          }),
+        });
+        marker.on('click', () => onSelectEntity(src.id));
+        marker.addTo(group);
+      }
     });
 
     // 2. Target Areas (Emerald Green when Active, Slate Gray when Disabled)
@@ -436,39 +439,40 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         onSelectEntity(tgt.id);
       });
 
-      const centroid = getPolygonCentroid(tgt.polygon);
-      const occPercent = Math.min(
-        100,
-        Math.round((tgt.currentOccupancy / Math.max(1, tgt.capacity)) * 100)
-      );
-      const labelHtml = `
-        <div class="map-zone-badge map-zone-target ${isSelected ? 'selected' : ''}" style="${
-        isDisabled ? 'border-color: #64748b; background: rgba(15, 23, 42, 0.92);' : ''
-      }">
-          <div class="zone-badge-title">
-            SHELTER: ${tgt.name} ${
-        isDisabled ? '<span style="color:#f87171">[DISABLED]</span>' : ''
-      }
-          </div>
-          <div class="zone-badge-sub">${tgt.currentOccupancy.toLocaleString()} / ${tgt.capacity.toLocaleString()} (${occPercent}%)</div>
-          <div class="zone-progress-track">
-            <div class="zone-progress-fill" style="width: ${occPercent}%"></div>
-          </div>
-        </div>
-      `;
-
-      const marker = L.marker(centroid, {
-        icon: L.divIcon({
-          className: 'custom-div-icon',
-          html: labelHtml,
-          iconSize: [185, 52],
-          iconAnchor: [92, 26],
-        }),
-      });
-      marker.on('click', () => onSelectEntity(tgt.id));
-
       poly.addTo(group);
-      marker.addTo(group);
+      if (showLabels) {
+        const centroid = getPolygonCentroid(tgt.polygon);
+        const occPercent = Math.min(
+          100,
+          Math.round((tgt.currentOccupancy / Math.max(1, tgt.capacity)) * 100)
+        );
+        const labelHtml = `
+          <div class="map-zone-badge map-zone-target ${isSelected ? 'selected' : ''}" style="${
+          isDisabled ? 'border-color: #64748b; background: rgba(15, 23, 42, 0.92);' : ''
+        }">
+            <div class="zone-badge-title">
+              SHELTER: ${tgt.name} ${
+          isDisabled ? '<span style="color:#f87171">[DISABLED]</span>' : ''
+        }
+            </div>
+            <div class="zone-badge-sub">${tgt.currentOccupancy.toLocaleString()} / ${tgt.capacity.toLocaleString()} (${occPercent}%)</div>
+            <div class="zone-progress-track">
+              <div class="zone-progress-fill" style="width: ${occPercent}%"></div>
+            </div>
+          </div>
+        `;
+
+        const marker = L.marker(centroid, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: labelHtml,
+            iconSize: [185, 52],
+            iconAnchor: [92, 26],
+          }),
+        });
+        marker.on('click', () => onSelectEntity(tgt.id));
+        marker.addTo(group);
+      }
     });
 
     // 3. Avoid Areas (Crimson Red Hazard)
@@ -487,60 +491,63 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         onSelectEntity(avoid.id);
       });
 
-      const centroid = getPolygonCentroid(avoid.polygon);
-      const labelHtml = `
-        <div class="map-zone-badge map-zone-avoid ${isSelected ? 'selected' : ''}">
-          <div class="zone-badge-title">⛔ AVOID AREA</div>
-          <div class="zone-badge-sub">${avoid.name}</div>
-        </div>
-      `;
-
-      const marker = L.marker(centroid, {
-        icon: L.divIcon({
-          className: 'custom-div-icon',
-          html: labelHtml,
-          iconSize: [150, 40],
-          iconAnchor: [75, 20],
-        }),
-      });
-      marker.on('click', () => onSelectEntity(avoid.id));
-
       poly.addTo(group);
-      marker.addTo(group);
-    });
-
-    // 4. Vehicle Fleet Staging Depots
-    vehicleFleets.forEach((fleet) => {
-      const isSelected = selectedEntityId === fleet.id;
-      const totalCap = fleet.count * fleet.capacityPerUnit;
-      const loadUnloadSec = fleet.loadUnloadTimePerPersonSeconds ?? 2;
-      const speedKmh = fleet.transitSpeedKmh ?? 25;
-      const iconHtml = `
-        <div class="map-depot-pin ${isSelected ? 'selected' : ''}">
-          <div class="depot-pin-icon">${fleet.type === 'Bus' ? '🚌' : '🚓'}</div>
-          <div class="depot-pin-info">
-            <span class="depot-name">${fleet.name}</span>
-            <span class="depot-meta">${fleet.count} units (${totalCap} cap · ${speedKmh} km/h · ${loadUnloadSec}s/pax)</span>
+      if (showLabels) {
+        const centroid = getPolygonCentroid(avoid.polygon);
+        const labelHtml = `
+          <div class="map-zone-badge map-zone-avoid ${isSelected ? 'selected' : ''}">
+            <div class="zone-badge-title">⛔ AVOID AREA</div>
+            <div class="zone-badge-sub">${avoid.name}</div>
           </div>
-        </div>
-      `;
+        `;
 
-      const marker = L.marker(fleet.location, {
-        icon: L.divIcon({
-          className: 'custom-div-icon',
-          html: iconHtml,
-          iconSize: [195, 36],
-          iconAnchor: [97, 18],
-        }),
-      });
-
-      marker.on('click', (e) => {
-        L.DomEvent.stopPropagation(e);
-        onSelectEntity(fleet.id);
-      });
-
-      marker.addTo(group);
+        const marker = L.marker(centroid, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: labelHtml,
+            iconSize: [150, 40],
+            iconAnchor: [75, 20],
+          }),
+        });
+        marker.on('click', () => onSelectEntity(avoid.id));
+        marker.addTo(group);
+      }
     });
+
+    // 4. Vehicle Fleet Staging Depots (Rounded boxes containing vehicle fleet names and properties)
+    if (showLabels) {
+      vehicleFleets.forEach((fleet) => {
+        const isSelected = selectedEntityId === fleet.id;
+        const totalCap = fleet.count * fleet.capacityPerUnit;
+        const loadUnloadSec = fleet.loadUnloadTimePerPersonSeconds ?? 2;
+        const speedKmh = fleet.transitSpeedKmh ?? 25;
+        const iconHtml = `
+          <div class="map-depot-pin ${isSelected ? 'selected' : ''}">
+            <div class="depot-pin-icon">${fleet.type === 'Bus' ? '🚌' : '🚓'}</div>
+            <div class="depot-pin-info">
+              <span class="depot-name">${fleet.name}</span>
+              <span class="depot-meta">${fleet.count} units (${totalCap} cap · ${speedKmh} km/h · ${loadUnloadSec}s/pax)</span>
+            </div>
+          </div>
+        `;
+
+        const marker = L.marker(fleet.location, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: iconHtml,
+            iconSize: [195, 36],
+            iconAnchor: [97, 18],
+          }),
+        });
+
+        marker.on('click', (e) => {
+          L.DomEvent.stopPropagation(e);
+          onSelectEntity(fleet.id);
+        });
+
+        marker.addTo(group);
+      });
+    }
   }, [
     sourceAreas,
     targetAreas,
@@ -548,6 +555,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     vehicleFleets,
     selectedEntityId,
     showZones,
+    showLabels,
     clusters,
     pickupStates,
     vehicles,
@@ -559,7 +567,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (!metroGroup) return;
     metroGroup.clearLayers();
 
-    // 1. If the user toggled 'Show Brussels Metro Network', render all metro lines and stations with station names beside them
+    // 1. If the user toggled 'Show Brussels Metro Network', render all metro lines and (when showLabels is ON) stations with station names beside them
     if (showBrusselsMetroNetwork) {
       // Render variant 1 of each line (1, 2, 5, 6) with slight parallel offset for shared trunks (5 & 6)
       const primaryLines = brusselsMetroLines.filter((l) => l.variant === 1);
@@ -610,46 +618,48 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         });
       });
 
-      // Render all 60 metro stations with their station name right beside them on the map
-      brusselsMetroStations.forEach((station) => {
-        const primaryLine = station.lines[0] || '1';
-        const dotColor =
-          primaryLine === '1'
-            ? '#B5378C'
-            : primaryLine === '2'
-            ? '#ED6C23'
-            : primaryLine === '5'
-            ? '#F6A90B'
-            : '#0066A3';
+      // Render all 60 metro stations with their station name right beside them on the map (when showLabels is ON)
+      if (showLabels) {
+        brusselsMetroStations.forEach((station) => {
+          const primaryLine = station.lines[0] || '1';
+          const dotColor =
+            primaryLine === '1'
+              ? '#B5378C'
+              : primaryLine === '2'
+              ? '#ED6C23'
+              : primaryLine === '5'
+              ? '#F6A90B'
+              : '#0066A3';
 
-        const stationHtml = `
-          <div class="brussels-metro-station-marker" data-station-id="${station.id}" style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap;pointer-events:auto;">
-            <span class="brussels-metro-station-dot" style="width:10px;height:10px;border-radius:50%;background:${dotColor};border:2px solid #ffffff;box-shadow:0 1px 4px rgba(0,0,0,0.85);display:inline-block;flex-shrink:0;"></span>
-            <span class="brussels-metro-station-label" style="background:rgba(15,23,42,0.88);color:#f8fafc;border:1px solid ${dotColor};border-radius:4px;padding:1px 5px;font-size:10px;font-weight:700;line-height:1.25;box-shadow:0 1px 4px rgba(0,0,0,0.75);">${station.name_fr}</span>
-          </div>
-        `;
+          const stationHtml = `
+            <div class="brussels-metro-station-marker" data-station-id="${station.id}" style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap;pointer-events:auto;">
+              <span class="brussels-metro-station-dot" style="width:10px;height:10px;border-radius:50%;background:${dotColor};border:2px solid #ffffff;box-shadow:0 1px 4px rgba(0,0,0,0.85);display:inline-block;flex-shrink:0;"></span>
+              <span class="brussels-metro-station-label" style="background:rgba(15,23,42,0.88);color:#f8fafc;border:1px solid ${dotColor};border-radius:4px;padding:1px 5px;font-size:10px;font-weight:700;line-height:1.25;box-shadow:0 1px 4px rgba(0,0,0,0.75);">${station.name_fr}</span>
+            </div>
+          `;
 
-        const stMarker = L.marker(station.position, {
-          icon: L.divIcon({
-            className: 'custom-div-icon brussels-metro-station-icon',
-            html: stationHtml,
-            iconSize: [140, 20],
-            iconAnchor: [5, 10],
-          }),
-          zIndexOffset: 650,
+          const stMarker = L.marker(station.position, {
+            icon: L.divIcon({
+              className: 'custom-div-icon brussels-metro-station-icon',
+              html: stationHtml,
+              iconSize: [140, 20],
+              iconAnchor: [5, 10],
+            }),
+            zIndexOffset: 650,
+          });
+
+          stMarker.bindTooltip(
+            `<div class="route-tooltip">
+              <strong>🚇 ${station.name_fr}</strong> (${station.name_nl})<br/>
+              Metro Line(s): <b>${station.line}</b><br/>
+              Stop ID: <code>${station.stop_id}</code>
+            </div>`,
+            { direction: 'top', offset: [0, -8] }
+          );
+
+          stMarker.addTo(metroGroup);
         });
-
-        stMarker.bindTooltip(
-          `<div class="route-tooltip">
-            <strong>🚇 ${station.name_fr}</strong> (${station.name_nl})<br/>
-            Metro Line(s): <b>${station.line}</b><br/>
-            Stop ID: <code>${station.stop_id}</code>
-          </div>`,
-          { direction: 'top', offset: [0, -8] }
-        );
-
-        stMarker.addTo(metroGroup);
-      });
+      }
     }
 
     // 2. If activeMetroCorridors are present (when 'Use these stations for evacuation' is checked), highlight active underground corridors
@@ -683,6 +693,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     }
   }, [
     showBrusselsMetroNetwork,
+    showLabels,
     brusselsMetroLines,
     brusselsMetroStations,
     activeMetroCorridors,
@@ -701,20 +712,20 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     computedRoutes
       .filter((route) => !metroSourceIds.has(route.sourceId))
       .forEach((route) => {
-        const color = route.behaviorType === 'obedient' ? '#0284c7' : '#d97706';
-        const weight = 4;
+        const color = '#22c55e';
+        const weight = 8;
 
         // Outer casing for main evacuation route
         L.polyline(route.coordinates, {
-          color: '#090d16',
-          weight: weight + 3,
-          opacity: 0.72,
+          color: '#064e3b',
+          weight: weight + 4,
+          opacity: 0.82,
         }).addTo(routesGroup);
 
         const polyline = L.polyline(route.coordinates, {
           color,
           weight,
-          opacity: 0.92,
+          opacity: 0.95,
         });
 
         const distKm = (route.distanceMeters / 1000).toFixed(2);
@@ -993,9 +1004,9 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       .filter((c) => c.status === 'moving_in_zone' && c.headcount > 0)
       .forEach((c) => {
         const dotColor =
-          c.behavior === 'obedient'
+          c.behavior === 'compliant'
             ? '#0284c7'
-            : c.behavior === 'autonomous'
+            : c.behavior === 'self-directed'
             ? '#d97706'
             : '#e11d48';
 
@@ -1223,11 +1234,11 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         grad.addColorStop(0.32, `rgba(249, 115, 22, ${alpha})`);
         grad.addColorStop(0.65, `rgba(250, 204, 21, ${alpha * 0.65})`);
         grad.addColorStop(1, 'rgba(250, 204, 21, 0)');
-      } else if (pt.behavior === 'random') {
+      } else if (pt.behavior === 'disoriented') {
         grad.addColorStop(0, `rgba(244, 63, 94, ${alpha * 0.8})`);
         grad.addColorStop(0.5, `rgba(251, 146, 60, ${alpha * 0.55})`);
         grad.addColorStop(1, 'rgba(251, 146, 60, 0)');
-      } else if (pt.behavior === 'autonomous') {
+      } else if (pt.behavior === 'self-directed') {
         grad.addColorStop(0, `rgba(250, 204, 21, ${alpha * 0.8})`);
         grad.addColorStop(0.5, `rgba(52, 211, 153, ${alpha * 0.55})`);
         grad.addColorStop(1, 'rgba(52, 211, 153, 0)');
@@ -1322,7 +1333,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             <span>Route Pickup Point</span>
           </div>
           <div className="legend-item">
-            <span className="legend-line obedient-line" />
+            <span className="legend-line compliant-line" />
             <span>Evac Corridor</span>
           </div>
           <div className="legend-item">

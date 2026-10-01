@@ -62,6 +62,71 @@ import fs from 'node:fs'
 let cachedMetroJson: string | null = null
 let cachedMetroMtime = 0
 
+let cachedScenariosJson: string | null = null
+let cachedScenariosSignature = ''
+
+function serveScenariosPklData(res: ServerResponse) {
+  const scenariosDir = path.resolve(process.cwd(), 'data/scenarios')
+  let currentSig = ''
+  try {
+    const files = fs
+      .readdirSync(scenariosDir)
+      .filter((f) => f.endsWith('.pkl'))
+      .sort()
+    currentSig = files
+      .map((f) => `${f}:${fs.statSync(path.join(scenariosDir, f)).mtimeMs}`)
+      .join('|')
+  } catch {
+    // Fallback to running script directly
+  }
+
+  if (cachedScenariosJson && currentSig && currentSig === cachedScenariosSignature) {
+    res.setHeader('Content-Type', 'application/json')
+    res.statusCode = 200
+    res.end(cachedScenariosJson)
+    return
+  }
+
+  const pythonBin = process.env.EE_PYTHON || '/opt/conda/envs/evacs/bin/python'
+  const scriptPath = path.resolve(process.cwd(), 'server/scenarios.py')
+  const proc = spawn(pythonBin, [scriptPath])
+  let stdout = ''
+  let stderr = ''
+
+  proc.stdout.on('data', (chunk) => {
+    stdout += chunk.toString()
+  })
+  proc.stderr.on('data', (chunk) => {
+    stderr += chunk.toString()
+  })
+  proc.on('close', (code) => {
+    res.setHeader('Content-Type', 'application/json')
+    const lines = stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('{') && l.endsWith('}'))
+
+    if (lines.length > 0) {
+      const payload = lines[lines.length - 1]
+      cachedScenariosJson = payload
+      cachedScenariosSignature = currentSig
+      res.statusCode = 200
+      res.end(payload)
+      return
+    }
+
+    res.statusCode = 500
+    res.end(
+      JSON.stringify({
+        ok: false,
+        error:
+          stderr.trim() ||
+          `server/scenarios.py exited with code ${code} without JSON output.`,
+      })
+    )
+  })
+}
+
 function serveBrusselsMetroParquetData(res: ServerResponse) {
   const linesPath = path.resolve(process.cwd(), 'data/brussels_metro_lines.parquet')
   const stationsPath = path.resolve(process.cwd(), 'data/brussels_metro_stations.parquet')
@@ -126,7 +191,13 @@ function createSpaceDataMiddleware(): Connect.NextHandleFunction {
       return next()
     }
 
-    // 0. Brussels Metro Parquet Reader Endpoint (data/brussels_metro_lines.parquet & data/brussels_metro_stations.parquet)
+    // 0a. Preset Scenarios Reader Endpoint (data/scenarios/*.pkl)
+    if (req.url.startsWith('/api/scenarios')) {
+      serveScenariosPklData(res)
+      return
+    }
+
+    // 0b. Brussels Metro Parquet Reader Endpoint (data/brussels_metro_lines.parquet & data/brussels_metro_stations.parquet)
     if (req.url.startsWith('/api/brussels-metro/network')) {
       serveBrusselsMetroParquetData(res)
       return

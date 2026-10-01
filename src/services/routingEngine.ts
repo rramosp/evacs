@@ -9,10 +9,22 @@ import {
 } from '../types/evacuation';
 
 /**
- * Compute polygon centroid as [lat, lng]
+ * Compute polygon centroid as [lat, lng] using 2D area center of mass
  */
 export function getPolygonCentroid(polygonCoords: [number, number][]): [number, number] {
   if (!polygonCoords || polygonCoords.length === 0) return [0, 0];
+  if (polygonCoords.length >= 3) {
+    try {
+      const poly = toTurfPolygon(polygonCoords);
+      const center = turf.centerOfMass(poly);
+      const [lng, lat] = center.geometry.coordinates;
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        return [lat, lng];
+      }
+    } catch {
+      // Fallback to vertex average below
+    }
+  }
   const latSum = polygonCoords.reduce((acc, c) => acc + c[0], 0);
   const lngSum = polygonCoords.reduce((acc, c) => acc + c[1], 0);
   return [latSum / polygonCoords.length, lngSum / polygonCoords.length];
@@ -174,16 +186,39 @@ export function computeSpecificPickupPoint(
     return dA - dB;
   });
 
-  // Try candidate anchors starting from slotIndex offset, picking the first that does not fall in an Avoid Area
+  let turfPoly: ReturnType<typeof toTurfPolygon> | null = null;
+  try {
+    turfPoly = toTurfPolygon(poly);
+  } catch {
+    turfPoly = null;
+  }
+
+  // Try candidate anchors starting from slotIndex offset, picking the first that lies strictly inside the Source Area and outside any Avoid Area
   for (let offset = 0; offset < sortedByTarget.length; offset++) {
     const chosenAnchor =
       sortedByTarget[(slotIndex * 2 + offset) % sortedByTarget.length] || centroid;
-    const t = 0.82;
-    const lat = Number((centroid[0] + (chosenAnchor[0] - centroid[0]) * t).toFixed(5));
-    const lng = Number((centroid[1] + (chosenAnchor[1] - centroid[1]) * t).toFixed(5));
-    const candidate: [number, number] = [lat, lng];
-    if (!isPointInAnyAvoidArea(candidate, avoidAreas)) {
-      return candidate;
+    for (const t of [0.82, 0.9, 0.72, 0.95, 0.55]) {
+      const lat = Number((centroid[0] + (chosenAnchor[0] - centroid[0]) * t).toFixed(5));
+      const lng = Number((centroid[1] + (chosenAnchor[1] - centroid[1]) * t).toFixed(5));
+      const candidate: [number, number] = [lat, lng];
+      const insideSource =
+        !turfPoly || turf.booleanPointInPolygon(turf.point([lng, lat]), turfPoly);
+      if (insideSource && !isPointInAnyAvoidArea(candidate, avoidAreas)) {
+        return candidate;
+      }
+    }
+  }
+
+  if (turfPoly) {
+    try {
+      const pof = turf.pointOnFeature(turfPoly);
+      const [lng, lat] = pof.geometry.coordinates;
+      const pofCand: [number, number] = [Number(lat.toFixed(5)), Number(lng.toFixed(5))];
+      if (!isPointInAnyAvoidArea(pofCand, avoidAreas)) {
+        return pofCand;
+      }
+    } catch {
+      // Fallback below
     }
   }
 
@@ -720,7 +755,7 @@ export async function computeAllEvacuationRoutes(
       sourceName: source.name,
       targetId: primaryTarget.id,
       targetName: primaryTarget.name,
-      behaviorType: 'obedient',
+      behaviorType: 'compliant',
       pickupLocation: pickupAlpha,
       pickupLabel: `${source.name} — Pickup Square Alpha`,
       coordinates: evacAlpha.coordinates,
@@ -760,7 +795,7 @@ export async function computeAllEvacuationRoutes(
       sourceName: source.name,
       targetId: secondaryTarget.id,
       targetName: secondaryTarget.name,
-      behaviorType: 'autonomous',
+      behaviorType: 'self-directed',
       pickupLocation: pickupBravo,
       pickupLabel: `${source.name} — Pickup Square Bravo`,
       coordinates: evacBravo.coordinates,

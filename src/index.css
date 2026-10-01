@@ -881,15 +881,17 @@ body,
   border-radius: 1px;
 }
 
-.obedient-line {
-  background-color: #38bdf8;
+.compliant-line {
+  background-color: #22c55e;
+  height: 5px;
+  border-radius: 2px;
 }
 
-.autonomous-line {
+.self-directed-line {
   background-color: #fbbf24;
 }
 
-.random-line {
+.disoriented-line {
   background-color: #fb7185;
 }
 
@@ -1544,15 +1546,15 @@ body,
   border-radius: 50%;
 }
 
-.behavior-dot.obedient {
+.behavior-dot.compliant {
   background-color: #38bdf8;
 }
 
-.behavior-dot.autonomous {
+.behavior-dot.self-directed {
   background-color: #fbbf24;
 }
 
-.behavior-dot.random {
+.behavior-dot.disoriented {
   background-color: #fb7185;
 }
 

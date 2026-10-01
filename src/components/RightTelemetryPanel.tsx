@@ -81,15 +81,15 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
     return `${String(mins).padStart(2, '0')}:${String(remSec).padStart(2, '0')}`;
   };
 
-  const totalObedient = sourceAreas.reduce(
-    (acc, s) => acc + Math.round((s.population * s.behavior.obedient) / 100),
+  const totalCompliant = sourceAreas.reduce(
+    (acc, s) => acc + Math.round((s.population * s.behavior.compliant) / 100),
     0
   );
-  const totalAutonomous = sourceAreas.reduce(
-    (acc, s) => acc + Math.round((s.population * s.behavior.autonomous) / 100),
+  const totalSelfDirected = sourceAreas.reduce(
+    (acc, s) => acc + Math.round((s.population * s.behavior['self-directed']) / 100),
     0
   );
-  const totalRandom = Math.max(0, totalPopulation - totalObedient - totalAutonomous);
+  const totalDisoriented = Math.max(0, totalPopulation - totalCompliant - totalSelfDirected);
 
   const totalFleetVehicles = vehicleFleets.reduce((acc, f) => acc + f.count, 0);
   const totalFleetCapacity = vehicleFleets.reduce(
@@ -332,35 +332,35 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
             <div className="behavior-breakdown-list">
               <div className="behavior-row">
                 <div className="behavior-row-info">
-                  <span className="behavior-dot obedient" />
+                  <span className="behavior-dot compliant" />
                   <div>
-                    <div className="behavior-title">Obedient Population</div>
+                    <div className="behavior-title">Compliant Population</div>
                     <div className="behavior-desc">Go immediately to closest pickup point</div>
                   </div>
                 </div>
-                <span className="behavior-count">{totalObedient.toLocaleString()}</span>
+                <span className="behavior-count">{totalCompliant.toLocaleString()}</span>
               </div>
 
               <div className="behavior-row">
                 <div className="behavior-row-info">
-                  <span className="behavior-dot autonomous" />
+                  <span className="behavior-dot self-directed" />
                   <div>
-                    <div className="behavior-title">Autonomous Population</div>
-                    <div className="behavior-desc">Wander along zone limits until pickup</div>
+                    <div className="behavior-title">Self-Directed Population</div>
+                    <div className="behavior-desc">Random zig-zag to closest pickup (with brief reversals)</div>
                   </div>
                 </div>
-                <span className="behavior-count">{totalAutonomous.toLocaleString()}</span>
+                <span className="behavior-count">{totalSelfDirected.toLocaleString()}</span>
               </div>
 
               <div className="behavior-row">
                 <div className="behavior-row-info">
-                  <span className="behavior-dot random" />
+                  <span className="behavior-dot disoriented" />
                   <div>
-                    <div className="behavior-title">Random Population</div>
+                    <div className="behavior-title">Disoriented Population</div>
                     <div className="behavior-desc">Wander inside zone until within 50m</div>
                   </div>
                 </div>
-                <span className="behavior-count">{totalRandom.toLocaleString()}</span>
+                <span className="behavior-count">{totalDisoriented.toLocaleString()}</span>
               </div>
             </div>
           </section>
