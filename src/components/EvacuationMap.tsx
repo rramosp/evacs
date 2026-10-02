@@ -20,8 +20,8 @@ import {
   BrusselsMetroCorridor,
 } from '../types/evacuation';
 import { getPolygonCentroid } from '../services/routingEngine';
-import { formatMMSS } from '../services/simulationEngine';
-import { Layers, Check, X, Compass, Eye, EyeOff } from 'lucide-react';
+import { formatMMSS } from '../services/twinEngine';
+import { Layers, Check, X, Compass, Eye, EyeOff, Loader2 } from 'lucide-react';
 
 type OsmLayerStyle = 'standard' | 'hot' | 'cyclosm';
 
@@ -62,7 +62,9 @@ interface EvacuationMapProps {
   vehicles: ActiveVehicleUnit[];
   clusters: SourceInternalCluster[];
   heatmapPoints: HeatmapPoint[];
-  isSimulating: boolean;
+  isTwinning: boolean;
+  isComputingRoutes?: boolean;
+  onStopComputingRoutes?: () => void;
   activeDrawMode: ActiveDrawMode;
   onUpdateDrawMode: (mode: ActiveDrawMode) => void;
   onFinishDrawingPolygon: (points: [number, number][]) => void;
@@ -91,8 +93,10 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   pickupStates,
   vehicles,
   clusters,
-  heatmapPoints,
-  isSimulating,
+  heatmapPoints: _heatmapPoints,
+  isTwinning,
+  isComputingRoutes = false,
+  onStopComputingRoutes,
   activeDrawMode,
   onUpdateDrawMode,
   onFinishDrawingPolygon,
@@ -122,11 +126,9 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   const pickupSquaresLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const vehiclesLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const drawPreviewLayerGroupRef = useRef<L.LayerGroup | null>(null);
-  const heatmapCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Map visual toggles — default is official Standard OpenStreetMap (no API key required)
   const [osmStyle, setOsmStyle] = useState<OsmLayerStyle>('standard');
-  const [showHeatmap, setShowHeatmap] = useState<boolean>(true);
   const [showRoutes, setShowRoutes] = useState<boolean>(true);
   const [showZones, setShowZones] = useState<boolean>(true);
 
@@ -198,7 +200,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     });
 
     const handleMapMove = () => {
-      renderHeatmapCanvas();
       if (onMapViewportChangeRef.current) {
         const c = map.getCenter();
         onMapViewportChangeRef.current([Number(c.lat.toFixed(5)), Number(c.lng.toFixed(5))]);
@@ -212,7 +213,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (typeof ResizeObserver !== 'undefined' && mapContainerRef.current) {
       resizeObserver = new ResizeObserver(() => {
         map.invalidateSize({ animate: false });
-        renderHeatmapCanvas();
       });
       resizeObserver.observe(mapContainerRef.current);
     }
@@ -227,6 +227,28 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       mapInstanceRef.current = null;
     };
   }, []);
+
+  // Disable / restore Leaflet map interactions while computing evacuation routes
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    if (isComputingRoutes) {
+      map.dragging.disable();
+      map.touchZoom.disable();
+      map.doubleClickZoom.disable();
+      map.scrollWheelZoom.disable();
+      map.boxZoom.disable();
+      map.keyboard.disable();
+    } else {
+      map.dragging.enable();
+      map.touchZoom.enable();
+      map.doubleClickZoom.enable();
+      map.scrollWheelZoom.enable();
+      map.boxZoom.enable();
+      map.keyboard.enable();
+    }
+  }, [isComputingRoutes]);
 
   // Switch between public zero-API-key OpenStreetMap tile layers
   useEffect(() => {
@@ -359,15 +381,16 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
     if (!showZones) return;
 
-    // 1. Source Areas (Amber / Orange)
+    // 1. Source Areas (Amber / Orange when Active, Slate Gray when Disabled)
     sourceAreas.forEach((src) => {
       const isSelected = selectedEntityId === src.id;
+      const isDisabled = Boolean(src.disabled);
       const poly = L.polygon(src.polygon, {
-        color: isSelected ? '#fbbf24' : '#f59e0b',
+        color: isDisabled ? '#94a3b8' : isSelected ? '#fbbf24' : '#f59e0b',
         weight: isSelected ? 3 : 2,
-        fillColor: '#f59e0b',
-        fillOpacity: isSelected ? 0.28 : 0.16,
-        dashArray: isSelected ? undefined : '4, 4',
+        fillColor: isDisabled ? '#64748b' : '#f59e0b',
+        fillOpacity: isDisabled ? 0.16 : isSelected ? 0.28 : 0.16,
+        dashArray: isDisabled ? '5, 5' : isSelected ? undefined : '4, 4',
       });
 
       poly.on('click', (e) => {
@@ -389,13 +412,19 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         .reduce((acc, v) => acc + v.currentOccupancy, 0);
 
       const currentRemaining =
-        clusters.length > 0
+        !isDisabled && clusters.length > 0
           ? movingInThisSrc + waitingInThisSrc + boardingInThisSrc
           : src.population;
 
       const labelHtml = `
-        <div class="map-zone-badge map-zone-source ${isSelected ? 'selected' : ''}">
-          <div class="zone-badge-title">SOURCE: ${src.name}</div>
+        <div class="map-zone-badge map-zone-source ${isSelected ? 'selected' : ''}" style="${
+        isDisabled ? 'border-color: #64748b; background: rgba(15, 23, 42, 0.92);' : ''
+      }">
+          <div class="zone-badge-title">
+            SOURCE: ${src.name} ${
+        isDisabled ? '<span style="color:#f87171">[DISABLED]</span>' : ''
+      }
+          </div>
           <div class="zone-badge-sub">
             <strong>${currentRemaining.toLocaleString()}</strong> / ${src.population.toLocaleString()} in zone
           </div>
@@ -413,8 +442,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           icon: L.divIcon({
             className: 'custom-div-icon',
             html: labelHtml,
-            iconSize: [170, 56],
-            iconAnchor: [85, 28],
+            iconSize: [185, 56],
+            iconAnchor: [92, 28],
           }),
         });
         marker.on('click', () => onSelectEntity(src.id));
@@ -475,15 +504,16 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       }
     });
 
-    // 3. Avoid Areas (Crimson Red Hazard)
+    // 3. Avoid Areas (Crimson Red Hazard when Active, Slate Gray when Disabled)
     avoidAreas.forEach((avoid) => {
       const isSelected = selectedEntityId === avoid.id;
+      const isDisabled = Boolean(avoid.disabled);
       const poly = L.polygon(avoid.polygon, {
-        color: isSelected ? '#f87171' : '#ef4444',
+        color: isDisabled ? '#94a3b8' : isSelected ? '#f87171' : '#ef4444',
         weight: isSelected ? 3 : 2,
-        fillColor: '#ef4444',
-        fillOpacity: isSelected ? 0.45 : 0.32,
-        dashArray: '6, 6',
+        fillColor: isDisabled ? '#64748b' : '#ef4444',
+        fillOpacity: isDisabled ? 0.16 : isSelected ? 0.45 : 0.32,
+        dashArray: isDisabled ? '5, 5' : '6, 6',
       });
 
       poly.on('click', (e) => {
@@ -495,8 +525,14 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       if (showLabels) {
         const centroid = getPolygonCentroid(avoid.polygon);
         const labelHtml = `
-          <div class="map-zone-badge map-zone-avoid ${isSelected ? 'selected' : ''}">
-            <div class="zone-badge-title">⛔ AVOID AREA</div>
+          <div class="map-zone-badge map-zone-avoid ${isSelected ? 'selected' : ''}" style="${
+          isDisabled ? 'border-color: #64748b; background: rgba(15, 23, 42, 0.92);' : ''
+        }">
+            <div class="zone-badge-title">
+              ⛔ AVOID AREA ${
+          isDisabled ? '<span style="color:#f87171">[DISABLED]</span>' : ''
+        }
+            </div>
             <div class="zone-badge-sub">${avoid.name}</div>
           </div>
         `;
@@ -505,8 +541,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           icon: L.divIcon({
             className: 'custom-div-icon',
             html: labelHtml,
-            iconSize: [150, 40],
-            iconAnchor: [75, 20],
+            iconSize: [170, 40],
+            iconAnchor: [85, 20],
           }),
         });
         marker.on('click', () => onSelectEntity(avoid.id));
@@ -708,9 +744,20 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (!showRoutes || computedRoutes.length === 0) return;
 
     const metroSourceIds = new Set(activeMetroCorridors.map((c) => c.sourceId));
+    const disabledSourceIds = new Set(
+      sourceAreas.filter((s) => s.disabled).map((s) => s.id)
+    );
+    const disabledTargetIds = new Set(
+      targetAreas.filter((t) => t.disabled).map((t) => t.id)
+    );
 
     computedRoutes
-      .filter((route) => !metroSourceIds.has(route.sourceId))
+      .filter(
+        (route) =>
+          !metroSourceIds.has(route.sourceId) &&
+          !disabledSourceIds.has(route.sourceId) &&
+          !disabledTargetIds.has(route.targetId)
+      )
       .forEach((route) => {
         const color = '#22c55e';
         const weight = 8;
@@ -742,7 +789,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
         polyline.addTo(routesGroup);
       });
-  }, [computedRoutes, showRoutes, activeMetroCorridors]);
+  }, [computedRoutes, showRoutes, activeMetroCorridors, sourceAreas, targetAreas]);
 
   // Render Blue Square Pickup Locations & Active Metro Station Pickup and Drop-Off Points with Live Queue & Boarding/Unloading Badges
   useEffect(() => {
@@ -751,10 +798,21 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     pickupGroup.clearLayers();
 
     const metroSourceIds = new Set(activeMetroCorridors.map((c) => c.sourceId));
+    const disabledSourceIds = new Set(
+      sourceAreas.filter((s) => s.disabled).map((s) => s.id)
+    );
+    const disabledTargetIds = new Set(
+      targetAreas.filter((t) => t.disabled).map((t) => t.id)
+    );
 
     if (showRoutes) {
       computedRoutes
-        .filter((route) => !metroSourceIds.has(route.sourceId))
+        .filter(
+          (route) =>
+            !metroSourceIds.has(route.sourceId) &&
+            !disabledSourceIds.has(route.sourceId) &&
+            !disabledTargetIds.has(route.targetId)
+        )
         .forEach((route, idx) => {
           if (!route.pickupLocation) return;
 
@@ -989,7 +1047,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
         dropOffMarker.addTo(pickupGroup);
       }
     });
-  }, [computedRoutes, pickupStates, vehicles, showRoutes, activeMetroCorridors]);
+  }, [computedRoutes, pickupStates, vehicles, showRoutes, activeMetroCorridors, sourceAreas, targetAreas]);
 
   // Render Active Moving Vehicle Markers AND Internal Source Crowd Clusters
   useEffect(() => {
@@ -997,11 +1055,20 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (!group) return;
     group.clearLayers();
 
-    if (!isSimulating && clusters.length === 0 && vehicles.length === 0) return;
+    if (!isTwinning && clusters.length === 0 && vehicles.length === 0) return;
 
-    // 1. Render micro-dots for crowd clusters moving inside Source Areas
+    const disabledSourceIds = new Set(
+      sourceAreas.filter((s) => s.disabled).map((s) => s.id)
+    );
+
+    // 1. Render micro-dots for crowd clusters (50 people per full dot; < 50 for remainder or partially-boarded waiting dots)
     clusters
-      .filter((c) => c.status === 'moving_in_zone' && c.headcount > 0)
+      .filter(
+        (c) =>
+          !disabledSourceIds.has(c.sourceId) &&
+          (c.status === 'moving_in_zone' || c.status === 'waiting_at_pickup') &&
+          c.headcount > 0
+      )
       .forEach((c) => {
         const dotColor =
           c.behavior === 'compliant'
@@ -1010,15 +1077,22 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             ? '#d97706'
             : '#e11d48';
 
+        const dotRadius =
+          c.headcount >= 50 ? 4 : Math.max(2.6, 2.6 + 1.4 * (c.headcount / 50));
+        const statusText =
+          c.status === 'waiting_at_pickup'
+            ? 'Waiting at pickup for evacuation vehicles'
+            : 'Moving toward pickup';
+
         L.circleMarker(c.position, {
-          radius: 4,
+          radius: dotRadius,
           color: '#090d16',
           weight: 1.2,
           fillColor: dotColor,
           fillOpacity: 0.92,
         })
           .bindTooltip(
-            `<b>${c.behavior.toUpperCase()} Cluster</b> (${c.headcount} evacuees)<br/>Moving toward pickup`,
+            `<b>${c.behavior.toUpperCase()} Cluster</b> (${c.headcount} / 50 evacuees)<br/>${statusText}`,
             { direction: 'top' }
           )
           .addTo(group);
@@ -1065,9 +1139,9 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             : '';
 
         const html = `
-          <div class="sim-vehicle-marker ${statusClass}" style="${metroStyle}">
-            <span class="sim-veh-icon">${vehIcon}</span>
-            <span class="sim-veh-badge">
+          <div class="twin-vehicle-marker ${statusClass}" style="${metroStyle}">
+            <span class="twin-veh-icon">${vehIcon}</span>
+            <span class="twin-veh-badge">
               ${
                 veh.status === 'waiting_for_80_pct'
                   ? `${occPct}%`
@@ -1133,7 +1207,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
         marker.addTo(group);
       });
-  }, [vehicles, clusters, isSimulating]);
+  }, [vehicles, clusters, isTwinning, sourceAreas]);
 
   // Render drawing preview polygon/markers
   useEffect(() => {
@@ -1180,101 +1254,109 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     }
   }, [activeDrawMode]);
 
-  // Heatmap HTML5 Canvas rendering function
-  const renderHeatmapCanvas = () => {
-    const canvas = heatmapCanvasRef.current;
-    const map = mapInstanceRef.current;
-    if (!canvas || !map) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const size = map.getSize();
-    if (canvas.width !== size.x || canvas.height !== size.y) {
-      canvas.width = size.x;
-      canvas.height = size.y;
-    }
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (!showHeatmap || heatmapPoints.length === 0) return;
-
-    const currentZoom = map.getZoom();
-    const baseRadius = Math.max(20, Math.min(64, Math.pow(1.32, currentZoom - 10) * 18));
-
-    heatmapPoints.forEach((pt) => {
-      const containerPt = map.latLngToContainerPoint([pt.lat, pt.lng]);
-
-      if (
-        containerPt.x < -baseRadius ||
-        containerPt.y < -baseRadius ||
-        containerPt.x > canvas.width + baseRadius ||
-        containerPt.y > canvas.height + baseRadius
-      ) {
-        return;
-      }
-
-      const radius =
-        pt.behavior === 'pickup_hotspot' ? baseRadius * 1.28 : baseRadius * 0.88;
-
-      const grad = ctx.createRadialGradient(
-        containerPt.x,
-        containerPt.y,
-        radius * 0.08,
-        containerPt.x,
-        containerPt.y,
-        radius
-      );
-
-      const alpha = Math.min(0.88, Math.max(0.15, pt.intensity * 0.85));
-
-      if (pt.behavior === 'pickup_hotspot') {
-        // Intense glowing thermal hotspot around Blue Square Pickup Locations!
-        grad.addColorStop(0, `rgba(255, 30, 30, ${Math.min(0.95, alpha * 1.15)})`);
-        grad.addColorStop(0.32, `rgba(249, 115, 22, ${alpha})`);
-        grad.addColorStop(0.65, `rgba(250, 204, 21, ${alpha * 0.65})`);
-        grad.addColorStop(1, 'rgba(250, 204, 21, 0)');
-      } else if (pt.behavior === 'disoriented') {
-        grad.addColorStop(0, `rgba(244, 63, 94, ${alpha * 0.8})`);
-        grad.addColorStop(0.5, `rgba(251, 146, 60, ${alpha * 0.55})`);
-        grad.addColorStop(1, 'rgba(251, 146, 60, 0)');
-      } else if (pt.behavior === 'self-directed') {
-        grad.addColorStop(0, `rgba(250, 204, 21, ${alpha * 0.8})`);
-        grad.addColorStop(0.5, `rgba(52, 211, 153, ${alpha * 0.55})`);
-        grad.addColorStop(1, 'rgba(52, 211, 153, 0)');
-      } else {
-        grad.addColorStop(0, `rgba(245, 158, 11, ${alpha * 0.75})`);
-        grad.addColorStop(0.5, `rgba(6, 182, 212, ${alpha * 0.5})`);
-        grad.addColorStop(1, 'rgba(6, 182, 212, 0)');
-      }
-
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(containerPt.x, containerPt.y, radius, 0, Math.PI * 2);
-      ctx.fill();
-    });
-  };
-
-  useEffect(() => {
-    renderHeatmapCanvas();
-  }, [heatmapPoints, showHeatmap]);
-
   return (
-    <div className="map-viewport-wrapper">
-      <div ref={mapContainerRef} className="leaflet-map-container" />
-
-      <canvas
-        ref={heatmapCanvasRef}
-        className="heatmap-overlay-canvas"
-        style={{ pointerEvents: 'none' }}
+    <div className="map-viewport-wrapper" style={{ position: 'relative' }}>
+      <div
+        ref={mapContainerRef}
+        className="leaflet-map-container"
+        style={{
+          pointerEvents: isComputingRoutes ? 'none' : 'auto',
+          filter: isComputingRoutes ? 'grayscale(35%) brightness(0.65)' : 'none',
+          transition: 'filter 0.2s ease',
+        }}
       />
 
+      {/* Centered Waiting Indicator Overlay while Computing Evacuation Routes */}
+      {isComputingRoutes && (
+        <div
+          id="map-computing-routes-overlay"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 2500,
+            backgroundColor: 'rgba(15, 23, 42, 0.52)',
+            backdropFilter: 'blur(3px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'auto',
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: 'rgba(15, 23, 42, 0.96)',
+              border: '1px solid rgba(56, 189, 248, 0.55)',
+              borderRadius: '12px',
+              padding: '22px 28px',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '14px',
+              boxShadow: '0 18px 44px rgba(0, 0, 0, 0.65)',
+              minWidth: '240px',
+            }}
+          >
+            <style>
+              {`@keyframes evacSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}
+            </style>
+            <Loader2
+              size={32}
+              style={{
+                color: '#38bdf8',
+                animation: 'evacSpin 1s linear infinite',
+              }}
+            />
+            <span
+              id="map-computing-routes-label"
+              style={{
+                fontSize: '0.95rem',
+                fontWeight: 700,
+                color: '#f8fafc',
+                letterSpacing: '0.03em',
+              }}
+            >
+              computing routes
+            </span>
+            {onStopComputingRoutes && (
+              <button
+                id="btn-stop-calculation"
+                type="button"
+                onClick={onStopComputingRoutes}
+                style={{
+                  marginTop: '2px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  padding: '8px 16px',
+                  borderRadius: '6px',
+                  backgroundColor: '#ef4444',
+                  border: '1px solid #f87171',
+                  color: '#ffffff',
+                  fontSize: '0.82rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  boxShadow: '0 4px 12px rgba(239, 68, 68, 0.4)',
+                }}
+              >
+                <X size={15} />
+                <span>stop calculation</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Top-Left Floating Map Layer Controls */}
-      <div className="map-floating-toolbar">
+      <div
+        className="map-floating-toolbar"
+        style={{ pointerEvents: isComputingRoutes ? 'none' : 'auto', opacity: isComputingRoutes ? 0.5 : 1 }}
+      >
         <button
           type="button"
           className="map-tool-btn active"
           onClick={cycleOsmStyle}
+          disabled={isComputingRoutes}
           title="Switch between free OpenStreetMap layers (no API key required)"
         >
           <Compass size={15} />
@@ -1285,6 +1367,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           type="button"
           className={`map-tool-btn ${showZones ? 'active' : ''}`}
           onClick={() => setShowZones(!showZones)}
+          disabled={isComputingRoutes}
           title="Toggle Zones & Depots"
         >
           <Layers size={15} />
@@ -1295,20 +1378,11 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           type="button"
           className={`map-tool-btn ${showRoutes ? 'active' : ''}`}
           onClick={() => setShowRoutes(!showRoutes)}
+          disabled={isComputingRoutes}
           title="Toggle Computed Routes & Pickup Squares"
         >
           {showRoutes ? <Eye size={15} /> : <EyeOff size={15} />}
           <span>Routes & Pickups ({computedRoutes.length})</span>
-        </button>
-
-        <button
-          type="button"
-          className={`map-tool-btn ${showHeatmap ? 'active' : ''}`}
-          onClick={() => setShowHeatmap(!showHeatmap)}
-          title="Toggle Evacuee Density Heatmap"
-        >
-          <span className="heatmap-dot-indicator" />
-          <span>Heatmap Overlay</span>
         </button>
       </div>
 
@@ -1335,10 +1409,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           <div className="legend-item">
             <span className="legend-line compliant-line" />
             <span>Evac Corridor</span>
-          </div>
-          <div className="legend-item">
-            <span className="legend-swatch hotspot-swatch" />
-            <span>Pickup Queue Heat</span>
           </div>
         </div>
       </div>

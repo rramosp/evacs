@@ -185,6 +185,58 @@ function serveBrusselsMetroParquetData(res: ServerResponse) {
   })
 }
 
+function serveEvaccastRouting(body: string, res: ServerResponse) {
+  const pythonBin = process.env.EE_PYTHON || '/opt/conda/envs/evacs/bin/python'
+  const scriptPath = path.resolve(process.cwd(), 'server/evaccast_routing.py')
+  const proc = spawn(pythonBin, [scriptPath])
+  let stdout = ''
+  let stderr = ''
+  let finished = false
+
+  res.on('close', () => {
+    if (!finished && !proc.killed) {
+      proc.kill('SIGTERM')
+    }
+  })
+
+  proc.stdout.on('data', (chunk) => {
+    stdout += chunk.toString()
+  })
+  proc.stderr.on('data', (chunk) => {
+    stderr += chunk.toString()
+  })
+  proc.on('close', (code) => {
+    finished = true
+    if (res.writableEnded || res.destroyed) {
+      return
+    }
+    res.setHeader('Content-Type', 'application/json')
+    const lines = stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('{') && l.endsWith('}'))
+
+    if (lines.length > 0) {
+      res.statusCode = 200
+      res.end(lines[lines.length - 1])
+      return
+    }
+
+    res.statusCode = 500
+    res.end(
+      JSON.stringify({
+        ok: false,
+        error:
+          stderr.trim() ||
+          `server/evaccast_routing.py exited with code ${code} without JSON output.`,
+      })
+    )
+  })
+
+  proc.stdin.write(body)
+  proc.stdin.end()
+}
+
 function createSpaceDataMiddleware(): Connect.NextHandleFunction {
   return (req, res, next) => {
     if (!req.url) {
@@ -200,6 +252,24 @@ function createSpaceDataMiddleware(): Connect.NextHandleFunction {
     // 0b. Brussels Metro Parquet Reader Endpoint (data/brussels_metro_lines.parquet & data/brussels_metro_stations.parquet)
     if (req.url.startsWith('/api/brussels-metro/network')) {
       serveBrusselsMetroParquetData(res)
+      return
+    }
+
+    // 0c. evaccast_v1 Routing Algorithm Endpoint (server/evaccast_routing.py)
+    if (req.url.startsWith('/api/routing/evaccast-v1')) {
+      if (req.method !== 'POST') {
+        res.setHeader('Content-Type', 'application/json')
+        res.statusCode = 405
+        res.end(JSON.stringify({ ok: false, error: 'Method Not Allowed. Use POST.' }))
+        return
+      }
+      let body = ''
+      req.on('data', (chunk) => {
+        body += chunk.toString()
+      })
+      req.on('end', () => {
+        serveEvaccastRouting(body, res)
+      })
       return
     }
 

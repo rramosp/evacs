@@ -39,7 +39,7 @@ export const BottomLogPanel: React.FC<BottomLogPanelProps> = ({
         <div className="bottom-title-group" style={{ minWidth: 0, flex: 1 }}>
           <Terminal size={15} className="terminal-icon" style={{ flexShrink: 0 }} />
           <span className="bottom-panel-title" style={{ flexShrink: 0 }}>
-            SYSTEM, ROUTING &amp; SIMULATION LOGS
+            SYSTEM, ROUTING &amp; TWIN LOGS
           </span>
           <span className="log-count-badge" style={{ flexShrink: 0 }}>
             {filteredLogs.length} events
@@ -56,7 +56,7 @@ export const BottomLogPanel: React.FC<BottomLogPanelProps> = ({
             <>
               <div className="log-filter-pills">
                 <Filter size={12} />
-                {(['ALL', 'ROUTING', 'SIMULATION', 'WARN', 'INFO'] as const).map((lvl) => (
+                {(['ALL', 'ROUTING', 'TWIN', 'WARN', 'INFO'] as const).map((lvl) => (
                   <button
                     key={lvl}
                     type="button"
@@ -96,7 +96,7 @@ export const BottomLogPanel: React.FC<BottomLogPanelProps> = ({
               id="btn-toggle-bottom-panel"
               className="btn-collapse-panel"
               onClick={onToggleCollapse}
-              title={isCollapsed ? 'Expand System & Simulation Log Panel' : 'Collapse System & Simulation Log Panel'}
+              title={isCollapsed ? 'Expand System & Twin Log Panel' : 'Collapse System & Twin Log Panel'}
             >
               {isCollapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
               <span>{isCollapsed ? 'Expand Logs' : 'Collapse'}</span>
@@ -109,13 +109,13 @@ export const BottomLogPanel: React.FC<BottomLogPanelProps> = ({
         <div ref={logContainerRef} className="log-stream-container">
           {filteredLogs.length === 0 ? (
             <div className="empty-logs-state">
-              No log entries matching filter [{filterLevel}]. Compute evacuation routes or run simulation to view live telemetry events.
+              No log entries matching filter [{filterLevel}]. Compute evacuation routes or run twin to view live telemetry events.
             </div>
           ) : (
             filteredLogs.map((log) => (
               <div key={log.id} className={`log-entry-row log-level-${log.level.toLowerCase()}`}>
                 <span className="log-wall-time">[{log.timestamp}]</span>
-                <span className="log-sim-time">T+{log.simTimeFormatted}</span>
+                <span className="log-twin-time">T+{log.twinTimeFormatted}</span>
                 <span className={`log-level-badge badge-${log.level.toLowerCase()}`}>
                   {log.level}
                 </span>

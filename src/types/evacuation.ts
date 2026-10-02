@@ -12,6 +12,7 @@ export interface SourceArea {
   polygon: [number, number][]; // Array of [lat, lng]
   population: number;
   behavior: BehavioralDistribution;
+  disabled?: boolean; // When true, excluded from route computation and evacuation twin
 }
 
 export interface TargetArea {
@@ -27,6 +28,7 @@ export interface AvoidArea {
   id: string;
   name: string;
   polygon: [number, number][]; // Array of [lat, lng]
+  disabled?: boolean; // When true, hazard zone is inactive and ignored during route computation
 }
 
 export type VehicleType = 'Bus' | 'Private Car' | 'Shuttle' | 'Metro';
@@ -42,6 +44,8 @@ export interface VehicleFleet {
   transitSpeedKmh: number; // Vehicle transit speed in km/h (default 25 km/h)
 }
 
+export type RoutingAlgorithm = 'Basic OSM' | 'evaccast_v1';
+
 export interface ComputedRoute {
   id: string;
   sourceId: string;
@@ -50,6 +54,7 @@ export interface ComputedRoute {
   targetName: string;
   behaviorType: PopulationBehaviorType | 'vehicle_dispatch';
   pickupLocation: [number, number]; // Specific [lat, lng] pickup point on the Source Area
+  dropOffLocation?: [number, number]; // Specific [lat, lng] drop-off point on the Target Area
   pickupLabel: string;              // Descriptive label for the pickup location
   coordinates: [number, number][];  // [lat, lng] path from Pickup Location -> Target Area
   approachCoordinates?: [number, number][]; // [lat, lng] path from Vehicle Depot -> Pickup Location
@@ -62,12 +67,12 @@ export interface ComputedRoute {
   vehicleCountUsed?: number;
 }
 
-export type LogLevel = 'INFO' | 'WARN' | 'ROUTING' | 'SIMULATION';
+export type LogLevel = 'INFO' | 'WARN' | 'ROUTING' | 'TWIN';
 
 export interface LogEntry {
   id: string;
   timestamp: string;
-  simTimeFormatted: string;
+  twinTimeFormatted: string;
   level: LogLevel;
   message: string;
 }
@@ -78,7 +83,7 @@ export interface BehaviorCounts {
   disoriented: number;
 }
 
-export interface SimulationTelemetryStats {
+export interface TwinTelemetryStats {
   initialByBehavior: BehaviorCounts;
   evacuatedByBehavior: BehaviorCounts;
   evacuatedPersonSecondsByBehavior: BehaviorCounts;
@@ -174,13 +179,13 @@ export interface ActiveVehicleUnit {
   targetStationName?: string;
 }
 
-export interface SimulationStateSnapshot {
+export interface TwinStateSnapshot {
   clusters: SourceInternalCluster[];
   pickupStates: PickupLocationState[];
   vehicles: ActiveVehicleUnit[];
   heatmapPoints: HeatmapPoint[];
   targetOccupancies: Record<string, number>;
-  telemetryStats: SimulationTelemetryStats;
+  telemetryStats: TwinTelemetryStats;
   newLogs: string[];
   totalEvacuated: number;
   totalInTransit: number;

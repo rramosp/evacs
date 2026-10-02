@@ -15,6 +15,7 @@ import {
   BrusselsMetroMatchedStation,
   BrusselsMetroCorridor,
   BrusselsMetroConfig,
+  RoutingAlgorithm,
 } from '../types/evacuation';
 import {
   Route,
@@ -61,6 +62,7 @@ interface LeftControlPanelProps {
   remainingBySource: Record<string, number>;
   onAddSourceArea: (src: Omit<SourceArea, 'id'>) => void;
   onUpdateSourceArea: (src: SourceArea) => void;
+  onToggleDisableSourceArea: (id: string) => void;
   onDeleteSourceArea: (id: string) => void;
   onAddTargetArea: (tgt: Omit<TargetArea, 'id' | 'currentOccupancy'>) => void;
   onUpdateTargetArea: (tgt: TargetArea) => void;
@@ -68,21 +70,25 @@ interface LeftControlPanelProps {
   onDeleteTargetArea: (id: string) => void;
   onAddAvoidArea: (avoid: Omit<AvoidArea, 'id'>) => void;
   onUpdateAvoidArea: (avoid: AvoidArea) => void;
+  onToggleDisableAvoidArea: (id: string) => void;
   onDeleteAvoidArea: (id: string) => void;
   onAddVehicleFleet: (fleet: Omit<VehicleFleet, 'id'>) => void;
   onUpdateVehicleFleet: (fleet: VehicleFleet) => void;
   onDeleteVehicleFleet: (id: string) => void;
+  routingAlgorithm: RoutingAlgorithm;
+  onChangeRoutingAlgorithm: (algo: RoutingAlgorithm) => void;
   onComputeRoutes: () => void;
+  onStopComputingRoutes?: () => void;
   isComputingRoutes: boolean;
   hasComputedRoutes: boolean;
-  onRunSimulation: () => void;
-  onStopSimulation: () => void;
-  onResetSimulation: () => void;
-  onOpenSimulationReport: () => void;
-  isSimulating: boolean;
-  isSimulationInProgress?: boolean;
-  simSpeed: number;
-  onChangeSimSpeed: (speed: number) => void;
+  onRunTwin: () => void;
+  onStopTwin: () => void;
+  onResetTwin: () => void;
+  onOpenTwinReport: () => void;
+  isTwinning: boolean;
+  isTwinInProgress?: boolean;
+  twinSpeed: number;
+  onChangeTwinSpeed: (speed: number) => void;
   activeDrawMode: ActiveDrawMode;
   onStartDrawing: (type: 'source' | 'target' | 'avoid' | 'vehicle') => void;
   pendingDrawnPolygon: [number, number][] | null;
@@ -133,6 +139,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   remainingBySource,
   onAddSourceArea,
   onUpdateSourceArea,
+  onToggleDisableSourceArea,
   onDeleteSourceArea,
   onAddTargetArea,
   onUpdateTargetArea,
@@ -140,21 +147,25 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onDeleteTargetArea,
   onAddAvoidArea,
   onUpdateAvoidArea,
+  onToggleDisableAvoidArea,
   onDeleteAvoidArea,
   onAddVehicleFleet,
   onUpdateVehicleFleet,
   onDeleteVehicleFleet,
+  routingAlgorithm,
+  onChangeRoutingAlgorithm,
   onComputeRoutes,
+  onStopComputingRoutes,
   isComputingRoutes,
   hasComputedRoutes,
-  onRunSimulation,
-  onStopSimulation,
-  onResetSimulation,
-  onOpenSimulationReport,
-  isSimulating,
-  isSimulationInProgress = false,
-  simSpeed,
-  onChangeSimSpeed,
+  onRunTwin,
+  onStopTwin,
+  onResetTwin,
+  onOpenTwinReport,
+  isTwinning,
+  isTwinInProgress = false,
+  twinSpeed,
+  onChangeTwinSpeed,
   activeDrawMode,
   onStartDrawing,
   pendingDrawnPolygon,
@@ -239,7 +250,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
   const handleSaveNewEntity = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSimulating) return;
+    if (isTwinning) return;
     if (pendingDrawnPolygon && activeDrawMode?.type === 'source') {
       onAddSourceArea({
         name: srcForm.name || `Evacuation Zone #${sourceAreas.length + 1}`,
@@ -250,6 +261,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           'self-directed': Number(srcForm.selfDirected),
           disoriented: Number(srcForm.disoriented),
         },
+        disabled: false,
       });
     } else if (pendingDrawnPolygon && activeDrawMode?.type === 'target') {
       onAddTargetArea({
@@ -262,6 +274,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
       onAddAvoidArea({
         name: avoidForm.name || `Avoid Area #${avoidAreas.length + 1}`,
         polygon: pendingDrawnPolygon,
+        disabled: false,
       });
     } else if (pendingPlacedPoint && activeDrawMode?.type === 'vehicle') {
       onAddVehicleFleet({
@@ -289,7 +302,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
   // Start editing an existing Source Area (only when paused)
   const startEditSource = (src: SourceArea, currentRemaining: number) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     setEditingSourceId(src.id);
     setSrcForm({
       name: src.name,
@@ -301,7 +314,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   };
 
   const saveEditSource = (src: SourceArea) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     onUpdateSourceArea({
       ...src,
       name: srcForm.name,
@@ -317,7 +330,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
   // Start editing an existing Target Area (only when paused)
   const startEditTarget = (tgt: TargetArea) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     setEditingTargetId(tgt.id);
     setTgtForm({
       name: tgt.name,
@@ -326,7 +339,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   };
 
   const saveEditTarget = (tgt: TargetArea) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     onUpdateTargetArea({
       ...tgt,
       name: tgtForm.name,
@@ -337,13 +350,13 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
   // Start editing an existing Avoid Area (only when paused)
   const startEditAvoid = (avoid: AvoidArea) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     setEditingAvoidId(avoid.id);
     setAvoidForm({ name: avoid.name });
   };
 
   const saveEditAvoid = (avoid: AvoidArea) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     onUpdateAvoidArea({
       ...avoid,
       name: avoidForm.name,
@@ -353,7 +366,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
   // Start editing an existing Vehicle Fleet (only when paused)
   const startEditVehicle = (veh: VehicleFleet) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     setEditingVehicleId(veh.id);
     setVehForm({
       name: veh.name,
@@ -366,7 +379,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   };
 
   const saveEditVehicle = (veh: VehicleFleet) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     onUpdateVehicleFleet({
       ...veh,
       name: vehForm.name,
@@ -415,7 +428,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             if (e.key === 'Enter' || e.key === ' ') onToggleCollapse?.();
           }}
         >
-          <span className="brand-badge">EVAC-SIM</span>
+          <span className="brand-badge">EVAC-TWIN</span>
           <span>PARAMETERS &amp; CONTROLS</span>
         </div>
       </aside>
@@ -424,12 +437,12 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
   return (
     <aside className="cockpit-left-panel" id="left-parameters-panel">
-      {/* Application Brand Header with EVAC-SIM Logo */}
+      {/* Application Brand Header with EVAC-TWIN Logo */}
       <header className="panel-brand-header">
         <div className="brand-title-row" style={{ justifyContent: 'space-between', gap: '10px' }}>
           <img
             src={evacLogoUrl}
-            alt="EVAC-SIM"
+            alt="EVAC-TWIN"
             className="brand-logo-img"
             style={{
               height: '38px',
@@ -453,7 +466,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             </button>
           )}
         </div>
-        <p className="brand-subtitle">OSM Tactical Routing & Crowd Simulation</p>
+        <p className="brand-subtitle">OSM Tactical Routing & Crowd Twin</p>
       </header>
 
       {/* Preset Scenario Selector & Show Labels Toggle */}
@@ -465,7 +478,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           id="preset-scenario-select"
           className="tactical-select"
           value={selectedPreset}
-          disabled={isSimulating}
+          disabled={isTwinning}
           onChange={(e) => onSelectPreset(e.target.value as PresetScenarioId)}
         >
           {presetScenarios.map((scenario) => (
@@ -567,7 +580,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         </div>
       </section>
 
-      {/* Top-Justified Stack of 3 Collapsible Sections: 1. Parameters, 2. Execution & Simulation, 3. Space Data */}
+      {/* Top-Justified Stack of 3 Collapsible Sections: 1. Parameters, 2. Execution & Twin, 3. Space Data */}
       <div className="left-panel-sections-stack">
       {/* 1. Parameters Section (Sources, Targets, Avoid Areas, Vehicles — Collapsible) */}
       <section
@@ -606,8 +619,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
         {!isParametersCollapsed && (
           <>
-      {/* Pause Requirement Notice Banner when Simulation is Active */}
-      {isSimulating && (
+      {/* Pause Requirement Notice Banner when Twin is Active */}
+      {isTwinning && (
         <div
           style={{
             margin: '0 14px 8px 14px',
@@ -625,7 +638,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         >
           <Lock size={14} style={{ flexShrink: 0 }} />
           <span>
-            <strong>Editing Locked:</strong> Pause simulation first to add, modify, disable, or delete areas and vehicles.
+            <strong>Editing Locked:</strong> Pause twin first to add, modify, disable, or delete areas and vehicles.
           </span>
         </div>
       )}
@@ -911,12 +924,12 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         {activeTab === 'sources' && (
           <div className="entity-tab-content">
             <div className="tab-header-action">
-              <span className="tab-desc">Evacuation Zones (Polygons)</span>
+              <span className="tab-desc">Evacuation Zones (Can be disabled or removed)</span>
               <button
                 type="button"
                 className="btn-add-entity source-add"
-                disabled={isSimulating}
-                title={isSimulating ? 'Pause simulation to add a Source Area' : 'Draw new Source Area on map'}
+                disabled={isTwinning}
+                title={isTwinning ? 'Pause twin to add a Source Area' : 'Draw new Source Area on map'}
                 onClick={() => {
                   setSrcForm({
                     name: `Source Zone #${sourceAreas.length + 1}`,
@@ -936,12 +949,17 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             {sourceAreas.map((src) => {
               const isEditing = editingSourceId === src.id;
               const isSelected = selectedEntityId === src.id;
+              const isDisabled = Boolean(src.disabled);
               const remainingPeople = remainingBySource[src.id] ?? src.population;
 
               return (
                 <div
                   key={src.id}
                   className={`entity-item-card source-card ${isSelected ? 'selected' : ''}`}
+                  style={{
+                    opacity: isDisabled ? 0.72 : 1,
+                    borderColor: isDisabled ? '#64748b' : undefined,
+                  }}
                   onClick={() => onSelectEntity(src.id)}
                 >
                   {isEditing ? (
@@ -1010,17 +1028,34 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     <>
                       <div className="entity-card-top">
                         <div className="entity-title-group">
-                          <span className="entity-dot source-dot" />
-                          <span className="entity-name">{src.name}</span>
+                          <span
+                            className="entity-dot source-dot"
+                            style={{ background: isDisabled ? '#64748b' : undefined }}
+                          />
+                          <span className="entity-name">
+                            {src.name}
+                            {isDisabled && (
+                              <span
+                                style={{
+                                  marginLeft: '6px',
+                                  fontSize: '0.68rem',
+                                  color: '#f87171',
+                                  fontWeight: 700,
+                                }}
+                              >
+                                [DISABLED]
+                              </span>
+                            )}
+                          </span>
                         </div>
                         <div className="entity-actions">
                           <button
                             type="button"
                             className="btn-entity-icon"
-                            disabled={isSimulating}
+                            disabled={isTwinning}
                             title={
-                              isSimulating
-                                ? 'Pause simulation to modify Source Area or people count'
+                              isTwinning
+                                ? 'Pause twin to modify Source Area or people count'
                                 : 'Modify Source Area & People Count'
                             }
                             onClick={(e) => {
@@ -1031,10 +1066,55 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             <Pencil size={13} />
                           </button>
                           <button
+                            id={`btn-disable-source-${src.id}`}
+                            type="button"
+                            className="btn-entity-icon"
+                            disabled={isTwinning}
+                            title={
+                              isTwinning
+                                ? 'Pause twin to disable/enable Source Area'
+                                : isDisabled
+                                ? 'Enable Source Area for evacuation routing and twin simulation'
+                                : 'Disable Source Area (exclude from routing and twin evacuation)'
+                            }
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: '4px',
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              background: isDisabled
+                                ? 'rgba(16, 185, 129, 0.18)'
+                                : 'rgba(245, 158, 11, 0.16)',
+                              color: isDisabled ? '#34d399' : '#fbbf24',
+                              border: isDisabled
+                                ? '1px solid rgba(16, 185, 129, 0.4)'
+                                : '1px solid rgba(245, 158, 11, 0.4)',
+                              opacity: isTwinning ? 0.4 : 1,
+                              cursor: isTwinning ? 'not-allowed' : 'pointer',
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onToggleDisableSourceArea(src.id);
+                            }}
+                          >
+                            {isDisabled ? (
+                              <>
+                                <CheckCircle2 size={12} /> Enable
+                              </>
+                            ) : (
+                              <>
+                                <Ban size={12} /> Disable
+                              </>
+                            )}
+                          </button>
+                          <button
                             id={`btn-remove-source-${src.id}`}
                             type="button"
                             className="btn-entity-icon delete"
-                            disabled={isSimulating}
+                            disabled={isTwinning}
                             style={{
                               padding: '3px 7px',
                               borderRadius: '4px',
@@ -1046,17 +1126,17 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                               background: 'rgba(239, 68, 68, 0.16)',
                               color: '#f87171',
                               border: '1px solid rgba(239, 68, 68, 0.4)',
-                              opacity: isSimulating ? 0.4 : 1,
-                              cursor: isSimulating ? 'not-allowed' : 'pointer',
+                              opacity: isTwinning ? 0.4 : 1,
+                              cursor: isTwinning ? 'not-allowed' : 'pointer',
                             }}
                             title={
-                              isSimulating
-                                ? 'Pause simulation to remove Source Area'
+                              isTwinning
+                                ? 'Pause twin to remove Source Area'
                                 : `Remove Source Area "${src.name}"`
                             }
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (!isSimulating) {
+                              if (!isTwinning) {
                                 setPendingRemovalArea({
                                   type: 'source',
                                   id: src.id,
@@ -1077,6 +1157,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           Cp {src.behavior.compliant}% · Sd {src.behavior['self-directed']}% · Ds{' '}
                           {src.behavior.disoriented}%
                         </span>
+                        {isDisabled && (
+                          <span className="metric-pill hazard-pill">
+                            🚫 Excluded from Evacuation
+                          </span>
+                        )}
                       </div>
                     </>
                   )}
@@ -1094,8 +1179,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               <button
                 type="button"
                 className="btn-add-entity target-add"
-                disabled={isSimulating}
-                title={isSimulating ? 'Pause simulation to add a Target Area' : 'Draw new Target Area on map'}
+                disabled={isTwinning}
+                title={isTwinning ? 'Pause twin to add a Target Area' : 'Draw new Target Area on map'}
                 onClick={() => {
                   setTgtForm({
                     name: `Shelter Zone #${targetAreas.length + 1}`,
@@ -1187,8 +1272,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon"
-                            disabled={isSimulating}
-                            title={isSimulating ? 'Pause simulation to modify Target Area' : 'Modify Target Shelter'}
+                            disabled={isTwinning}
+                            title={isTwinning ? 'Pause twin to modify Target Area' : 'Modify Target Shelter'}
                             onClick={(e) => {
                               e.stopPropagation();
                               startEditTarget(tgt);
@@ -1197,12 +1282,13 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             <Pencil size={13} />
                           </button>
                           <button
+                            id={`btn-disable-target-${tgt.id}`}
                             type="button"
                             className="btn-entity-icon"
-                            disabled={isSimulating}
+                            disabled={isTwinning}
                             title={
-                              isSimulating
-                                ? 'Pause simulation to disable/enable Target Area'
+                              isTwinning
+                                ? 'Pause twin to disable/enable Target Area'
                                 : isDisabled
                                 ? 'Enable Target Area to receive evacuees'
                                 : 'Disable Target Area (will receive no more people)'
@@ -1222,6 +1308,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                               border: isDisabled
                                 ? '1px solid rgba(16, 185, 129, 0.4)'
                                 : '1px solid rgba(245, 158, 11, 0.4)',
+                              opacity: isTwinning ? 0.4 : 1,
+                              cursor: isTwinning ? 'not-allowed' : 'pointer',
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
@@ -1242,7 +1330,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             id={`btn-remove-target-${tgt.id}`}
                             type="button"
                             className="btn-entity-icon delete"
-                            disabled={isSimulating}
+                            disabled={isTwinning}
                             style={{
                               padding: '3px 7px',
                               borderRadius: '4px',
@@ -1254,17 +1342,17 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                               background: 'rgba(239, 68, 68, 0.16)',
                               color: '#f87171',
                               border: '1px solid rgba(239, 68, 68, 0.4)',
-                              opacity: isSimulating ? 0.4 : 1,
-                              cursor: isSimulating ? 'not-allowed' : 'pointer',
+                              opacity: isTwinning ? 0.4 : 1,
+                              cursor: isTwinning ? 'not-allowed' : 'pointer',
                             }}
                             title={
-                              isSimulating
-                                ? 'Pause simulation to remove Target Area'
+                              isTwinning
+                                ? 'Pause twin to remove Target Area'
                                 : `Remove Target Area "${tgt.name}"`
                             }
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (!isSimulating) {
+                              if (!isTwinning) {
                                 setPendingRemovalArea({
                                   type: 'target',
                                   id: tgt.id,
@@ -1302,12 +1390,12 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         {activeTab === 'avoids' && (
           <div className="entity-tab-content">
             <div className="tab-header-action">
-              <span className="tab-desc">Blocked / Hazard Zones</span>
+              <span className="tab-desc">Blocked / Hazard Zones (Can be disabled or removed)</span>
               <button
                 type="button"
                 className="btn-add-entity avoid-add"
-                disabled={isSimulating}
-                title={isSimulating ? 'Pause simulation to add an Avoid Area' : 'Draw new Avoid Area on map'}
+                disabled={isTwinning}
+                title={isTwinning ? 'Pause twin to add an Avoid Area' : 'Draw new Avoid Area on map'}
                 onClick={() => {
                   setAvoidForm({
                     name: `Avoid Area #${avoidAreas.length + 1}`,
@@ -1323,11 +1411,16 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             {avoidAreas.map((avoid) => {
               const isEditing = editingAvoidId === avoid.id;
               const isSelected = selectedEntityId === avoid.id;
+              const isDisabled = Boolean(avoid.disabled);
 
               return (
                 <div
                   key={avoid.id}
                   className={`entity-item-card avoid-card ${isSelected ? 'selected' : ''}`}
+                  style={{
+                    opacity: isDisabled ? 0.72 : 1,
+                    borderColor: isDisabled ? '#64748b' : undefined,
+                  }}
                   onClick={() => onSelectEntity(avoid.id)}
                 >
                   {isEditing ? (
@@ -1358,15 +1451,32 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     <>
                       <div className="entity-card-top">
                         <div className="entity-title-group">
-                          <span className="entity-dot avoid-dot" />
-                          <span className="entity-name">{avoid.name}</span>
+                          <span
+                            className="entity-dot avoid-dot"
+                            style={{ background: isDisabled ? '#64748b' : undefined }}
+                          />
+                          <span className="entity-name">
+                            {avoid.name}
+                            {isDisabled && (
+                              <span
+                                style={{
+                                  marginLeft: '6px',
+                                  fontSize: '0.68rem',
+                                  color: '#f87171',
+                                  fontWeight: 700,
+                                }}
+                              >
+                                [DISABLED]
+                              </span>
+                            )}
+                          </span>
                         </div>
                         <div className="entity-actions">
                           <button
                             type="button"
                             className="btn-entity-icon"
-                            disabled={isSimulating}
-                            title={isSimulating ? 'Pause simulation to modify Avoid Area' : 'Modify Avoid Area'}
+                            disabled={isTwinning}
+                            title={isTwinning ? 'Pause twin to modify Avoid Area' : 'Modify Avoid Area'}
                             onClick={(e) => {
                               e.stopPropagation();
                               startEditAvoid(avoid);
@@ -1375,10 +1485,55 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             <Pencil size={13} />
                           </button>
                           <button
+                            id={`btn-disable-avoid-${avoid.id}`}
+                            type="button"
+                            className="btn-entity-icon"
+                            disabled={isTwinning}
+                            title={
+                              isTwinning
+                                ? 'Pause twin to disable/enable Avoid Area'
+                                : isDisabled
+                                ? 'Enable Avoid Area to block evacuation routes'
+                                : 'Disable Avoid Area (routes may pass through this zone)'
+                            }
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: '4px',
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              background: isDisabled
+                                ? 'rgba(16, 185, 129, 0.18)'
+                                : 'rgba(245, 158, 11, 0.16)',
+                              color: isDisabled ? '#34d399' : '#fbbf24',
+                              border: isDisabled
+                                ? '1px solid rgba(16, 185, 129, 0.4)'
+                                : '1px solid rgba(245, 158, 11, 0.4)',
+                              opacity: isTwinning ? 0.4 : 1,
+                              cursor: isTwinning ? 'not-allowed' : 'pointer',
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onToggleDisableAvoidArea(avoid.id);
+                            }}
+                          >
+                            {isDisabled ? (
+                              <>
+                                <CheckCircle2 size={12} /> Enable
+                              </>
+                            ) : (
+                              <>
+                                <Ban size={12} /> Disable
+                              </>
+                            )}
+                          </button>
+                          <button
                             id={`btn-remove-avoid-${avoid.id}`}
                             type="button"
                             className="btn-entity-icon delete"
-                            disabled={isSimulating}
+                            disabled={isTwinning}
                             style={{
                               padding: '3px 7px',
                               borderRadius: '4px',
@@ -1390,17 +1545,17 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                               background: 'rgba(239, 68, 68, 0.16)',
                               color: '#f87171',
                               border: '1px solid rgba(239, 68, 68, 0.4)',
-                              opacity: isSimulating ? 0.4 : 1,
-                              cursor: isSimulating ? 'not-allowed' : 'pointer',
+                              opacity: isTwinning ? 0.4 : 1,
+                              cursor: isTwinning ? 'not-allowed' : 'pointer',
                             }}
                             title={
-                              isSimulating
-                                ? 'Pause simulation to remove Avoid Area'
+                              isTwinning
+                                ? 'Pause twin to remove Avoid Area'
                                 : `Remove Avoid Area "${avoid.name}"`
                             }
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (!isSimulating) {
+                              if (!isTwinning) {
                                 setPendingRemovalArea({
                                   type: 'avoid',
                                   id: avoid.id,
@@ -1414,9 +1569,15 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         </div>
                       </div>
                       <div className="entity-card-metrics">
-                        <span className="metric-pill hazard-pill">
-                          ⛔ Strict Routing Exclusion Active
-                        </span>
+                        {isDisabled ? (
+                          <span className="metric-pill">
+                            🚫 Hazard Exclusion Disabled (Routes Allowed)
+                          </span>
+                        ) : (
+                          <span className="metric-pill hazard-pill">
+                            ⛔ Strict Routing Exclusion Active
+                          </span>
+                        )}
                       </div>
                     </>
                   )}
@@ -1434,8 +1595,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               <button
                 type="button"
                 className="btn-add-entity vehicle-add"
-                disabled={isSimulating}
-                title={isSimulating ? 'Pause simulation to add a Vehicle Fleet' : 'Place new Vehicle Fleet on map'}
+                disabled={isTwinning}
+                title={isTwinning ? 'Pause twin to add a Vehicle Fleet' : 'Place new Vehicle Fleet on map'}
                 onClick={() => {
                   setVehForm({
                     name: `Bus Fleet #${vehicleFleets.length + 1}`,
@@ -1555,8 +1716,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon"
-                            disabled={isSimulating}
-                            title={isSimulating ? 'Pause simulation to modify Vehicle Fleet' : 'Modify Vehicle Fleet'}
+                            disabled={isTwinning}
+                            title={isTwinning ? 'Pause twin to modify Vehicle Fleet' : 'Modify Vehicle Fleet'}
                             onClick={(e) => {
                               e.stopPropagation();
                               startEditVehicle(veh);
@@ -1567,8 +1728,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <button
                             type="button"
                             className="btn-entity-icon delete"
-                            disabled={isSimulating}
-                            title={isSimulating ? 'Pause simulation to delete Vehicle Fleet' : 'Delete Vehicle Fleet'}
+                            disabled={isTwinning}
+                            title={isTwinning ? 'Pause twin to delete Vehicle Fleet' : 'Delete Vehicle Fleet'}
                             onClick={(e) => {
                               e.stopPropagation();
                               onDeleteVehicleFleet(veh.id);
@@ -1610,7 +1771,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         )}
       </section>
 
-      {/* 2. Primary Action & Simulation Execution Controls (Collapsible, Below Parameters) */}
+      {/* 2. Primary Action & Twin Execution Controls (Collapsible, Below Parameters) */}
       <section className="panel-section execution-controls-section">
         <button
           id="toggle-execution-section"
@@ -1631,7 +1792,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           }}
         >
           <span className="section-label" style={{ marginBottom: 0 }}>
-            EXECUTION & SIMULATION
+            EXECUTION & TWIN
           </span>
           {isExecutionCollapsed ? (
             <ChevronRight size={15} style={{ color: '#94a3b8' }} />
@@ -1642,6 +1803,33 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
         {!isExecutionCollapsed && (
           <>
+            <div style={{ marginBottom: '8px' }}>
+              <label
+                htmlFor="routing-algorithm-select"
+                style={{
+                  display: 'block',
+                  fontSize: '0.68rem',
+                  fontWeight: 600,
+                  color: '#94a3b8',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                  marginBottom: '4px',
+                }}
+              >
+                Routing Algorithm
+              </label>
+              <select
+                id="routing-algorithm-select"
+                className="tactical-select"
+                value={routingAlgorithm}
+                onChange={(e) => onChangeRoutingAlgorithm(e.target.value as RoutingAlgorithm)}
+                disabled={isComputingRoutes || isTwinning}
+              >
+                <option value="Basic OSM">Basic OSM</option>
+                <option value="evaccast_v1">evaccast_v1</option>
+              </select>
+            </div>
+
             <button
               id="btn-compute-routes"
               type="button"
@@ -1649,68 +1837,98 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               onClick={onComputeRoutes}
               disabled={
                 isComputingRoutes ||
-                isSimulating ||
-                isSimulationInProgress ||
-                sourceAreas.length === 0 ||
+                isTwinning ||
+                sourceAreas.filter((s) => !s.disabled).length === 0 ||
                 targetAreas.filter((t) => !t.disabled).length === 0
               }
               title={
-                isSimulating || isSimulationInProgress
-                  ? 'Disabled while simulation is running — wait until simulation finishes or click Reset simulation'
+                isTwinning
+                  ? 'Disabled while twin is actively running — click Stop twin first to recalculate routes'
+                  : isTwinInProgress
+                  ? 'Recalculate evacuation routes and direct any off-route buses to the closest evacuation route'
                   : 'Compute obstacle-avoiding evacuation routes'
               }
             >
               <Route size={16} />
               <span>
-                {isComputingRoutes ? 'Computing OSRM Routes...' : 'Compute evacuation routes'}
+                {isComputingRoutes
+                  ? `Computing routes (${routingAlgorithm})...`
+                  : 'Compute evacuation routes'}
               </span>
             </button>
 
-            <div className="sim-buttons-grid">
+            {isComputingRoutes && onStopComputingRoutes && (
               <button
-                id="btn-run-simulation"
+                id="btn-stop-calculation-left"
                 type="button"
-                className={`btn-sim-action run-btn ${isSimulating ? 'active-running' : ''}`}
-                onClick={onRunSimulation}
-                disabled={(!hasComputedRoutes && !isSimulating) || isComputingRoutes}
-                title={!hasComputedRoutes ? 'Compute evacuation routes first' : 'Run / Resume simulation'}
+                className="btn-twin-action stop-btn"
+                onClick={onStopComputingRoutes}
+                style={{
+                  marginTop: '6px',
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  padding: '8px 12px',
+                  borderRadius: '6px',
+                  backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                  border: '1px solid rgba(239, 68, 68, 0.65)',
+                  color: '#fca5a5',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                <X size={15} />
+                <span>Stop calculation</span>
+              </button>
+            )}
+
+            <div className="twin-buttons-grid">
+              <button
+                id="btn-run-twin"
+                type="button"
+                className={`btn-twin-action run-btn ${isTwinning ? 'active-running' : ''}`}
+                onClick={onRunTwin}
+                disabled={(!hasComputedRoutes && !isTwinning) || isComputingRoutes}
+                title={!hasComputedRoutes ? 'Compute evacuation routes first' : 'Run / Resume twin'}
               >
                 <Play size={15} />
-                <span>Run simulation</span>
+                <span>Run twin</span>
               </button>
 
               <button
-                id="btn-stop-simulation"
+                id="btn-stop-twin"
                 type="button"
-                className="btn-sim-action stop-btn"
-                onClick={onStopSimulation}
-                disabled={!isSimulating}
+                className="btn-twin-action stop-btn"
+                onClick={onStopTwin}
+                disabled={!isTwinning}
               >
                 <Pause size={15} />
-                <span>Pause simulation</span>
+                <span>Pause twin</span>
               </button>
 
               <button
-                id="btn-reset-simulation"
+                id="btn-reset-twin"
                 type="button"
-                className="btn-sim-action reset-btn"
-                onClick={onResetSimulation}
+                className="btn-twin-action reset-btn"
+                onClick={onResetTwin}
               >
                 <RotateCcw size={15} />
-                <span>Reset simulation</span>
+                <span>Reset twin</span>
               </button>
             </div>
 
             <button
-              id="btn-simulation-report"
+              id="btn-twin-report"
               type="button"
-              className="btn-sim-action report-btn"
-              onClick={onOpenSimulationReport}
-              disabled={isSimulating}
+              className="btn-twin-action report-btn"
+              onClick={onOpenTwinReport}
+              disabled={isTwinning}
               title={
-                isSimulating
-                  ? 'Pause simulation first to open the Simulation report'
-                  : 'Open full Simulation report popup'
+                isTwinning
+                  ? 'Pause twin first to open the Twin report'
+                  : 'Open full Twin report popup'
               }
               style={{
                 marginTop: '8px',
@@ -1721,34 +1939,34 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                 gap: '7px',
                 padding: '7px 12px',
                 borderRadius: '6px',
-                border: isSimulating
+                border: isTwinning
                   ? '1px solid rgba(148, 163, 184, 0.2)'
                   : '1px solid rgba(56, 189, 248, 0.55)',
-                background: isSimulating
+                background: isTwinning
                   ? 'rgba(30, 41, 59, 0.45)'
                   : 'linear-gradient(135deg, rgba(14, 165, 233, 0.22) 0%, rgba(37, 99, 235, 0.32) 100%)',
-                color: isSimulating ? '#64748b' : '#f8fafc',
+                color: isTwinning ? '#64748b' : '#f8fafc',
                 fontWeight: 600,
                 fontSize: '0.77rem',
-                cursor: isSimulating ? 'not-allowed' : 'pointer',
+                cursor: isTwinning ? 'not-allowed' : 'pointer',
               }}
             >
               <FileBarChart2
                 size={15}
-                style={{ color: isSimulating ? '#64748b' : '#38bdf8' }}
+                style={{ color: isTwinning ? '#64748b' : '#38bdf8' }}
               />
-              <span>Simulation report</span>
+              <span>Twin report</span>
             </button>
 
-            <div className="sim-speed-bar">
+            <div className="twin-speed-bar">
               <span className="speed-label">Playback Speed:</span>
               <div className="speed-pills">
                 {[1, 2, 5, 10, 25, 50, 100].map((spd) => (
                   <button
                     key={spd}
                     type="button"
-                    className={`speed-pill ${simSpeed === spd ? 'active' : ''}`}
-                    onClick={() => onChangeSimSpeed(spd)}
+                    className={`speed-pill ${twinSpeed === spd ? 'active' : ''}`}
+                    onClick={() => onChangeTwinSpeed(spd)}
                   >
                     {spd}x
                   </button>
@@ -2577,7 +2795,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <div style={{ minWidth: 0 }}>
                             <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: '0.72rem' }}>
                               🚇 {st.station.name_fr}
-                              {brusselsMetroConfig.useForEvacuation && (
+                              {brusselsMetroConfig.useForEvacuation && !st.disabled && (
                                 <span
                                   style={{
                                     marginLeft: '5px',
@@ -2777,7 +2995,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                       display: 'flex',
                       alignItems: 'center',
                       gap: '8px',
-                      cursor: isSimulating ? 'not-allowed' : 'pointer',
+                      cursor: isTwinning ? 'not-allowed' : 'pointer',
                       fontSize: '0.75rem',
                       fontWeight: 700,
                       color: brusselsMetroConfig.useForEvacuation ? '#38bdf8' : '#f8fafc',
@@ -2787,13 +3005,13 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                       id="chk-use-metro-for-evacuation"
                       type="checkbox"
                       checked={brusselsMetroConfig.useForEvacuation}
-                      disabled={isSimulating}
+                      disabled={isTwinning}
                       onChange={(e) => onToggleUseBrusselsMetroForEvacuation(e.target.checked)}
                       style={{
                         width: '15px',
                         height: '15px',
                         accentColor: '#0ea5e9',
-                        cursor: isSimulating ? 'not-allowed' : 'pointer',
+                        cursor: isTwinning ? 'not-allowed' : 'pointer',
                       }}
                     />
                     <span>Use these stations for evacuation</span>
@@ -2829,7 +3047,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         min={1}
                         max={100}
                         value={brusselsMetroConfig.trainCount}
-                        disabled={isSimulating}
+                        disabled={isTwinning}
                         onChange={(e) =>
                           onChangeBrusselsMetroTrainCount(Math.max(1, Number(e.target.value) || 1))
                         }
@@ -2867,7 +3085,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                         max={2500}
                         step={10}
                         value={brusselsMetroConfig.trainCapacity}
-                        disabled={isSimulating}
+                        disabled={isTwinning}
                         onChange={(e) =>
                           onChangeBrusselsMetroTrainCapacity(
                             Math.max(1, Number(e.target.value) || 100)
@@ -2996,8 +3214,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                   marginBottom: '18px',
                 }}
               >
-                This will permanently remove the area from the simulation parameters, the map, and
-                active simulation memory.
+                This will permanently remove the area from the twin parameters, the map, and
+                active twin memory.
               </p>
 
               <div

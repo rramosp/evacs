@@ -6,6 +6,7 @@ import {
   VehicleFleet,
   ComputedRoute,
   LogEntry,
+  RoutingAlgorithm,
 } from '../types/evacuation';
 
 /**
@@ -45,12 +46,12 @@ export function toTurfPolygon(coords: [number, number][]) {
 }
 
 /**
- * Check if a point ([lat, lng]) lies inside any Avoid Area polygon
+ * Check if a point ([lat, lng]) lies inside any active (non-disabled) Avoid Area polygon
  */
 export function isPointInAnyAvoidArea(pt: [number, number], avoidAreas: AvoidArea[]): boolean {
   const turfPt = turf.point([pt[1], pt[0]]);
   for (const avoid of avoidAreas) {
-    if (avoid.polygon.length < 3) continue;
+    if (avoid.disabled || avoid.polygon.length < 3) continue;
     try {
       const poly = toTurfPolygon(avoid.polygon);
       if (turf.booleanPointInPolygon(turfPt, poly)) {
@@ -71,7 +72,7 @@ export function doesSegmentIntersectAvoidArea(
   p2: [number, number],
   avoid: AvoidArea
 ): boolean {
-  if (avoid.polygon.length < 3) return false;
+  if (avoid.disabled || avoid.polygon.length < 3) return false;
   if (p1[0] === p2[0] && p1[1] === p2[1]) {
     return isPointInAnyAvoidArea(p1, [avoid]);
   }
@@ -88,7 +89,7 @@ export function doesSegmentIntersectAvoidArea(
 }
 
 /**
- * Check if a single line segment intersects ANY Avoid Area polygon
+ * Check if a single line segment intersects ANY active Avoid Area polygon
  */
 export function doesSegmentIntersectAnyAvoidArea(
   p1: [number, number],
@@ -96,6 +97,7 @@ export function doesSegmentIntersectAnyAvoidArea(
   avoidAreas: AvoidArea[]
 ): boolean {
   for (const avoid of avoidAreas) {
+    if (avoid.disabled) continue;
     if (doesSegmentIntersectAvoidArea(p1, p2, avoid)) {
       return true;
     }
@@ -110,7 +112,7 @@ export function doesRouteIntersectAvoidArea(
   routeCoords: [number, number][],
   avoid: AvoidArea
 ): boolean {
-  if (routeCoords.length < 2 || avoid.polygon.length < 3) return false;
+  if (avoid.disabled || routeCoords.length < 2 || avoid.polygon.length < 3) return false;
   try {
     const line = turf.lineString(routeCoords.map((c) => [c[1], c[0]]));
     const poly = toTurfPolygon(avoid.polygon);
@@ -121,13 +123,13 @@ export function doesRouteIntersectAvoidArea(
 }
 
 /**
- * Return all Avoid Areas intersected by a polyline
+ * Return all active Avoid Areas intersected by a polyline
  */
 export function findIntersectingAvoidAreas(
   routeCoords: [number, number][],
   avoidAreas: AvoidArea[]
 ): AvoidArea[] {
-  return avoidAreas.filter((avoid) => doesRouteIntersectAvoidArea(routeCoords, avoid));
+  return avoidAreas.filter((avoid) => !avoid.disabled && doesRouteIntersectAvoidArea(routeCoords, avoid));
 }
 
 /**
@@ -234,7 +236,7 @@ function buildSafeObstacleVertices(avoidAreas: AvoidArea[]): [number, number][] 
   const vertices: [number, number][] = [];
 
   for (const avoid of avoidAreas) {
-    if (avoid.polygon.length < 3) continue;
+    if (avoid.disabled || avoid.polygon.length < 3) continue;
     const poly = toTurfPolygon(avoid.polygon);
     const centroid = getPolygonCentroid(avoid.polygon);
 
@@ -610,6 +612,276 @@ export function calculatePathDistanceMeters(coords: [number, number][]): number 
   return Math.round(totalKm * 1000);
 }
 
+export interface ClosestRoutePointResult {
+  point: [number, number];
+  segmentIndex: number;
+  t: number;
+  distanceMeters: number;
+}
+
+/**
+ * Remove consecutive duplicate coordinates (within ~0.5m) while preserving at least 2 points.
+ */
+export function dedupPolylineCoords(coords: [number, number][]): [number, number][] {
+  if (coords.length <= 2) return coords;
+  const out: [number, number][] = [coords[0]];
+  for (let i = 1; i < coords.length; i++) {
+    const prev = out[out.length - 1];
+    const curr = coords[i];
+    if (Math.hypot(curr[0] - prev[0], curr[1] - prev[1]) > 4e-6 || i === coords.length - 1) {
+      out.push(curr);
+    }
+  }
+  if (out.length < 2) {
+    out.push(coords[coords.length - 1]);
+  }
+  return out;
+}
+
+/**
+ * Find the exact closest projected point on an evacuation route polyline `coords` (`[lat, lng][]`)
+ * to a given query point `pt` (`[lat, lng]`).
+ */
+export function findClosestPointOnPolyline(
+  pt: [number, number],
+  coords: [number, number][]
+): ClosestRoutePointResult {
+  if (!coords || coords.length === 0) {
+    return { point: pt, segmentIndex: 0, t: 0, distanceMeters: 0 };
+  }
+  if (coords.length === 1) {
+    const dMeters =
+      turf.distance([pt[1], pt[0]], [coords[0][1], coords[0][0]], { units: 'kilometers' }) * 1000;
+    return { point: coords[0], segmentIndex: 0, t: 0, distanceMeters: dMeters };
+  }
+
+  const cosLat = Math.max(0.1, Math.cos((pt[0] * Math.PI) / 180));
+  let bestPoint: [number, number] = coords[0];
+  let bestSegIdx = 0;
+  let bestT = 0;
+  let bestDistSq = Infinity;
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const a = coords[i];
+    const b = coords[i + 1];
+    const abLat = b[0] - a[0];
+    const abLng = (b[1] - a[1]) * cosLat;
+    const apLat = pt[0] - a[0];
+    const apLng = (pt[1] - a[1]) * cosLat;
+    const abLenSq = abLat * abLat + abLng * abLng;
+
+    const t =
+      abLenSq > 1e-14
+        ? Math.max(0, Math.min(1, (apLat * abLat + apLng * abLng) / abLenSq))
+        : 0;
+    const projLat = a[0] + (b[0] - a[0]) * t;
+    const projLng = a[1] + (b[1] - a[1]) * t;
+
+    const dLat = pt[0] - projLat;
+    const dLng = (pt[1] - projLng) * cosLat;
+    const dSq = dLat * dLat + dLng * dLng;
+
+    if (dSq < bestDistSq) {
+      bestDistSq = dSq;
+      bestPoint = [Number(projLat.toFixed(6)), Number(projLng.toFixed(6))];
+      bestSegIdx = i;
+      bestT = t;
+    }
+  }
+
+  const distanceMeters =
+    turf.distance([pt[1], pt[0]], [bestPoint[1], bestPoint[0]], { units: 'kilometers' }) * 1000;
+
+  return {
+    point: bestPoint,
+    segmentIndex: bestSegIdx,
+    t: bestT,
+    distanceMeters,
+  };
+}
+
+/**
+ * Follow an evacuation route polyline (`coords` oriented from pickupLocation at index 0 to dropOffLocation at index N-1)
+ * from `snap.point` (on segment `snap.segmentIndex`) backward along the evacuation route to the pickup point (`coords[0]`).
+ */
+export function buildRouteSuffixToPickup(
+  coords: [number, number][],
+  snap: ClosestRoutePointResult
+): [number, number][] {
+  if (!coords || coords.length === 0) return [snap.point, snap.point];
+  const prefixReversed = coords.slice(0, snap.segmentIndex + 1).reverse();
+  return dedupPolylineCoords([snap.point, ...prefixReversed]);
+}
+
+/**
+ * Follow an evacuation route polyline (`coords` oriented from pickupLocation at index 0 to dropOffLocation at index N-1)
+ * from `snap.point` (on segment `snap.segmentIndex`) forward along the evacuation route to the target shelter (`coords[N-1]`).
+ */
+export function buildRouteSuffixToTarget(
+  coords: [number, number][],
+  snap: ClosestRoutePointResult
+): [number, number][] {
+  if (!coords || coords.length === 0) return [snap.point, snap.point];
+  const suffixForward = coords.slice(snap.segmentIndex + 1);
+  return dedupPolylineCoords([snap.point, ...suffixForward]);
+}
+
+/**
+ * Find the evacuation route in `routes` whose polyline is closest to `pt`.
+ */
+export function findClosestEvacuationRoute(
+  pt: [number, number],
+  routes: ComputedRoute[]
+): { route: ComputedRoute; snap: ClosestRoutePointResult } | null {
+  if (!routes || routes.length === 0) return null;
+
+  let bestRoute = routes[0];
+  let bestSnap = findClosestPointOnPolyline(pt, routes[0].coordinates);
+  let bestPickupDist =
+    turf.distance(
+      [pt[1], pt[0]],
+      [routes[0].pickupLocation[1], routes[0].pickupLocation[0]],
+      { units: 'kilometers' }
+    ) * 1000;
+
+  for (let i = 1; i < routes.length; i++) {
+    const r = routes[i];
+    const snap = findClosestPointOnPolyline(pt, r.coordinates);
+    const pickupDist =
+      turf.distance([pt[1], pt[0]], [r.pickupLocation[1], r.pickupLocation[0]], {
+        units: 'kilometers',
+      }) * 1000;
+
+    if (
+      snap.distanceMeters < bestSnap.distanceMeters - 25 ||
+      (Math.abs(snap.distanceMeters - bestSnap.distanceMeters) <= 25 &&
+        pickupDist < bestPickupDist)
+    ) {
+      bestRoute = r;
+      bestSnap = snap;
+      bestPickupDist = pickupDist;
+    }
+  }
+
+  return { route: bestRoute, snap: bestSnap };
+}
+
+/**
+ * Pair each evacuation route polyline with a VehicleFleet by proximity to the route polyline,
+ * with a gentle load-balancing tie-breaker among nearby depots on the same corridor so all
+ * nearby parking stations share their closest evacuation routes.
+ */
+export function assignFleetsToRoutesByProximity(
+  routeCoordsList: [number, number][][],
+  vehicleFleets: VehicleFleet[]
+): (VehicleFleet | undefined)[] {
+  if (!vehicleFleets || vehicleFleets.length === 0) {
+    return routeCoordsList.map(() => undefined);
+  }
+
+  const assignedCount = new Array<number>(vehicleFleets.length).fill(0);
+  return routeCoordsList.map((coords) => {
+    let bestFleetIdx = 0;
+    let bestScore = Infinity;
+    for (let fIdx = 0; fIdx < vehicleFleets.length; fIdx++) {
+      const fleet = vehicleFleets[fIdx];
+      const snap = findClosestPointOnPolyline(fleet.location, coords);
+      // 600m load-balancing step lets co-located depots along the same trunk share routes without cross-city assignment
+      const score = snap.distanceMeters + assignedCount[fIdx] * 600;
+      if (score < bestScore) {
+        bestScore = score;
+        bestFleetIdx = fIdx;
+      }
+    }
+    assignedCount[bestFleetIdx] += 1;
+    return vehicleFleets[bestFleetIdx];
+  });
+}
+
+/**
+ * Compute the approach path from `startPt` (e.g., a bus parking station `fleet.location` or an off-route bus position)
+ * to the closest point on `routeCoords` (`snap.point`), and then follow `routeCoords` in reverse from `snap.point`
+ * all the way to the Pickup Location (`routeCoords[0]`).
+ */
+export async function computeApproachViaClosestPointOnRoute(
+  startPt: [number, number],
+  routeCoords: [number, number][],
+  avoidAreas: AvoidArea[],
+  sidePreference: 'primary' | 'alternate' = 'primary',
+  connectorCache?: Map<string, [number, number][]>
+): Promise<[number, number][]> {
+  const snap = findClosestPointOnPolyline(startPt, routeCoords);
+  const onRouteToPickup = buildRouteSuffixToPickup(routeCoords, snap);
+
+  if (snap.distanceMeters <= 25) {
+    return dedupPolylineCoords([startPt, ...onRouteToPickup]);
+  }
+
+  const cacheKey = `${startPt[0].toFixed(5)},${startPt[1].toFixed(5)}->${snap.point[0].toFixed(5)},${snap.point[1].toFixed(5)}:${sidePreference}`;
+  let connectorCoords = connectorCache?.get(cacheKey);
+  if (!connectorCoords) {
+    const connectorRes = await computeObstacleAvoidingRoute(
+      startPt,
+      snap.point,
+      avoidAreas,
+      sidePreference
+    );
+    connectorCoords = connectorRes.coordinates;
+    if (connectorCache) {
+      connectorCache.set(cacheKey, connectorCoords);
+    }
+  }
+
+  return dedupPolylineCoords([...connectorCoords, ...onRouteToPickup.slice(1)]);
+}
+
+/**
+ * When a bus is off any evacuation route after stopping the simulation, changing areas, and recalculating routes,
+ * compute the path that directs the bus from `currentPos` to the closest point on the closest recalculated
+ * evacuation route, and then follows that evacuation route from there (to the pickup point if `'to_pickup'`,
+ * or to the target shelter if `'to_target'`).
+ */
+export async function computeRejoinPathToClosestRoute(
+  currentPos: [number, number],
+  routes: ComputedRoute[],
+  avoidAreas: AvoidArea[],
+  mode: 'to_pickup' | 'to_target'
+): Promise<{
+  route: ComputedRoute;
+  snap: ClosestRoutePointResult;
+  coordinates: [number, number][];
+} | null> {
+  const closest = findClosestEvacuationRoute(currentPos, routes);
+  if (!closest) return null;
+
+  const activeAvoids = avoidAreas.filter((a) => !a.disabled);
+  const onRoutePortion =
+    mode === 'to_pickup'
+      ? buildRouteSuffixToPickup(closest.route.coordinates, closest.snap)
+      : buildRouteSuffixToTarget(closest.route.coordinates, closest.snap);
+
+  if (closest.snap.distanceMeters <= 25) {
+    return {
+      route: closest.route,
+      snap: closest.snap,
+      coordinates: dedupPolylineCoords([currentPos, ...onRoutePortion]),
+    };
+  }
+
+  const connectorRes = await computeObstacleAvoidingRoute(
+    currentPos,
+    closest.snap.point,
+    activeAvoids,
+    'primary'
+  );
+
+  return {
+    route: closest.route,
+    snap: closest.snap,
+    coordinates: dedupPolylineCoords([...connectorRes.coordinates, ...onRoutePortion.slice(1)]),
+  };
+}
+
 /**
  * Compute an immediate obstacle-avoiding route from a running vehicle's current position
  * to the closest active (non-disabled) Target Area.
@@ -620,6 +892,7 @@ export async function computeDirectRouteToClosestTarget(
   avoidAreas: AvoidArea[]
 ): Promise<{ target: TargetArea; coordinates: [number, number][] }> {
   const activeTargets = targetAreas.filter((t) => !t.disabled);
+  const activeAvoids = avoidAreas.filter((a) => !a.disabled);
   const candidates = activeTargets.length > 0 ? activeTargets : targetAreas;
 
   const sorted = [...candidates].sort((a, b) => {
@@ -636,7 +909,7 @@ export async function computeDirectRouteToClosestTarget(
   const result = await computeObstacleAvoidingRoute(
     currentPos,
     tgtCenter,
-    avoidAreas,
+    activeAvoids,
     'primary'
   );
 
@@ -648,27 +921,56 @@ export interface RoutingComputationResult {
   logs: LogEntry[];
 }
 
+interface EvaccastV1PathResponse {
+  pathIndex: number;
+  sourceId: string;
+  sourceName: string;
+  targetId: string;
+  targetName: string;
+  pickupLocation: [number, number];
+  dropOffLocation: [number, number];
+  coordinates: [number, number][];
+  distanceMeters: number;
+  estimatedDurationSeconds: number;
+}
+
+interface EvaccastV1ApiResponse {
+  ok: boolean;
+  error?: string;
+  paths?: EvaccastV1PathResponse[];
+  maxFlowVehPerHr?: number;
+  minEvacTimeHours?: number | null;
+  demand?: number;
+  sheltered?: number;
+}
+
 /**
  * Compute obstacle-avoiding vehicle evacuation routes and establish specific
- * Blue Square Pickup Locations on each Source Area for all enabled Target Areas.
+ * Blue Square Pickup Locations on each enabled Source Area for all enabled Target Areas,
+ * strictly avoiding all enabled Avoid Areas.
+ * Supports selecting between 'Basic OSM' and 'evaccast_v1'.
  */
 export async function computeAllEvacuationRoutes(
   sourceAreas: SourceArea[],
   targetAreas: TargetArea[],
   avoidAreas: AvoidArea[],
-  vehicleFleets: VehicleFleet[]
+  vehicleFleets: VehicleFleet[],
+  algorithm: RoutingAlgorithm = 'Basic OSM',
+  signal?: AbortSignal
 ): Promise<RoutingComputationResult> {
   const routes: ComputedRoute[] = [];
   const logs: LogEntry[] = [];
   const nowStr = () => new Date().toLocaleTimeString();
 
+  const activeSources = sourceAreas.filter((s) => !s.disabled);
   const activeTargets = targetAreas.filter((t) => !t.disabled);
+  const activeAvoids = avoidAreas.filter((a) => !a.disabled);
 
   const pushLog = (level: LogEntry['level'], message: string) => {
     logs.push({
       id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       timestamp: nowStr(),
-      simTimeFormatted: '00:00',
+      twinTimeFormatted: '00:00',
       level,
       message,
     });
@@ -676,8 +978,16 @@ export async function computeAllEvacuationRoutes(
 
   pushLog(
     'ROUTING',
-    `Initiating obstacle-avoiding routing & pickup location establishment across ${sourceAreas.length} source zones, ${activeTargets.length} active shelters (${targetAreas.length - activeTargets.length} disabled), and ${avoidAreas.length} avoid areas.`
+    `[${algorithm}] Initiating evacuation route computation across ${activeSources.length} active source zones (${sourceAreas.length - activeSources.length} disabled), ${activeTargets.length} active shelters (${targetAreas.length - activeTargets.length} disabled), and ${activeAvoids.length} active avoid areas (${avoidAreas.length - activeAvoids.length} disabled).`
   );
+
+  if (activeSources.length === 0) {
+    pushLog(
+      'WARN',
+      'No active (enabled) Source Areas available! Enable at least one Source Area to compute routes.'
+    );
+    return { routes, logs };
+  }
 
   if (activeTargets.length === 0) {
     pushLog(
@@ -690,12 +1000,168 @@ export async function computeAllEvacuationRoutes(
   const defaultDepot: [number, number] =
     vehicleFleets.length > 0
       ? vehicleFleets[0].location
-      : sourceAreas.length > 0
-      ? getPolygonCentroid(sourceAreas[0].polygon)
+      : activeSources.length > 0
+      ? getPolygonCentroid(activeSources[0].polygon)
       : [50.85, 4.35];
 
-  for (let sIdx = 0; sIdx < sourceAreas.length; sIdx++) {
-    const source = sourceAreas[sIdx];
+  if (algorithm === 'evaccast_v1') {
+    try {
+      const response = await fetch('/api/routing/evaccast-v1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceAreas: activeSources,
+          targetAreas: activeTargets,
+          avoidAreas: activeAvoids,
+        }),
+        signal,
+      });
+
+      const data = (await response.json()) as EvaccastV1ApiResponse;
+      if (!response.ok || !data.ok || !data.paths) {
+        pushLog(
+          'WARN',
+          `[evaccast_v1] Routing failed: ${data.error || response.statusText || 'Unknown error'}`
+        );
+        return { routes, logs };
+      }
+
+      const paths = data.paths;
+      const pathsPerSourceCount = new Map<string, number>();
+      const pathsSeenPerSource = new Map<string, number>();
+      const popRemainingPerSource = new Map<string, number>();
+      const sourcePopMap = new Map<string, number>();
+
+      activeSources.forEach((s) => {
+        sourcePopMap.set(s.id, Math.max(0, Math.round(s.population)));
+        popRemainingPerSource.set(s.id, Math.max(0, Math.round(s.population)));
+      });
+
+      paths.forEach((p) => {
+        pathsPerSourceCount.set(p.sourceId, (pathsPerSourceCount.get(p.sourceId) || 0) + 1);
+      });
+
+      // Pair each evacuation route with its closest vehicle fleet parking station
+      const assignedFleets = assignFleetsToRoutesByProximity(
+        paths.map((p) => p.coordinates),
+        vehicleFleets
+      );
+
+      // Cache depot -> closest-point-on-route connector paths
+      const connectorCache = new Map<string, [number, number][]>();
+
+      for (let i = 0; i < paths.length; i++) {
+        if (signal?.aborted) {
+          return { routes: [], logs };
+        }
+        const p = paths[i];
+        const totalForSrc = pathsPerSourceCount.get(p.sourceId) || 1;
+        const seenForSrc = (pathsSeenPerSource.get(p.sourceId) || 0) + 1;
+        pathsSeenPerSource.set(p.sourceId, seenForSrc);
+
+        const totalSrcPop = sourcePopMap.get(p.sourceId) || 0;
+        const remPop = popRemainingPerSource.get(p.sourceId) || 0;
+        const assignedPop =
+          seenForSrc === totalForSrc
+            ? remPop
+            : Math.round(totalSrcPop / totalForSrc);
+        popRemainingPerSource.set(p.sourceId, Math.max(0, remPop - assignedPop));
+
+        const fleet =
+          assignedFleets[i] || vehicleFleets[i % Math.max(1, vehicleFleets.length)];
+        const depot = fleet ? fleet.location : defaultDepot;
+        const speedKmh = Math.max(0.5, fleet?.transitSpeedKmh ?? 25);
+        const speedMps = (speedKmh * 1000) / 3600;
+
+        // Route from parking station (depot) to the closest point on the evacuation route,
+        // and then follow the evacuation route from there to the pickup point
+        const approachCoords = await computeApproachViaClosestPointOnRoute(
+          depot,
+          p.coordinates,
+          activeAvoids,
+          'primary',
+          connectorCache
+        );
+        if (signal?.aborted) {
+          return { routes: [], logs };
+        }
+
+        const distMeters = p.distanceMeters || calculatePathDistanceMeters(p.coordinates);
+        const durationSec = Math.round(distMeters / speedMps);
+        const pickupLabel =
+          totalForSrc > 1
+            ? `${p.sourceName} — Pickup #${seenForSrc} (evaccast_v1)`
+            : `${p.sourceName} — Pickup (evaccast_v1)`;
+
+        routes.push({
+          id: `route-evaccast-${p.sourceId}-${i}`,
+          sourceId: p.sourceId,
+          sourceName: p.sourceName,
+          targetId: p.targetId,
+          targetName: p.targetName,
+          behaviorType: 'compliant',
+          pickupLocation: p.pickupLocation,
+          dropOffLocation: p.dropOffLocation,
+          pickupLabel,
+          coordinates: p.coordinates,
+          approachCoordinates: approachCoords,
+          distanceMeters: distMeters,
+          estimatedDurationSeconds: durationSec,
+          assignedPopulation: assignedPop,
+          avoidedAreaNames: activeAvoids.map((a) => a.name),
+          isDetour: activeAvoids.length > 0,
+          vehicleFleetId: fleet?.id,
+        });
+
+        pushLog(
+          'ROUTING',
+          `[evaccast_v1] Path #${i + 1}: Pickup [${p.pickupLocation[0]}, ${p.pickupLocation[1]}] in ${p.sourceName} -> Drop-Off [${p.dropOffLocation[0]}, ${p.dropOffLocation[1]}] in ${p.targetName} (${(distMeters / 1000).toFixed(2)} km, est. transit ${Math.floor(durationSec / 60)}m ${durationSec % 60}s @ ${speedKmh} km/h).`
+        );
+      }
+
+      const minEvacInfo =
+        typeof data.minEvacTimeHours === 'number'
+          ? ` | Min Evac Time Bound: ${data.minEvacTimeHours.toFixed(2)}h`
+          : '';
+      pushLog(
+        'ROUTING',
+        `[evaccast_v1] Route computation complete: ${routes.length} vehicle path(s) established across ${activeSources.length} active source area(s)${minEvacInfo}.`
+      );
+      return { routes, logs };
+    } catch (err) {
+      if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        return { routes: [], logs };
+      }
+      pushLog(
+        'WARN',
+        `[evaccast_v1] Error invoking backend routing service: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return { routes, logs };
+    }
+  }
+
+  // First compute the evacuation corridors (Pickup -> Target Shelter) for all active Source Areas
+  interface PendingBasicOsmCorridor {
+    id: string;
+    source: SourceArea;
+    target: TargetArea;
+    behaviorType: 'compliant' | 'self-directed';
+    pickupLocation: [number, number];
+    pickupLabel: string;
+    evacCoordinates: [number, number][];
+    avoidedAreaNames: string[];
+    isDetour: boolean;
+    assignedPopulation: number;
+    sidePreference: 'primary' | 'alternate';
+  }
+
+  const pendingCorridors: PendingBasicOsmCorridor[] = [];
+
+  for (let sIdx = 0; sIdx < activeSources.length; sIdx++) {
+    if (signal?.aborted) {
+      return { routes: [], logs };
+    }
+    const source = activeSources[sIdx];
     const srcCenter = getPolygonCentroid(source.polygon);
 
     const sortedTargets = [...activeTargets].sort((a, b) => {
@@ -719,104 +1185,124 @@ export async function computeAllEvacuationRoutes(
 
     // Establish 2 distinct Pickup Locations (Blue Squares) on this Source Area:
     // Pickup #1 (Primary Gate) & Pickup #2 (Secondary Gate)
-    const pickupAlpha = computeSpecificPickupPoint(source, tgtCenter, 0, avoidAreas);
-    const pickupBravo = computeSpecificPickupPoint(source, secTgtCenter, 1, avoidAreas);
-
-    const fleetForAlpha = vehicleFleets[sIdx % Math.max(1, vehicleFleets.length)];
-    const fleetForBravo = vehicleFleets[(sIdx + 1) % Math.max(1, vehicleFleets.length)];
-
-    const depotAlpha = fleetForAlpha ? fleetForAlpha.location : defaultDepot;
-    const depotBravo = fleetForBravo ? fleetForBravo.location : defaultDepot;
-
-    const alphaSpeedKmh = Math.max(0.5, fleetForAlpha?.transitSpeedKmh ?? 25);
-    const alphaSpeedMps = (alphaSpeedKmh * 1000) / 3600;
-    const bravoSpeedKmh = Math.max(0.5, fleetForBravo?.transitSpeedKmh ?? 25);
-    const bravoSpeedMps = (bravoSpeedKmh * 1000) / 3600;
+    const pickupAlpha = computeSpecificPickupPoint(source, tgtCenter, 0, activeAvoids);
+    const pickupBravo = computeSpecificPickupPoint(source, secTgtCenter, 1, activeAvoids);
 
     // --- CORRIDOR ALPHA (Pickup Alpha -> Primary Target Shelter) ---
-    const approachAlpha = await computeObstacleAvoidingRoute(
-      depotAlpha,
-      pickupAlpha,
-      avoidAreas,
-      'primary'
-    );
     const evacAlpha = await computeObstacleAvoidingRoute(
       pickupAlpha,
       tgtCenter,
-      avoidAreas,
+      activeAvoids,
       'primary'
     );
-    const alphaDist = calculatePathDistanceMeters(evacAlpha.coordinates);
-    const alphaDurationSec = Math.round(alphaDist / alphaSpeedMps);
+    if (signal?.aborted) {
+      return { routes: [], logs };
+    }
 
-    routes.push({
+    pendingCorridors.push({
       id: `route-${source.id}-alpha`,
-      sourceId: source.id,
-      sourceName: source.name,
-      targetId: primaryTarget.id,
-      targetName: primaryTarget.name,
+      source,
+      target: primaryTarget,
       behaviorType: 'compliant',
       pickupLocation: pickupAlpha,
       pickupLabel: `${source.name} — Pickup Square Alpha`,
-      coordinates: evacAlpha.coordinates,
-      approachCoordinates: approachAlpha.coordinates,
-      distanceMeters: alphaDist,
-      estimatedDurationSeconds: alphaDurationSec,
-      assignedPopulation: Math.round(source.population * 0.6),
+      evacCoordinates: evacAlpha.coordinates,
       avoidedAreaNames: evacAlpha.avoidedAreaNames,
       isDetour: evacAlpha.isDetour,
-      vehicleFleetId: fleetForAlpha?.id,
+      assignedPopulation: Math.round(source.population * 0.6),
+      sidePreference: 'primary',
     });
 
-    pushLog(
-      'ROUTING',
-      `Established Pickup Square Alpha [Blue Square] at [${pickupAlpha[0]}, ${pickupAlpha[1]}] on ${source.name} -> ${primaryTarget.name} (${(alphaDist / 1000).toFixed(2)} km, est. transit ${Math.floor(alphaDurationSec / 60)}m ${alphaDurationSec % 60}s @ ${alphaSpeedKmh} km/h, 0 Avoid Area crossings).`
-    );
-
     // --- CORRIDOR BRAVO (Pickup Bravo -> Secondary Target Shelter) ---
-    const approachBravo = await computeObstacleAvoidingRoute(
-      depotBravo,
-      pickupBravo,
-      avoidAreas,
-      'alternate'
-    );
     const evacBravo = await computeObstacleAvoidingRoute(
       pickupBravo,
       secTgtCenter,
-      avoidAreas,
+      activeAvoids,
       'alternate'
     );
-    const bravoDist = calculatePathDistanceMeters(evacBravo.coordinates);
-    const bravoDurationSec = Math.round(bravoDist / bravoSpeedMps);
+    if (signal?.aborted) {
+      return { routes: [], logs };
+    }
 
-    routes.push({
+    pendingCorridors.push({
       id: `route-${source.id}-bravo`,
-      sourceId: source.id,
-      sourceName: source.name,
-      targetId: secondaryTarget.id,
-      targetName: secondaryTarget.name,
+      source,
+      target: secondaryTarget,
       behaviorType: 'self-directed',
       pickupLocation: pickupBravo,
       pickupLabel: `${source.name} — Pickup Square Bravo`,
-      coordinates: evacBravo.coordinates,
-      approachCoordinates: approachBravo.coordinates,
-      distanceMeters: bravoDist,
-      estimatedDurationSeconds: bravoDurationSec,
-      assignedPopulation: source.population - Math.round(source.population * 0.6),
+      evacCoordinates: evacBravo.coordinates,
       avoidedAreaNames: evacBravo.avoidedAreaNames,
       isDetour: evacBravo.isDetour,
-      vehicleFleetId: fleetForBravo?.id,
+      assignedPopulation: source.population - Math.round(source.population * 0.6),
+      sidePreference: 'alternate',
+    });
+  }
+
+  // Pair each evacuation corridor with its closest vehicle fleet parking station
+  const assignedFleets = assignFleetsToRoutesByProximity(
+    pendingCorridors.map((c) => c.evacCoordinates),
+    vehicleFleets
+  );
+  const connectorCache = new Map<string, [number, number][]>();
+
+  for (let cIdx = 0; cIdx < pendingCorridors.length; cIdx++) {
+    if (signal?.aborted) {
+      return { routes: [], logs };
+    }
+    const corridor = pendingCorridors[cIdx];
+    const fleet =
+      assignedFleets[cIdx] ||
+      vehicleFleets[cIdx % Math.max(1, vehicleFleets.length)];
+    const depot = fleet ? fleet.location : defaultDepot;
+    const speedKmh = Math.max(0.5, fleet?.transitSpeedKmh ?? 25);
+    const speedMps = (speedKmh * 1000) / 3600;
+
+    // Route from parking station (depot) to the closest point on the evacuation route,
+    // and then follow the evacuation route from there to the pickup point
+    const approachCoordinates = await computeApproachViaClosestPointOnRoute(
+      depot,
+      corridor.evacCoordinates,
+      activeAvoids,
+      corridor.sidePreference,
+      connectorCache
+    );
+    if (signal?.aborted) {
+      return { routes: [], logs };
+    }
+
+    const distMeters = calculatePathDistanceMeters(corridor.evacCoordinates);
+    const durationSec = Math.round(distMeters / speedMps);
+    const gateName = corridor.sidePreference === 'primary' ? 'Alpha' : 'Bravo';
+
+    routes.push({
+      id: corridor.id,
+      sourceId: corridor.source.id,
+      sourceName: corridor.source.name,
+      targetId: corridor.target.id,
+      targetName: corridor.target.name,
+      behaviorType: corridor.behaviorType,
+      pickupLocation: corridor.pickupLocation,
+      pickupLabel: corridor.pickupLabel,
+      coordinates: corridor.evacCoordinates,
+      approachCoordinates,
+      distanceMeters: distMeters,
+      estimatedDurationSeconds: durationSec,
+      assignedPopulation: corridor.assignedPopulation,
+      avoidedAreaNames: corridor.avoidedAreaNames,
+      isDetour: corridor.isDetour,
+      vehicleFleetId: fleet?.id,
     });
 
     pushLog(
       'ROUTING',
-      `Established Pickup Square Bravo [Blue Square] at [${pickupBravo[0]}, ${pickupBravo[1]}] on ${source.name} -> ${secondaryTarget.name} (${(bravoDist / 1000).toFixed(2)} km, est. transit ${Math.floor(bravoDurationSec / 60)}m ${bravoDurationSec % 60}s @ ${bravoSpeedKmh} km/h, 0 Avoid Area crossings).`
+      `Established Pickup Square ${gateName} [Blue Square] at [${corridor.pickupLocation[0]}, ${corridor.pickupLocation[1]}] on ${corridor.source.name} -> ${corridor.target.name} (${(distMeters / 1000).toFixed(2)} km, est. transit ${Math.floor(durationSec / 60)}m ${durationSec % 60}s @ ${speedKmh} km/h, 0 Avoid Area crossings).`
     );
   }
 
   pushLog(
     'ROUTING',
-    `Route computation complete: ${routes.length} Blue Square Pickup Locations established across all Source Areas (all routes verified 100% Avoid Area free).`
+    `Route computation complete: ${routes.length} Blue Square Pickup Locations established across all active Source Areas (all routes verified 100% Avoid Area free).`
   );
 
   return { routes, logs };

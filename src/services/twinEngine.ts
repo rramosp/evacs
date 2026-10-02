@@ -7,14 +7,23 @@ import {
   PickupLocationState,
   SourceInternalCluster,
   ActiveVehicleUnit,
-  SimulationStateSnapshot,
+  TwinStateSnapshot,
   HeatmapPoint,
   PopulationBehaviorType,
   BehaviorCounts,
-  SimulationTelemetryStats,
+  TwinTelemetryStats,
   BrusselsMetroCorridor,
 } from '../types/evacuation';
-import { getPolygonCentroid, toTurfPolygon } from './routingEngine';
+import {
+  getPolygonCentroid,
+  toTurfPolygon,
+  findClosestPointOnPolyline,
+  buildRouteSuffixToPickup,
+  buildRouteSuffixToTarget,
+  findClosestEvacuationRoute,
+  assignFleetsToRoutesByProximity,
+  dedupPolylineCoords,
+} from './routingEngine';
 
 export interface MetroEvacuationOptions {
   enabled: boolean;
@@ -24,10 +33,64 @@ export interface MetroEvacuationOptions {
 }
 
 /**
+ * Constant number of evacuees represented by each full dot (cluster) across all Source Areas.
+ * A few dots per area may hold < 50 people initially (to match exact Source Area population)
+ * or dynamically at pickup points when part of a dot boards a vehicle and part remains waiting.
+ */
+export const PEOPLE_PER_DOT = 50;
+
+/**
  * Create a zeroed BehaviorCounts object
  */
 export function createZeroBehaviorCounts(): BehaviorCounts {
   return { compliant: 0, 'self-directed': 0, disoriented: 0 };
+}
+
+/**
+ * Compute exact integer headcounts per behavioral group for a single Source Area
+ * so `compliant + 'self-directed' + disoriented === Math.max(0, Math.round(src.population))`.
+ */
+export function computeSourceBehaviorHeadcounts(src: SourceArea): BehaviorCounts {
+  const totalPop = Math.max(0, Math.round(src.population));
+  if (totalPop === 0) {
+    return createZeroBehaviorCounts();
+  }
+
+  const keys: PopulationBehaviorType[] = ['compliant', 'self-directed', 'disoriented'];
+  const rawPctSum =
+    Math.max(0, src.behavior.compliant) +
+    Math.max(0, src.behavior['self-directed']) +
+    Math.max(0, src.behavior.disoriented);
+  const normDenom = rawPctSum > 0 ? rawPctSum : 100;
+
+  const exactShares = keys.map((k) => {
+    const pct = rawPctSum > 0 ? Math.max(0, src.behavior[k]) : k === 'compliant' ? 100 : 0;
+    const exact = (totalPop * pct) / normDenom;
+    const floored = Math.floor(exact);
+    return {
+      key: k,
+      floored,
+      frac: exact - floored,
+    };
+  });
+
+  const counts = createZeroBehaviorCounts();
+  let assigned = 0;
+  exactShares.forEach((s) => {
+    counts[s.key] = s.floored;
+    assigned += s.floored;
+  });
+
+  let rem = totalPop - assigned;
+  const byRemainder = [...exactShares].sort((a, b) => b.frac - a.frac);
+  let idx = 0;
+  while (rem > 0 && idx < byRemainder.length) {
+    counts[byRemainder[idx].key] += 1;
+    rem -= 1;
+    idx += 1;
+  }
+
+  return counts;
 }
 
 /**
@@ -36,28 +99,11 @@ export function createZeroBehaviorCounts(): BehaviorCounts {
 export function computeBehaviorCountsFromSources(sourceAreas: SourceArea[]): BehaviorCounts {
   const counts = createZeroBehaviorCounts();
   sourceAreas.forEach((src) => {
-    const totalPop = Math.max(0, src.population);
-    if (totalPop === 0) return;
-
-    const numClusters = Math.min(75, Math.max(1, totalPop));
-    const cpCount = Math.round((numClusters * src.behavior.compliant) / 100);
-    const sdCount = Math.round((numClusters * src.behavior['self-directed']) / 100);
-
-    const baseHeadcount = Math.floor(totalPop / numClusters);
-    const remainder = totalPop % numClusters;
-
-    for (let i = 0; i < numClusters; i++) {
-      const headcount = baseHeadcount + (i < remainder ? 1 : 0);
-      if (headcount <= 0) continue;
-
-      if (i < cpCount) {
-        counts.compliant += headcount;
-      } else if (i < cpCount + sdCount) {
-        counts['self-directed'] += headcount;
-      } else {
-        counts.disoriented += headcount;
-      }
-    }
+    if (src.disabled) return;
+    const srcCounts = computeSourceBehaviorHeadcounts(src);
+    counts.compliant += srcCounts.compliant;
+    counts['self-directed'] += srcCounts['self-directed'];
+    counts.disoriented += srcCounts.disoriented;
   });
   return counts;
 }
@@ -120,12 +166,12 @@ function allocateBoardedByBehavior(waiting: BehaviorCounts, boardedNow: number):
 }
 
 /**
- * Create initial SimulationTelemetryStats
+ * Create initial TwinTelemetryStats
  */
 export function createInitialTelemetryStats(
   sourceAreas: SourceArea[],
   clusters?: SourceInternalCluster[]
-): SimulationTelemetryStats {
+): TwinTelemetryStats {
   const initialByBehavior = createZeroBehaviorCounts();
   if (clusters && clusters.length > 0) {
     clusters.forEach((c) => {
@@ -215,7 +261,11 @@ export function interpolateAlongPolyline(
 
 /**
  * Build the initial approach path from a Vehicle Fleet's designated staging depot (`fleet.location`)
- * to the Pickup Location (`route.pickupLocation`) using the precomputed obstacle-avoiding `route.approachCoordinates`.
+ * to the Pickup Location (`route.pickupLocation`):
+ * - Uses `route.approachCoordinates` when precomputed for this depot (which goes from the depot
+ *   to the closest point on `route.coordinates` and then follows `route.coordinates` to `route.pickupLocation`).
+ * - Otherwise, projects `startDepot` onto the closest point on `route.coordinates` and follows
+ *   `route.coordinates` in reverse from that closest point all the way to `route.pickupLocation`.
  */
 function getDepotToPickupApproachCoords(
   route: ComputedRoute,
@@ -228,10 +278,26 @@ function getDepotToPickupApproachCoords(
       : route.pickupLocation);
 
   if (route.approachCoordinates && route.approachCoordinates.length >= 2) {
-    const coords = [...route.approachCoordinates];
-    coords[0] = startDepot;
-    coords[coords.length - 1] = route.pickupLocation;
-    return coords;
+    const precomputedStart = route.approachCoordinates[0];
+    const depotDistMeters =
+      turf.distance(
+        [startDepot[1], startDepot[0]],
+        [precomputedStart[1], precomputedStart[0]],
+        { units: 'kilometers' }
+      ) * 1000;
+
+    if (depotDistMeters <= 35) {
+      const coords = [...route.approachCoordinates];
+      coords[0] = startDepot;
+      coords[coords.length - 1] = route.pickupLocation;
+      return coords;
+    }
+  }
+
+  if (route.coordinates && route.coordinates.length >= 2) {
+    const snap = findClosestPointOnPolyline(startDepot, route.coordinates);
+    const onRouteToPickup = buildRouteSuffixToPickup(route.coordinates, snap);
+    return dedupPolylineCoords([startDepot, ...onRouteToPickup]);
   }
 
   return [startDepot, route.pickupLocation];
@@ -246,43 +312,47 @@ export function kmhToMps(speedKmh: number): number {
 }
 
 /**
- * Build an empty return path along an existing route polyline
- * from the vehicle's current position along the route to the Pickup Location.
+ * Build an empty approach path from `currentPos` to the closest point on `route.coordinates`
+ * and then along `route.coordinates` in reverse to `route.pickupLocation`.
  */
 function getEmptyApproachAlongExistingRoute(
   route: ComputedRoute,
   currentPos?: [number, number]
 ): [number, number][] {
-  // Reversing route.coordinates goes from Target Area -> ... -> Pickup Location along the exact existing route
-  const reversedRoute = [...route.coordinates].reverse();
-  if (reversedRoute.length < 2) {
-    return [route.pickupLocation, route.pickupLocation];
+  if (!route.coordinates || route.coordinates.length < 2) {
+    return currentPos ? [currentPos, route.pickupLocation] : [route.pickupLocation, route.pickupLocation];
   }
 
   if (!currentPos) {
-    return reversedRoute;
+    return [...route.coordinates].reverse();
   }
 
-  // Find the vertex on reversedRoute closest to currentPos so the vehicle stays strictly on the existing route
-  let bestIdx = 0;
-  let bestDist = Infinity;
-  for (let i = 0; i < reversedRoute.length; i++) {
-    const d = turf.distance(
-      [currentPos[1], currentPos[0]],
-      [reversedRoute[i][1], reversedRoute[i][0]],
-      { units: 'kilometers' }
-    );
-    if (d < bestDist) {
-      bestDist = d;
-      bestIdx = i;
+  const snap = findClosestPointOnPolyline(currentPos, route.coordinates);
+  const onRouteToPickup = buildRouteSuffixToPickup(route.coordinates, snap);
+  return snap.distanceMeters > 3
+    ? dedupPolylineCoords([currentPos, ...onRouteToPickup])
+    : onRouteToPickup;
+}
+
+/**
+ * Fast ray-casting point-in-polygon check for `[lat, lng]` ring coordinates.
+ */
+function isPointInPolygonRing(lat: number, lng: number, ring: [number, number][]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const latI = ring[i][0];
+    const lngI = ring[i][1];
+    const latJ = ring[j][0];
+    const lngJ = ring[j][1];
+
+    const intersects =
+      lngI > lng !== lngJ > lng &&
+      lat < ((latJ - latI) * (lng - lngI)) / (lngJ - lngI) + latI;
+    if (intersects) {
+      inside = !inside;
     }
   }
-
-  const sliced = reversedRoute.slice(bestIdx);
-  if (sliced.length >= 2) {
-    return bestDist > 0.003 ? [currentPos, ...sliced] : sliced;
-  }
-  return bestDist > 0.003 ? [currentPos, ...reversedRoute] : reversedRoute;
+  return inside;
 }
 
 /**
@@ -327,7 +397,7 @@ function sampleUniformPointsInsidePolygon(
         const v = (0.5 + k * alpha2) % 1;
         const lat = minLat + u * spanLat;
         const lng = minLng + v * spanLng;
-        if (turf.booleanPointInPolygon(turf.point([lng, lat]), poly)) {
+        if (isPointInPolygonRing(lat, lng, polygonCoords)) {
           samples.push([lat, lng]);
         }
       }
@@ -373,7 +443,7 @@ function sampleUniformPointsInsidePolygon(
             const meanLat = sumLat[c] / cellCounts[c];
             const meanLng = sumLng[c] / cellCounts[c];
 
-            if (turf.booleanPointInPolygon(turf.point([meanLng, meanLat]), poly)) {
+            if (isPointInPolygonRing(meanLat, meanLng, polygonCoords)) {
               centers[c] = [meanLat, meanLng];
             } else {
               // Concave boundary fallback: snap to the interior sample in cell `c` closest to the cell mean
@@ -429,11 +499,11 @@ export function getRemainingPopulationBySource(
   sourceAreas: SourceArea[],
   clusters: SourceInternalCluster[],
   pickupStates: PickupLocationState[],
-  hasSimulationStarted: boolean
+  hasTwinStarted: boolean
 ): Record<string, number> {
   const result: Record<string, number> = {};
   sourceAreas.forEach((src) => {
-    if (!hasSimulationStarted) {
+    if (!hasTwinStarted) {
       result[src.id] = src.population;
       return;
     }
@@ -460,129 +530,77 @@ export function getRemainingPopulationBySource(
   return result;
 }
 
-/**
- * Generate dynamic heatmap points from clusters and pickup states
- */
 export function generateHeatmapFromState(
-  clusters: SourceInternalCluster[],
-  pickupStates: PickupLocationState[],
-  vehicles: ActiveVehicleUnit[],
-  targetAreas: TargetArea[],
-  targetOccupancies: Record<string, number>
+  _clusters: SourceInternalCluster[],
+  _pickupStates: PickupLocationState[],
+  _vehicles: ActiveVehicleUnit[],
+  _targetAreas: TargetArea[],
+  _targetOccupancies: Record<string, number>
 ): HeatmapPoint[] {
-  const pts: HeatmapPoint[] = [];
-
-  // 1. Clusters still moving inside Source Area polygons
-  clusters
-    .filter((c) => c.status === 'moving_in_zone' && c.headcount > 0)
-    .forEach((c) => {
-      const weight = Math.min(0.85, Math.max(0.18, c.headcount / 45));
-      pts.push({
-        lat: c.position[0],
-        lng: c.position[1],
-        intensity: weight,
-        behavior: c.behavior,
-      });
-    });
-
-  // 2. Waiting queues at Blue Square Pickup Locations (HOTTEST SPOTS!)
-  pickupStates.forEach((p) => {
-    const boardingHere = vehicles
-      .filter((v) => v.assignedPickupId === p.id && v.status === 'waiting_for_80_pct')
-      .reduce((acc, v) => acc + v.currentOccupancy, 0);
-
-    const totalAtPickup = p.waitingPopulation + boardingHere;
-
-    if (totalAtPickup > 0) {
-      const coreIntensity = Math.min(1.0, 0.35 + totalAtPickup / 180);
-
-      pts.push({
-        lat: p.location[0],
-        lng: p.location[1],
-        intensity: coreIntensity,
-        behavior: 'pickup_hotspot',
-      });
-
-      const numAura = Math.min(10, Math.max(3, Math.ceil(totalAtPickup / 40)));
-      const radius = 0.00045;
-      for (let i = 0; i < numAura; i++) {
-        const angle = (i / numAura) * Math.PI * 2;
-        pts.push({
-          lat: p.location[0] + Math.sin(angle) * radius,
-          lng: p.location[1] + Math.cos(angle) * radius,
-          intensity: coreIntensity * 0.85,
-          behavior: 'pickup_hotspot',
-        });
-      }
-    }
-  });
-
-  // 3. Vehicles en route to Target Shelters or unloading at Target Shelters carrying evacuees
-  vehicles
-    .filter((v) => (v.status === 'to_target' || v.status === 'unloading') && v.currentOccupancy > 0)
-    .forEach((v) => {
-      const intensity = Math.min(0.9, Math.max(0.3, v.currentOccupancy / 120));
-      pts.push({
-        lat: v.currentPosition[0],
-        lng: v.currentPosition[1],
-        intensity,
-        behavior: 'compliant',
-      });
-    });
-
-  // 4. Target Area Shelters arrived population
-  targetAreas.forEach((tgt) => {
-    const arrived = targetOccupancies[tgt.id] || 0;
-    if (arrived > 0) {
-      const centroid = getPolygonCentroid(tgt.polygon);
-      const intensity = Math.min(1.0, arrived / 1500);
-      pts.push({
-        lat: centroid[0],
-        lng: centroid[1],
-        intensity,
-        behavior: 'compliant',
-      });
-    }
-  });
-
-  return pts;
+  return [];
 }
 
 /**
- * Helper to generate internal clusters for a list of Source Areas
- * with spatially uniform distribution across each Source Area polygon.
+ * Helper to generate internal clusters (dots) for a list of Source Areas:
+ * - Constant 50 people per dot (`PEOPLE_PER_DOT = 50`) across all Source Areas, so areas with fewer people have fewer dots.
+ * - Up to 1 remainder dot per active behavioral group in an area may have < 50 people to match the exact population and behavioral split.
+ * - Spatially uniform distribution across each Source Area polygon with interleaved behavioral types.
  */
 export function buildClustersForSources(sourceAreas: SourceArea[]): SourceInternalCluster[] {
   const clusters: SourceInternalCluster[] = [];
+  const behaviorOrder: PopulationBehaviorType[] = ['compliant', 'self-directed', 'disoriented'];
 
   sourceAreas.forEach((src) => {
-    const totalPop = Math.max(0, src.population);
+    if (src.disabled) return;
+    const totalPop = Math.max(0, Math.round(src.population));
     if (totalPop === 0) return;
 
-    const numClusters = Math.min(75, Math.max(1, totalPop));
-    const cpCount = Math.round((numClusters * src.behavior.compliant) / 100);
-    const sdCount = Math.round((numClusters * src.behavior['self-directed']) / 100);
+    const behCounts = computeSourceBehaviorHeadcounts(src);
+    const dotSpecs: {
+      behavior: PopulationBehaviorType;
+      headcount: number;
+      interleaveRank: number;
+    }[] = [];
 
-    const baseHeadcount = Math.floor(totalPop / numClusters);
-    const remainder = totalPop % numClusters;
+    behaviorOrder.forEach((behavior, bIdx) => {
+      const popB = behCounts[behavior];
+      if (popB <= 0) return;
 
+      const fullDots = Math.floor(popB / PEOPLE_PER_DOT);
+      const remHeadcount = popB % PEOPLE_PER_DOT;
+      const totalDotsForB = fullDots + (remHeadcount > 0 ? 1 : 0);
+
+      for (let d = 0; d < fullDots; d++) {
+        dotSpecs.push({
+          behavior,
+          headcount: PEOPLE_PER_DOT,
+          interleaveRank: (d + 0.5) / totalDotsForB + bIdx * 1e-6,
+        });
+      }
+      if (remHeadcount > 0) {
+        dotSpecs.push({
+          behavior,
+          headcount: remHeadcount,
+          interleaveRank: (fullDots + 0.5) / totalDotsForB + bIdx * 1e-6,
+        });
+      }
+    });
+
+    if (dotSpecs.length === 0) return;
+
+    // Interleave behavioral types evenly so the R2/Lloyd uniform positions have a balanced spatial mix
+    dotSpecs.sort((a, b) => a.interleaveRank - b.interleaveRank);
+
+    const numClusters = dotSpecs.length;
     const uniformPositions = sampleUniformPointsInsidePolygon(src.polygon, numClusters);
 
     for (let i = 0; i < numClusters; i++) {
-      const headcount = baseHeadcount + (i < remainder ? 1 : 0);
-
+      const { behavior, headcount } = dotSpecs[i];
       if (headcount <= 0) continue;
-
-      let behavior: PopulationBehaviorType = 'disoriented';
-      if (i < cpCount) {
-        behavior = 'compliant';
-      } else if (i < cpCount + sdCount) {
-        behavior = 'self-directed';
-      }
 
       const startPos = uniformPositions[i] || getPolygonCentroid(src.polygon);
 
-      // Find the perimeter vertex closest to startPos so self-directed walkers join the nearest boundary edge
+      // Find the perimeter vertex closest to startPos
       let nearestEdgeIdx = 0;
       let nearestDistSq = Infinity;
       for (let vIdx = 0; vIdx < src.polygon.length; vIdx++) {
@@ -758,17 +776,20 @@ function appendMetroPickupsAndTrains(
 }
 
 /**
- * Initialize full simulation state from scratch.
+ * Initialize full twin state from scratch.
  * Every empty vehicle departing to pick up population strictly follows the existing route polyline!
  */
-export function initializeSimulationState(
+export function initializeTwinState(
   routes: ComputedRoute[],
   sourceAreas: SourceArea[],
   targetAreas: TargetArea[],
   vehicleFleets: VehicleFleet[],
   metroEvacuation?: MetroEvacuationOptions
-): SimulationStateSnapshot {
+): TwinStateSnapshot {
   const newLogs: string[] = [];
+
+  const activeSources = sourceAreas.filter((s) => !s.disabled);
+  const activeSourceIds = new Set(activeSources.map((s) => s.id));
 
   // Source Areas that have active Brussels Metro evacuation corridors use their Metro Stations
   // as Pickup Points and Target Area Metro Stations as Drop-Off Points
@@ -780,7 +801,7 @@ export function initializeSimulationState(
 
   const activeStreetRoutes =
     vehicleFleets.length > 0
-      ? routes.filter((r) => !metroSourceIds.has(r.sourceId))
+      ? routes.filter((r) => activeSourceIds.has(r.sourceId) && !metroSourceIds.has(r.sourceId))
       : [];
 
   const pickupStates: PickupLocationState[] = [];
@@ -806,6 +827,7 @@ export function initializeSimulationState(
       targetName: r.targetName,
       label: r.pickupLabel || `Pickup Point #${idx + 1}`,
       location: r.pickupLocation,
+      dropOffLocation: r.dropOffLocation,
       waitingPopulation: 0,
       waitingByBehavior: createZeroBehaviorCounts(),
       totalBoardedCount: 0,
@@ -819,20 +841,29 @@ export function initializeSimulationState(
     });
   });
 
-  const clusters = buildClustersForSources(sourceAreas);
-  const telemetryStats = createInitialTelemetryStats(sourceAreas, clusters);
+  const clusters = buildClustersForSources(activeSources);
+  const telemetryStats = createInitialTelemetryStats(activeSources, clusters);
 
-  activeStreetRoutes.forEach((route, rIdx) => {
+  const routeCoordsList: [number, number][][] = activeStreetRoutes.map((r) =>
+    r.coordinates && r.coordinates.length >= 2
+      ? r.coordinates
+      : [r.pickupLocation, r.dropOffLocation || r.pickupLocation]
+  );
+  const proximityFleetIds = assignFleetsToRoutesByProximity(routeCoordsList, vehicleFleets);
+  const assignedFleetIds = new Set<string>();
+
+  const spawnFleetWavesForRoute = (
+    route: ComputedRoute,
+    fleet: VehicleFleet,
+    idPrefix: string
+  ) => {
     const pickup = pickupStates.find((p) => p.routeId === route.id);
-    if (!pickup) return;
+    if (!pickup || fleet.count <= 0) return;
 
-    const fleet =
-      vehicleFleets.find((f) => f.id === route.vehicleFleetId) ||
-      vehicleFleets[rIdx % Math.max(1, vehicleFleets.length)];
+    assignedFleetIds.add(fleet.id);
 
-    if (!fleet || fleet.count <= 0) return;
-
-    // Initial dispatch at t = 0 starts from the designated Vehicle Fleet staging depot location
+    // Initial dispatch at t = 0 starts from the designated Vehicle Fleet staging depot location,
+    // goes to the closest point on the evacuation route, and follows it from there to the pickup point
     const approachCoords = getDepotToPickupApproachCoords(route, fleet);
     const evacCoords =
       route.coordinates && route.coordinates.length >= 2
@@ -853,7 +884,7 @@ export function initializeSimulationState(
 
     for (let w = 0; w < numWaves; w++) {
       vehicles.push({
-        id: `veh-${route.id}-wave-${w}`,
+        id: `${idPrefix}-${route.id}-${fleet.id}-wave-${w}`,
         fleetId: fleet.id,
         fleetName: `${fleet.name} Convoy #${w + 1}`,
         vehicleType: fleet.type || 'Bus',
@@ -886,14 +917,36 @@ export function initializeSimulationState(
         departureDelaySeconds: w * 22,
       });
     }
+  };
+
+  activeStreetRoutes.forEach((route, rIdx) => {
+    const preferredFleetId = route.vehicleFleetId || proximityFleetIds[rIdx];
+    const fleet =
+      vehicleFleets.find((f) => f.id === preferredFleetId) ||
+      vehicleFleets[rIdx % Math.max(1, vehicleFleets.length)];
+    if (!fleet || fleet.count <= 0) return;
+    spawnFleetWavesForRoute(route, fleet, 'veh');
   });
+
+  // Ensure any remaining active parking station (when there are more fleets than routes)
+  // also dispatches its buses to its closest evacuation route and follows it to the pickup point
+  if (activeStreetRoutes.length > 0) {
+    vehicleFleets.forEach((fleet) => {
+      if (fleet.count <= 0 || assignedFleetIds.has(fleet.id)) return;
+      const closestMatch = findClosestEvacuationRoute(fleet.location, activeStreetRoutes);
+      const targetRoute = closestMatch?.route || activeStreetRoutes[0];
+      if (targetRoute) {
+        spawnFleetWavesForRoute(targetRoute, fleet, 'veh-extra');
+      }
+    });
+  }
 
   const targetOccupancies: Record<string, number> = {};
   targetAreas.forEach((t) => {
     targetOccupancies[t.id] = 0;
   });
 
-  const totalRemainingAtSource = sourceAreas.reduce((acc, s) => acc + s.population, 0);
+  const totalRemainingAtSource = activeSources.reduce((acc, s) => acc + s.population, 0);
 
   const heatmapPoints = generateHeatmapFromState(
     clusters,
@@ -919,13 +972,13 @@ export function initializeSimulationState(
 }
 
 /**
- * Reconcile simulation state upon restarting after mid-simulation pause & topology/fleet edits:
+ * Reconcile twin state upon restarting or recalculating routes after mid-twin pause & topology/fleet edits:
  * - Rebuilds pickup states & internal clusters for remaining/modified/new Source Area populations
- * - Routes running vehicles with passengers (`currentOccupancy > 0`) immediately to the CLOSEST active Target Area,
- *   and configures them to follow an existing route connected to that Target Area right after offloading
- * - Ensures all empty vehicles (`currentOccupancy === 0`) & newly added fleets strictly follow existing routes to pick up population
+ * - Buses that remain on their originally assigned evacuation route continue along it
+ * - Buses that are off any evacuation route (or whose assigned route was removed/reconfigured)
+ *   direct themselves to the CLOSEST evacuation route and follow it from there
  */
-export function reconcileSimulationOnRestart(
+export function reconcileTwinOnRestart(
   newRoutes: ComputedRoute[],
   sourceAreas: SourceArea[],
   targetAreas: TargetArea[],
@@ -936,11 +989,19 @@ export function reconcileSimulationOnRestart(
     string,
     { target: TargetArea; coordinates: [number, number][] }
   >,
-  existingTelemetryStats?: SimulationTelemetryStats,
+  existingTelemetryStats?: TwinTelemetryStats,
   existingPickupStates?: PickupLocationState[],
-  metroEvacuation?: MetroEvacuationOptions
-): SimulationStateSnapshot {
+  metroEvacuation?: MetroEvacuationOptions,
+  existingClusters?: SourceInternalCluster[],
+  rejoinRoutesToClosestEvacRoute?: Record<
+    string,
+    { route: ComputedRoute; coordinates: [number, number][] }
+  >
+): TwinStateSnapshot {
   const newLogs: string[] = [];
+
+  const activeSources = sourceAreas.filter((s) => !s.disabled);
+  const activeSourceIds = new Set(activeSources.map((s) => s.id));
 
   const metroSourceIds = new Set<string>(
     metroEvacuation && metroEvacuation.enabled
@@ -950,7 +1011,7 @@ export function reconcileSimulationOnRestart(
 
   const activeStreetRoutes =
     vehicleFleets.length > 0
-      ? newRoutes.filter((r) => !metroSourceIds.has(r.sourceId))
+      ? newRoutes.filter((r) => activeSourceIds.has(r.sourceId) && !metroSourceIds.has(r.sourceId))
       : [];
 
   // 1. Establish new Pickup Location states from recomputed street routes, preserving cumulative history if matched
@@ -968,6 +1029,7 @@ export function reconcileSimulationOnRestart(
       targetName: r.targetName,
       label,
       location: r.pickupLocation,
+      dropOffLocation: r.dropOffLocation,
       waitingPopulation: 0,
       waitingByBehavior: createZeroBehaviorCounts(),
       totalBoardedCount: prevPickup?.totalBoardedCount || 0,
@@ -985,10 +1047,7 @@ export function reconcileSimulationOnRestart(
     };
   });
 
-  // 2. Build clusters for each Source Area using its current (remaining/edited/new) population
-  const clusters = buildClustersForSources(sourceAreas);
-
-  // 3. Reconcile street vehicles (exclude old empty metro trains, keep loaded metro trains until offload):
+  // 2. Reconcile street vehicles (exclude old empty metro trains, keep loaded metro trains until offload):
   const activeFleetIds = new Set(vehicleFleets.map((f) => f.id));
   const survivingVehicles = existingVehicles.filter(
     (v) => (!v.isMetro && activeFleetIds.has(v.fleetId)) || (v.isMetro && v.currentOccupancy > 0)
@@ -1017,44 +1076,154 @@ export function reconcileSimulationOnRestart(
     const updatedCapPerUnit = fleet ? fleet.capacityPerUnit : veh.capacityPerUnit;
     const updatedMaxCap = Math.max(veh.currentOccupancy, veh.unitCount * updatedCapPerUnit);
 
+    const isStillAtDepot =
+      veh.progressMeters === 0 &&
+      Boolean(fleet) &&
+      turf.distance(
+        [veh.currentPosition[1], veh.currentPosition[0]],
+        [fleet!.location[1], fleet!.location[0]],
+        { units: 'kilometers' }
+      ) *
+        1000 <=
+        50;
+
+    // Check if the bus is still on its originally assigned evacuation route (within 40m of the route polyline)
+    const origRoute = activeStreetRoutes.find((r) => r.id === veh.assignedRouteId);
+    const origSnap =
+      origRoute && origRoute.coordinates && origRoute.coordinates.length >= 2
+        ? findClosestPointOnPolyline(veh.currentPosition, origRoute.coordinates)
+        : null;
+    const isOnOrigEvacRoute =
+      !isStillAtDepot &&
+      origRoute !== undefined &&
+      origSnap !== null &&
+      origSnap.distanceMeters <= 40;
+
+    // Find closest active evacuation route for off-route / depot vehicles
+    const rejoinEntry = rejoinRoutesToClosestEvacRoute?.[veh.id];
+    const closestRouteMatch = findClosestEvacuationRoute(
+      isStillAtDepot && fleet ? fleet.location : veh.currentPosition,
+      activeStreetRoutes
+    );
+    const selectedRoute = isOnOrigEvacRoute
+      ? origRoute!
+      : rejoinEntry?.route || closestRouteMatch?.route || defaultNextRoute || newRoutes[0];
+
+    if (!selectedRoute && veh.currentOccupancy === 0) return;
+
     // CASE A: Running, waiting, or unloading vehicle carrying passengers (`currentOccupancy > 0`)
-    // -> Immediately route from its current position to the CLOSEST active Target Area,
-    //    then follow an existing route connected to that Target Area right after offloading!
     if (veh.currentOccupancy > 0) {
+      if (isOnOrigEvacRoute && origRoute && origSnap) {
+        const origPickup =
+          pickupStates.find((p) => p.routeId === origRoute.id) || pickupStates[0];
+        if (!origPickup) return;
+
+        const preserveUnloadingAtSameTarget =
+          veh.status === 'unloading' && veh.targetId === origRoute.targetId;
+        const remainingToTargetCoords = preserveUnloadingAtSameTarget
+          ? veh.evacCoords
+          : buildRouteSuffixToTarget(origRoute.coordinates, origSnap);
+        const remainingToTargetDist = buildCumulativeDistances(remainingToTargetCoords);
+
+        updatedVehicles.push({
+          ...veh,
+          capacityPerUnit: updatedCapPerUnit,
+          maxCapacity: updatedMaxCap,
+          loadUnloadTimePerPersonSeconds: updatedLoadUnloadSec,
+          transitSpeedKmh: updatedTransitSpeedKmh,
+          speedMps: updatedSpeedMps,
+          occupancyByBehavior: veh.occupancyByBehavior
+            ? { ...veh.occupancyByBehavior }
+            : { compliant: veh.currentOccupancy, 'self-directed': 0, disoriented: 0 },
+          status: preserveUnloadingAtSameTarget ? 'unloading' : 'to_target',
+          waitingAtPickupSeconds: 0,
+          loadingProgressRemainder: 0,
+          progressMeters: preserveUnloadingAtSameTarget ? veh.progressMeters : 0,
+          targetId: origRoute.targetId,
+          targetName: origRoute.targetName,
+          evacCoords: remainingToTargetCoords,
+          evacCumulative: remainingToTargetDist.cumulative,
+          assignedRouteId: origRoute.id,
+          assignedPickupId: origPickup.id,
+          sourceId: origRoute.sourceId,
+          postOffloadEvacCoords: origRoute.coordinates,
+          postOffloadTargetId: origRoute.targetId,
+          postOffloadTargetName: origRoute.targetName,
+          departureDelaySeconds: 0,
+        });
+        return;
+      }
+
+      // Off-route loaded bus: direct to the closest evacuation route and follow it to its Target Area
+      // (or fallback to directRoutesToClosestTarget if no active street route exists)
+      if (selectedRoute && selectedRoute.coordinates && selectedRoute.coordinates.length >= 2) {
+        const snapOnClosest = findClosestPointOnPolyline(
+          veh.currentPosition,
+          selectedRoute.coordinates
+        );
+        const rejoinToTargetCoords =
+          rejoinEntry && rejoinEntry.coordinates.length >= 2
+            ? rejoinEntry.coordinates
+            : dedupPolylineCoords([
+                veh.currentPosition,
+                ...buildRouteSuffixToTarget(selectedRoute.coordinates, snapOnClosest),
+              ]);
+        const rejoinDist = buildCumulativeDistances(rejoinToTargetCoords);
+        const connectedPickup =
+          pickupStates.find((p) => p.routeId === selectedRoute.id) || pickupStates[0];
+        if (!connectedPickup) return;
+
+        const preserveUnloadingAtSameTarget =
+          veh.status === 'unloading' && veh.targetId === selectedRoute.targetId;
+
+        if (!preserveUnloadingAtSameTarget) {
+          newLogs.push(
+            `Off-route loaded bus redirected: ${veh.fleetName} (${veh.currentOccupancy} pax) directed from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest evacuation route ${selectedRoute.pickupLabel} -> "${selectedRoute.targetName}".`
+          );
+        }
+
+        updatedVehicles.push({
+          ...veh,
+          capacityPerUnit: updatedCapPerUnit,
+          maxCapacity: updatedMaxCap,
+          loadUnloadTimePerPersonSeconds: updatedLoadUnloadSec,
+          transitSpeedKmh: updatedTransitSpeedKmh,
+          speedMps: updatedSpeedMps,
+          occupancyByBehavior: veh.occupancyByBehavior
+            ? { ...veh.occupancyByBehavior }
+            : { compliant: veh.currentOccupancy, 'self-directed': 0, disoriented: 0 },
+          status: preserveUnloadingAtSameTarget ? 'unloading' : 'to_target',
+          waitingAtPickupSeconds: 0,
+          loadingProgressRemainder: 0,
+          progressMeters: preserveUnloadingAtSameTarget ? veh.progressMeters : 0,
+          targetId: selectedRoute.targetId,
+          targetName: selectedRoute.targetName,
+          evacCoords: preserveUnloadingAtSameTarget ? veh.evacCoords : rejoinToTargetCoords,
+          evacCumulative: preserveUnloadingAtSameTarget
+            ? veh.evacCumulative
+            : rejoinDist.cumulative,
+          assignedRouteId: selectedRoute.id,
+          assignedPickupId: connectedPickup.id,
+          sourceId: selectedRoute.sourceId,
+          postOffloadEvacCoords: selectedRoute.coordinates,
+          postOffloadTargetId: selectedRoute.targetId,
+          postOffloadTargetName: selectedRoute.targetName,
+          departureDelaySeconds: 0,
+        });
+        return;
+      }
+
       const direct = directRoutesToClosestTarget[veh.id];
-      const closestTarget = direct?.target || targetAreas.find((t) => !t.disabled) || targetAreas[0];
+      const closestTarget =
+        direct?.target || targetAreas.find((t) => !t.disabled) || targetAreas[0];
       const directCoords =
         direct && direct.coordinates.length >= 2
           ? direct.coordinates
           : [veh.currentPosition, getPolygonCentroid(closestTarget.polygon)];
       const directDist = buildCumulativeDistances(directCoords);
-
-      // Select an existing route connected to `closestTarget` so after offloading at `closestTarget`,
-      // the empty vehicle follows that existing route polyline straight back to its Pickup Location!
-      const connectedRoute =
-        activeStreetRoutes.find((r) => r.targetId === closestTarget.id) ||
-        defaultNextRoute ||
-        newRoutes.find((r) => r.targetId === closestTarget.id) ||
-        newRoutes[0];
-      if (!connectedRoute) return;
-
-      const connectedPickup =
-        pickupStates.find((p) => p.routeId === connectedRoute.id) ||
-        (defaultNextRoute
-          ? pickupStates.find((p) => p.routeId === defaultNextRoute.id)
-          : undefined) ||
-        pickupStates[0];
-
-      if (!connectedPickup) return;
-
-      const preserveUnloadingAtSameTarget =
-        veh.status === 'unloading' && veh.targetId === closestTarget.id;
-
-      if (!preserveUnloadingAtSameTarget) {
-        newLogs.push(
-          `Mid-sim reroute: ${veh.fleetName} (${veh.currentOccupancy} pax onboard, ${updatedTransitSpeedKmh} km/h) diverted from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest active shelter "${closestTarget.name}", then following existing route ${connectedRoute.pickupLabel}.`
-        );
-      }
+      const fallbackRoute = newRoutes[0];
+      const fallbackPickup = pickupStates[0];
+      if (!fallbackRoute || !fallbackPickup) return;
 
       updatedVehicles.push({
         ...veh,
@@ -1066,41 +1235,61 @@ export function reconcileSimulationOnRestart(
         occupancyByBehavior: veh.occupancyByBehavior
           ? { ...veh.occupancyByBehavior }
           : { compliant: veh.currentOccupancy, 'self-directed': 0, disoriented: 0 },
-        status: preserveUnloadingAtSameTarget ? 'unloading' : 'to_target',
+        status: 'to_target',
         waitingAtPickupSeconds: 0,
         loadingProgressRemainder: 0,
-        progressMeters: preserveUnloadingAtSameTarget ? veh.progressMeters : 0,
+        progressMeters: 0,
         targetId: closestTarget.id,
         targetName: closestTarget.name,
-        evacCoords: preserveUnloadingAtSameTarget ? veh.evacCoords : directCoords,
-        evacCumulative: preserveUnloadingAtSameTarget ? veh.evacCumulative : directDist.cumulative,
-        assignedRouteId: connectedRoute.id,
-        assignedPickupId: connectedPickup.id,
-        sourceId: connectedRoute.sourceId,
-        postOffloadEvacCoords: connectedRoute.coordinates,
-        postOffloadTargetId: connectedRoute.targetId,
-        postOffloadTargetName: connectedRoute.targetName,
+        evacCoords: directCoords,
+        evacCumulative: directDist.cumulative,
+        assignedRouteId: fallbackRoute.id,
+        assignedPickupId: fallbackPickup.id,
+        sourceId: fallbackRoute.sourceId,
+        postOffloadEvacCoords: fallbackRoute.coordinates,
+        postOffloadTargetId: fallbackRoute.targetId,
+        postOffloadTargetName: fallbackRoute.targetName,
         departureDelaySeconds: 0,
       });
     } else {
       // CASE B: Empty vehicle (`currentOccupancy === 0`)
-      if (!defaultNextRoute) return;
-      const nextPickup = pickupStates.find((p) => p.routeId === defaultNextRoute.id);
+      if (!selectedRoute) return;
+      const nextPickup = pickupStates.find((p) => p.routeId === selectedRoute.id);
       if (!nextPickup) return;
 
-      const isStillAtDepot =
-        veh.progressMeters === 0 &&
-        fleet &&
+      // Preserve waiting_for_80_pct if the bus is already waiting at the pickup of its on-route corridor
+      const distToSelectedPickupMeters =
         turf.distance(
           [veh.currentPosition[1], veh.currentPosition[0]],
-          [fleet.location[1], fleet.location[0]]
-        ) < 0.15;
+          [selectedRoute.pickupLocation[1], selectedRoute.pickupLocation[0]],
+          { units: 'kilometers' }
+        ) * 1000;
+      const preserveWaitingAtPickup =
+        isOnOrigEvacRoute &&
+        veh.status === 'waiting_for_80_pct' &&
+        distToSelectedPickupMeters <= 35;
 
-      const approachCoords = isStillAtDepot
-        ? getDepotToPickupApproachCoords(defaultNextRoute, fleet)
-        : getEmptyApproachAlongExistingRoute(defaultNextRoute, veh.currentPosition);
+      let approachCoords: [number, number][];
+      if (isStillAtDepot && fleet) {
+        approachCoords = getDepotToPickupApproachCoords(selectedRoute, fleet);
+      } else if (isOnOrigEvacRoute && origRoute && origSnap) {
+        approachCoords = buildRouteSuffixToPickup(origRoute.coordinates, origSnap);
+      } else if (rejoinEntry && rejoinEntry.coordinates.length >= 2) {
+        approachCoords = rejoinEntry.coordinates;
+        newLogs.push(
+          `Off-route bus redirected: ${veh.fleetName} directed from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest evacuation route ${selectedRoute.pickupLabel}.`
+        );
+      } else {
+        approachCoords = getEmptyApproachAlongExistingRoute(selectedRoute, veh.currentPosition);
+        if (!isStillAtDepot) {
+          newLogs.push(
+            `Off-route bus redirected: ${veh.fleetName} directed from [${veh.currentPosition[0].toFixed(4)}, ${veh.currentPosition[1].toFixed(4)}] to closest evacuation route ${selectedRoute.pickupLabel}.`
+          );
+        }
+      }
+
       const approachDist = buildCumulativeDistances(approachCoords);
-      const evacDist = buildCumulativeDistances(defaultNextRoute.coordinates);
+      const evacDist = buildCumulativeDistances(selectedRoute.coordinates);
 
       updatedVehicles.push({
         ...veh,
@@ -1110,38 +1299,43 @@ export function reconcileSimulationOnRestart(
         transitSpeedKmh: updatedTransitSpeedKmh,
         speedMps: updatedSpeedMps,
         occupancyByBehavior: createZeroBehaviorCounts(),
-        status: 'to_pickup',
-        waitingAtPickupSeconds: 0,
+        status: preserveWaitingAtPickup ? 'waiting_for_80_pct' : 'to_pickup',
+        waitingAtPickupSeconds: preserveWaitingAtPickup ? veh.waitingAtPickupSeconds : 0,
         loadingProgressRemainder: 0,
         loadingElapsedSeconds: 0,
         unloadingProgressRemainder: 0,
         unloadingElapsedSeconds: 0,
         unloadingInitialOccupancy: 0,
-        progressMeters: 0,
-        currentPosition: approachCoords[0],
-        assignedRouteId: defaultNextRoute.id,
+        progressMeters: preserveWaitingAtPickup ? approachDist.total : 0,
+        currentPosition: preserveWaitingAtPickup
+          ? selectedRoute.pickupLocation
+          : approachCoords[0],
+        assignedRouteId: selectedRoute.id,
         assignedPickupId: nextPickup.id,
-        sourceId: defaultNextRoute.sourceId,
-        targetId: defaultNextRoute.targetId,
-        targetName: defaultNextRoute.targetName,
+        sourceId: selectedRoute.sourceId,
+        targetId: selectedRoute.targetId,
+        targetName: selectedRoute.targetName,
         approachCoords,
         approachCumulative: approachDist.cumulative,
-        evacCoords: defaultNextRoute.coordinates,
+        evacCoords: selectedRoute.coordinates,
         evacCumulative: evacDist.cumulative,
         postOffloadEvacCoords: undefined,
         postOffloadTargetId: undefined,
         postOffloadTargetName: undefined,
-        departureDelaySeconds: 0,
+        departureDelaySeconds: isStillAtDepot ? veh.departureDelaySeconds : 0,
       });
     }
   });
 
-  // 4. Spawn vehicles for any NEWLY ADDED fleets — departing from their designated fleet staging location
+  // 3. Spawn vehicles for any NEWLY ADDED fleets — departing from their designated fleet staging location
+  //    towards their closest evacuation route and following it to the pickup point
   const representedFleetIds = new Set(survivingVehicles.map((v) => v.fleetId));
   const newFleets = vehicleFleets.filter((f) => !representedFleetIds.has(f.id));
 
   newFleets.forEach((fleet, fIdx) => {
-    const route = activeStreetRoutes[fIdx % Math.max(1, activeStreetRoutes.length)];
+    const closestMatch = findClosestEvacuationRoute(fleet.location, activeStreetRoutes);
+    const route =
+      closestMatch?.route || activeStreetRoutes[fIdx % Math.max(1, activeStreetRoutes.length)];
     const pickup = route ? pickupStates.find((p) => p.routeId === route.id) : undefined;
     if (!route || !pickup) return;
 
@@ -1193,11 +1387,11 @@ export function reconcileSimulationOnRestart(
     }
 
     newLogs.push(
-      `Deployed new fleet "${fleet.name}" (${fleet.count} × ${fleet.type}, ${transitSpeedKmh} km/h, ${loadUnloadTimeSec}s/pax load/unload) along existing corridor ${route.pickupLabel} -> ${route.targetName}.`
+      `Deployed new fleet "${fleet.name}" (${fleet.count} × ${fleet.type}, ${transitSpeedKmh} km/h, ${loadUnloadTimeSec}s/pax load/unload) via closest route ${route.pickupLabel} -> ${route.targetName}.`
     );
   });
 
-  // 5. Append Brussels Metro Station Pickups and Metro Trains if enabled
+  // 4. Append Brussels Metro Station Pickups and Metro Trains if enabled
   appendMetroPickupsAndTrains(
     pickupStates,
     updatedVehicles,
@@ -1205,6 +1399,64 @@ export function reconcileSimulationOnRestart(
     existingPickupStates,
     newLogs
   );
+
+  // 5. Reconcile or build clusters (dots) for each active Source Area:
+  //    - If a Source Area's unboarded population was not manually edited while paused, preserve its existing
+  //      moving and waiting/partially-boarded (<50) dots in place.
+  //    - Otherwise (edited population or newly added Source Area), generate fresh 50-person dots (with <50 remainder dots).
+  const clusters: SourceInternalCluster[] = [];
+  activeSources.forEach((src) => {
+    const targetPop = Math.max(0, Math.round(src.population));
+    if (targetPop === 0) return;
+
+    const existingSrcClusters = (existingClusters || []).filter(
+      (c) =>
+        c.sourceId === src.id &&
+        (c.status === 'moving_in_zone' || c.status === 'waiting_at_pickup') &&
+        c.headcount > 0
+    );
+    const existingUnboardedSum = existingSrcClusters.reduce((acc, c) => acc + c.headcount, 0);
+
+    if (existingSrcClusters.length > 0 && existingUnboardedSum === targetPop) {
+      const pickupsInSrc = pickupStates.filter((p) => p.sourceId === src.id);
+      existingSrcClusters.forEach((c) => {
+        if (c.status === 'waiting_at_pickup') {
+          const matchedPickup =
+            pickupsInSrc.find((p) => p.id === c.targetPickupId) ||
+            pickupsInSrc.find(
+              (p) =>
+                turf.distance(
+                  [p.location[1], p.location[0]],
+                  [c.position[1], c.position[0]],
+                  { units: 'kilometers' }
+                ) *
+                  1000 <=
+                35
+            );
+          if (matchedPickup) {
+            matchedPickup.waitingPopulation += c.headcount;
+            matchedPickup.waitingByBehavior[c.behavior] += c.headcount;
+            clusters.push({
+              ...c,
+              targetPickupId: matchedPickup.id,
+              status: 'waiting_at_pickup',
+            });
+          } else {
+            // Pickup point relocated due to topology edit -> walk from current position to the new pickup
+            clusters.push({
+              ...c,
+              targetPickupId: null,
+              status: 'moving_in_zone',
+            });
+          }
+        } else {
+          clusters.push({ ...c });
+        }
+      });
+    } else {
+      clusters.push(...buildClustersForSources([src]));
+    }
+  });
 
   const targetOccupancies: Record<string, number> = {};
   targetAreas.forEach((t) => {
@@ -1215,9 +1467,17 @@ export function reconcileSimulationOnRestart(
   const totalInTransit = updatedVehicles
     .filter((v) => v.status === 'to_target' || v.status === 'unloading')
     .reduce((acc, v) => acc + v.currentOccupancy, 0);
-  const totalRemainingAtSource = clusters.reduce((acc, c) => acc + c.headcount, 0);
+  const totalWaitingInQueues = pickupStates.reduce((acc, p) => acc + p.waitingPopulation, 0);
+  const totalBoardingInVehicles = updatedVehicles
+    .filter((v) => v.status === 'waiting_for_80_pct')
+    .reduce((acc, v) => acc + v.currentOccupancy, 0);
+  const totalMovingInZone = clusters
+    .filter((c) => c.status === 'moving_in_zone')
+    .reduce((acc, c) => acc + c.headcount, 0);
+  const totalWaitingAtPickups = totalWaitingInQueues + totalBoardingInVehicles;
+  const totalRemainingAtSource = totalMovingInZone + totalWaitingAtPickups;
 
-  // Recompute telemetryStats preserving already evacuated + in-transit + new remaining clusters
+  // Recompute telemetryStats preserving already evacuated + in-transit + remaining clusters
   const newClustersByBehavior = createZeroBehaviorCounts();
   clusters.forEach((c) => {
     newClustersByBehavior[c.behavior] += c.headcount;
@@ -1233,7 +1493,7 @@ export function reconcileSimulationOnRestart(
   });
 
   const baseTelemetry = existingTelemetryStats || createInitialTelemetryStats(sourceAreas, clusters);
-  const reconciledTelemetry: SimulationTelemetryStats = {
+  const reconciledTelemetry: TwinTelemetryStats = {
     initialByBehavior: {
       compliant:
         baseTelemetry.evacuatedByBehavior.compliant +
@@ -1274,7 +1534,7 @@ export function reconcileSimulationOnRestart(
     totalEvacuated,
     totalInTransit,
     totalRemainingAtSource,
-    totalWaitingAtPickups: 0,
+    totalWaitingAtPickups,
   };
 }
 
@@ -1302,29 +1562,48 @@ function ensurePointInsideSourcePolygon(
     const dLng = candidatePos[1] - prevPos[1];
     const cosLat = Math.max(0.1, Math.cos((prevPos[0] * Math.PI) / 180));
 
-    // 1. Try inward reflection with gentle bias toward interiorTarget
-    const reflLat =
-      prevPos[0] - dLat * 0.65 + (interiorTarget[0] - prevPos[0]) * 0.14;
-    const reflLng =
-      prevPos[1] - dLng * 0.65 + (interiorTarget[1] - prevPos[1]) * 0.14;
-    if (turf.booleanPointInPolygon(turf.point([reflLng, reflLat]), srcTurfPoly)) {
-      return { position: [reflLat, reflLng], bounced: true };
-    }
-
-    // 2. Try rotated deflections so clusters near a concave boundary slide smoothly inside the Source Area
+    // 1. Try rotated deflections across a full 360° fan and multiple step scales with randomized left/right parity
+    // so dots near sharp vertices or concave corners slide out smoothly instead of ping-ponging
     const stepLat = dLat;
     const stepLngScaled = dLng * cosLat;
-    for (const deg of [35, -35, 65, -65, 95, -95, 130, -130, 165]) {
-      const rad = (deg * Math.PI) / 180;
-      const c = Math.cos(rad);
-      const s = Math.sin(rad);
-      const rotLat = stepLat * c - stepLngScaled * s;
-      const rotLng = (stepLat * s + stepLngScaled * c) / cosLat;
-      const candLat = prevPos[0] + rotLat * 0.8;
-      const candLng = prevPos[1] + rotLng * 0.8;
-      if (turf.booleanPointInPolygon(turf.point([candLng, candLat]), srcTurfPoly)) {
-        return { position: [candLat, candLng], bounced: true };
+    const parity = Math.random() < 0.5 ? 1 : -1;
+    const baseAngles = [
+      25 * parity,
+      -25 * parity,
+      50 * parity,
+      -50 * parity,
+      75 * parity,
+      -75 * parity,
+      105 * parity,
+      -105 * parity,
+      135 * parity,
+      -135 * parity,
+      160 * parity,
+      -160 * parity,
+      180,
+    ];
+    for (const scale of [0.95, 0.55, 1.35]) {
+      for (const deg of baseAngles) {
+        const rad = (deg * Math.PI) / 180;
+        const c = Math.cos(rad);
+        const s = Math.sin(rad);
+        const rotLat = stepLat * c - stepLngScaled * s;
+        const rotLng = (stepLat * s + stepLngScaled * c) / cosLat;
+        const candLat = prevPos[0] + rotLat * scale;
+        const candLng = prevPos[1] + rotLng * scale;
+        if (turf.booleanPointInPolygon(turf.point([candLng, candLat]), srcTurfPoly)) {
+          return { position: [candLat, candLng], bounced: true };
+        }
       }
+    }
+
+    // 2. Try inward reflection with bias toward interiorTarget
+    const reflLat =
+      prevPos[0] - dLat * 0.65 + (interiorTarget[0] - prevPos[0]) * 0.18;
+    const reflLng =
+      prevPos[1] - dLng * 0.65 + (interiorTarget[1] - prevPos[1]) * 0.18;
+    if (turf.booleanPointInPolygon(turf.point([reflLng, reflLat]), srcTurfPoly)) {
+      return { position: [reflLat, reflLng], bounced: true };
     }
 
     // 3. Try fractional step along prevPos -> candidatePos or prevPos -> interiorTarget
@@ -1336,11 +1615,38 @@ function ensurePointInsideSourcePolygon(
       }
     }
 
-    for (const beta of [0.08, 0.2]) {
+    for (const beta of [0.08, 0.18, 0.32]) {
       const inLat = prevPos[0] + (interiorTarget[0] - prevPos[0]) * beta;
       const inLng = prevPos[1] + (interiorTarget[1] - prevPos[1]) * beta;
       if (turf.booleanPointInPolygon(turf.point([inLng, inLat]), srcTurfPoly)) {
         return { position: [inLat, inLng], bounced: true };
+      }
+    }
+
+    // 4. Radial 16-direction escape probe around prevPos (10m..28m) biased toward interiorTarget
+    // Guarantees a dot wedged in a tight corner vertex always finds an interior escape step
+    const metersPerDegLat = 111320;
+    const metersPerDegLng = Math.max(1000, 111320 * cosLat);
+    const startAngleRad = Math.random() * Math.PI * 2;
+    let bestEscape: [number, number] | null = null;
+    let bestTargetDistSq = Infinity;
+    for (const probeMeters of [12, 22, 35]) {
+      for (let k = 0; k < 16; k++) {
+        const theta = startAngleRad + (k * Math.PI * 2) / 16;
+        const pLat = prevPos[0] + (Math.cos(theta) * probeMeters) / metersPerDegLat;
+        const pLng = prevPos[1] + (Math.sin(theta) * probeMeters) / metersPerDegLng;
+        if (turf.booleanPointInPolygon(turf.point([pLng, pLat]), srcTurfPoly)) {
+          const distSq =
+            (pLat - interiorTarget[0]) * (pLat - interiorTarget[0]) +
+            (pLng - interiorTarget[1]) * (pLng - interiorTarget[1]) * cosLat * cosLat;
+          if (distSq < bestTargetDistSq) {
+            bestTargetDistSq = distSq;
+            bestEscape = [pLat, pLng];
+          }
+        }
+      }
+      if (bestEscape) {
+        return { position: bestEscape, bounced: true };
       }
     }
   } catch {
@@ -1351,32 +1657,210 @@ function ensurePointInsideSourcePolygon(
 }
 
 /**
- * Step simulation forward by `deltaSimSeconds` implementing:
+ * Compute a deterministic waiting position for a dot around its Pickup Location
+ * (within a 5.5m–13.5m ring), guaranteed to remain inside the Source Area polygon.
+ */
+function computeWaitingDotPosition(
+  clusterId: string,
+  prevPos: [number, number],
+  pickupLocation: [number, number],
+  srcTurfPoly: ReturnType<typeof toTurfPolygon> | undefined,
+  srcCentroid: [number, number]
+): [number, number] {
+  let hash = 0;
+  for (let i = 0; i < clusterId.length; i++) {
+    hash = (hash * 31 + clusterId.charCodeAt(i)) | 0;
+  }
+  const absHash = Math.abs(hash);
+  const angleRad = ((absHash % 360) * Math.PI) / 180;
+  const ringMeters = 5.5 + (absHash % 9); // 5.5m to 13.5m around pickup square
+
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = Math.max(
+    1000,
+    111320 * Math.cos((pickupLocation[0] * Math.PI) / 180)
+  );
+
+  const candidateLat = pickupLocation[0] + (Math.cos(angleRad) * ringMeters) / metersPerDegLat;
+  const candidateLng = pickupLocation[1] + (Math.sin(angleRad) * ringMeters) / metersPerDegLng;
+
+  const ringAttempt = ensurePointInsideSourcePolygon(
+    prevPos,
+    [candidateLat, candidateLng],
+    srcTurfPoly,
+    srcCentroid
+  );
+  if (!ringAttempt.bounced) {
+    return ringAttempt.position;
+  }
+
+  return ensurePointInsideSourcePolygon(
+    prevPos,
+    pickupLocation,
+    srcTurfPoly,
+    srcCentroid
+  ).position;
+}
+
+/**
+ * Deduct `boardedByBehavior` passengers from the `headcount` of dots currently waiting
+ * (`status === 'waiting_at_pickup'`) at `pickupId` (or within `sourceId` as fallback).
+ * Partial dots (`headcount < PEOPLE_PER_DOT`) are boarded first in FIFO order so a partially-boarded
+ * dot finishes boarding before splitting the next 50-person dot; while `0 < headcount < 50`,
+ * that dot remains waiting at the pickup for subsequent vehicles, and once `headcount === 0`
+ * its status transitions to `'boarded'`.
+ */
+function deductBoardedFromWaitingClusters(
+  clusters: SourceInternalCluster[],
+  pickupId: string,
+  sourceId: string,
+  boardedByBehavior: BehaviorCounts
+): void {
+  const behaviors: PopulationBehaviorType[] = ['compliant', 'self-directed', 'disoriented'];
+
+  behaviors.forEach((b) => {
+    let rem = boardedByBehavior[b];
+    if (rem <= 0) return;
+
+    const candidates = clusters.filter(
+      (c) =>
+        c.status === 'waiting_at_pickup' &&
+        c.targetPickupId === pickupId &&
+        c.behavior === b &&
+        c.headcount > 0
+    );
+    candidates.sort((a, bDot) => {
+      const aPartial = a.headcount < PEOPLE_PER_DOT ? 0 : 1;
+      const bPartial = bDot.headcount < PEOPLE_PER_DOT ? 0 : 1;
+      return aPartial - bPartial;
+    });
+
+    for (const c of candidates) {
+      if (rem <= 0) break;
+      const take = Math.min(c.headcount, rem);
+      c.headcount -= take;
+      rem -= take;
+      if (c.headcount <= 0) {
+        c.headcount = 0;
+        c.status = 'boarded';
+      }
+    }
+
+    if (rem > 0) {
+      const fallbackCandidates = clusters.filter(
+        (c) =>
+          c.status === 'waiting_at_pickup' &&
+          (c.targetPickupId === pickupId || c.sourceId === sourceId) &&
+          c.headcount > 0
+      );
+      for (const c of fallbackCandidates) {
+        if (rem <= 0) break;
+        const take = Math.min(c.headcount, rem);
+        c.headcount -= take;
+        rem -= take;
+        if (c.headcount <= 0) {
+          c.headcount = 0;
+          c.status = 'boarded';
+        }
+      }
+    }
+  });
+}
+
+/**
+ * Transfer `transferredByBehavior` waiting evacuees on `waiting_at_pickup` dots from `fromPickup` to `toPickup`
+ * within the same Source Area, splitting a dot if only part of its headcount is transferred.
+ */
+function transferWaitingClustersBetweenPickups(
+  clusters: SourceInternalCluster[],
+  fromPickup: PickupLocationState,
+  toPickup: PickupLocationState,
+  transferredByBehavior: BehaviorCounts,
+  srcTurfPoly: ReturnType<typeof toTurfPolygon> | undefined,
+  srcCentroid: [number, number]
+): void {
+  const behaviors: PopulationBehaviorType[] = ['compliant', 'self-directed', 'disoriented'];
+
+  behaviors.forEach((b) => {
+    let rem = transferredByBehavior[b];
+    if (rem <= 0) return;
+
+    const candidates = clusters.filter(
+      (c) =>
+        c.status === 'waiting_at_pickup' &&
+        c.targetPickupId === fromPickup.id &&
+        c.behavior === b &&
+        c.headcount > 0
+    );
+    candidates.sort((a, bDot) => {
+      const aPartial = a.headcount < PEOPLE_PER_DOT ? 0 : 1;
+      const bPartial = bDot.headcount < PEOPLE_PER_DOT ? 0 : 1;
+      return aPartial - bPartial;
+    });
+
+    for (const c of candidates) {
+      if (rem <= 0) break;
+      if (c.headcount <= rem) {
+        rem -= c.headcount;
+        c.targetPickupId = toPickup.id;
+        c.position = computeWaitingDotPosition(
+          c.id,
+          c.position,
+          toPickup.location,
+          srcTurfPoly,
+          srcCentroid
+        );
+      } else {
+        c.headcount -= rem;
+        const splitId = `${c.id}-xfer-${toPickup.id}-${Date.now()}`;
+        const splitPos = computeWaitingDotPosition(
+          splitId,
+          c.position,
+          toPickup.location,
+          srcTurfPoly,
+          srcCentroid
+        );
+        clusters.push({
+          ...c,
+          id: splitId,
+          headcount: rem,
+          position: splitPos,
+          targetPickupId: toPickup.id,
+          status: 'waiting_at_pickup',
+        });
+        rem = 0;
+      }
+    }
+  });
+}
+
+/**
+ * Step twin forward by `deltaTwinSeconds` implementing:
  * 1. Compliant population moving immediately to closest pickup location (strictly within Source Area)
- * 2. Disoriented population diffusing inside Source Area via true 2D Brownian motion (independent Gaussian random walk)
- *    until within capture range of a pickup location, at which point they direct themselves straight to it
+ * 2. Disoriented population diffusing inside Source Area via 2D Brownian motion with stochastic pickup-seeking drift
+ *    and enhanced capture radius so they have a higher chance of reaching pickup points randomly
  * 3. Self-Directed population moving towards the closest pickup point in a random zig-zag pattern,
- *    sometimes walking in the opposite direction for very short periods of time (strictly within Source Area)
+ *    sometimes walking in the opposite direction for very short periods of time, with adaptive corner escape
+ *    so dots never get stuck in corners of Source Areas
  * 4. All populations always stay within their initial designated Source Areas
  * 5. Vehicles waiting at pickup locations until EITHER:
  *    - Occupancy reaches >= 80%, OR
  *    - Waiting time reaches 10 minutes (600s) (or Metro platform dispatch cadence for Metro Trains)
  *    Whichever happens first, departing to Target Area provided there is at least 1 passenger onboard!
  * 6. When vehicles depart empty to pick up population, they ALWAYS follow the existing computed route polyline!
- * 7. Dynamic heatmap updating (hotter around pickup locations as queues build, cooler over time as source empties)
  */
-export function stepSimulationState(
-  prevState: SimulationStateSnapshot,
-  elapsedSimSeconds: number,
-  deltaSimSeconds: number,
+export function stepTwinState(
+  prevState: TwinStateSnapshot,
+  elapsedTwinSeconds: number,
+  deltaTwinSeconds: number,
   sourceAreas: SourceArea[],
   targetAreas: TargetArea[]
-): SimulationStateSnapshot {
+): TwinStateSnapshot {
   const newLogs: string[] = [];
 
   const prevTelemetry =
     prevState.telemetryStats || createInitialTelemetryStats(sourceAreas, prevState.clusters);
-  const updatedTelemetry: SimulationTelemetryStats = {
+  const updatedTelemetry: TwinTelemetryStats = {
     initialByBehavior: { ...prevTelemetry.initialByBehavior },
     evacuatedByBehavior: { ...prevTelemetry.evacuatedByBehavior },
     evacuatedPersonSecondsByBehavior: { ...prevTelemetry.evacuatedPersonSecondsByBehavior },
@@ -1417,13 +1901,13 @@ export function stepSimulationState(
     }
   });
 
-  // Speed of pedestrians moving inside Source Area (scaled so Compliant arrive quickly and Disoriented/Self-Directed trickle in over minutes)
-  const walkSpeedMetersPerSec = 3.2;
+  // Speed of population groups moving inside Source Area toward pickup points: 5 km/h (1.3889 m/s)
+  const walkSpeedMetersPerSec = kmhToMps(5);
 
   // --- STEP 1: Move internal Source Area crowd clusters ---
-  const updatedClusters = prevState.clusters.map((cluster) => {
+  const updatedClusters: SourceInternalCluster[] = prevState.clusters.map((cluster) => {
     if (cluster.status !== 'moving_in_zone' || cluster.headcount <= 0) {
-      return cluster;
+      return { ...cluster };
     }
 
     const srcTurfPoly = sourceTurfPolyMap.get(cluster.sourceId);
@@ -1432,7 +1916,7 @@ export function stepSimulationState(
       (p) => p.sourceId === cluster.sourceId
     );
 
-    if (allPickupsInZone.length === 0) return cluster;
+    if (allPickupsInZone.length === 0) return { ...cluster };
 
     // When a Source Area has active Metro Station Pickup Points, prioritize the Metro Station Pickup Points
     const metroPickupsInZone = allPickupsInZone.filter((p) => p.isMetro);
@@ -1465,14 +1949,15 @@ export function stepSimulationState(
       closest.pickup.waitingByBehavior[cluster.behavior] += cluster.headcount;
       updatedTelemetry.pickupArrivedByBehavior[cluster.behavior] += cluster.headcount;
       updatedTelemetry.pickupArrivalPersonSecondsByBehavior[cluster.behavior] +=
-        cluster.headcount * elapsedSimSeconds;
+        cluster.headcount * elapsedTwinSeconds;
 
-      const safeArrivalPos = ensurePointInsideSourcePolygon(
+      const safeArrivalPos = computeWaitingDotPosition(
+        cluster.id,
         cluster.position,
         closest.pickup.location,
         srcTurfPoly,
         srcCentroid
-      ).position;
+      );
 
       return {
         ...cluster,
@@ -1483,9 +1968,9 @@ export function stepSimulationState(
     }
 
     // --- BEHAVIOR 1: COMPLIANT ---
-    // Immediately go straight to the closest pickup location (always remaining inside the Source Area)
+    // Immediately go straight to the closest pickup location at 5 km/h (always remaining inside the Source Area)
     if (cluster.behavior === 'compliant') {
-      const stepDist = walkSpeedMetersPerSec * deltaSimSeconds;
+      const stepDist = walkSpeedMetersPerSec * deltaTwinSeconds;
       const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
       const rawLat =
         cluster.position[0] + (closest.pickup.location[0] - cluster.position[0]) * ratio;
@@ -1496,7 +1981,7 @@ export function stepSimulationState(
         cluster.position,
         [rawLat, rawLng],
         srcTurfPoly,
-        srcCentroid
+        closest.pickup.location
       );
 
       return {
@@ -1506,13 +1991,13 @@ export function stepSimulationState(
       };
     }
 
-    // --- BEHAVIOR 2: DISORIENTED (2D BROWNIAN MOTION) ---
-    // Diffuse via true stochastic 2D Brownian motion (independent zero-mean Gaussian displacements at every tick)
-    // until within capture distance of a pickup point, then direct straight to it (always staying inside Source Area)!
+    // --- BEHAVIOR 2: DISORIENTED (2D BROWNIAN MOTION WITH ENHANCED PICKUP REACHABILITY AT 5 KM/H) ---
+    // Diffuse via 2D Brownian motion combined with a stochastic radial pull toward pickup points and an
+    // expanded capture radius at 5 km/h walking speed.
     if (cluster.behavior === 'disoriented') {
-      const captureDistMeters = closest.pickup.isMetro ? 75.0 : 50.0;
+      const captureDistMeters = closest.pickup.isMetro ? 160.0 : 135.0;
       if (closest.distMeters <= captureDistMeters) {
-        const stepDist = walkSpeedMetersPerSec * 1.15 * deltaSimSeconds;
+        const stepDist = walkSpeedMetersPerSec * deltaTwinSeconds;
         const ratio = Math.min(1.0, stepDist / Math.max(1, closest.distMeters));
         const rawLat =
           cluster.position[0] + (closest.pickup.location[0] - cluster.position[0]) * ratio;
@@ -1523,7 +2008,7 @@ export function stepSimulationState(
           cluster.position,
           [rawLat, rawLng],
           srcTurfPoly,
-          srcCentroid
+          closest.pickup.location
         );
 
         return {
@@ -1539,51 +2024,60 @@ export function stepSimulationState(
         const zNorth = mag * Math.cos(2.0 * Math.PI * u2);
         const zEast = mag * Math.sin(2.0 * Math.PI * u2);
 
-        // Wiener process scaling: dX = sigma * sqrt(dt) * Z
-        const sigmaMeters = 10.5;
-        const stepScaleMeters = sigmaMeters * Math.sqrt(Math.max(0.1, deltaSimSeconds));
-        const dNorthMeters = zNorth * stepScaleMeters;
-        const dEastMeters = zEast * stepScaleMeters;
-
         const metersPerDegLat = 111320;
-        const metersPerDegLng =
-          111320 * Math.cos((cluster.position[0] * Math.PI) / 180);
+        const metersPerDegLng = Math.max(
+          1000,
+          111320 * Math.cos((cluster.position[0] * Math.PI) / 180)
+        );
 
-        const dLat = dNorthMeters / metersPerDegLat;
-        const dLng = dEastMeters / Math.max(1000, metersPerDegLng);
+        // Combine random Brownian direction with stochastic radial pull toward pickup point,
+        // normalized to move at walkSpeedMetersPerSec (5 km/h)
+        const randomPickupTarget =
+          pickupsWithDist.length > 1 && Math.random() < 0.25
+            ? pickupsWithDist[Math.floor(Math.random() * pickupsWithDist.length)]
+            : closest;
+        const toTargetNorth =
+          (randomPickupTarget.pickup.location[0] - cluster.position[0]) * metersPerDegLat;
+        const toTargetEast =
+          (randomPickupTarget.pickup.location[1] - cluster.position[1]) * metersPerDegLng;
+        const toTargetNorm = Math.max(1, Math.hypot(toTargetNorth, toTargetEast));
+        const unitDriftNorth = toTargetNorth / toTargetNorm;
+        const unitDriftEast = toTargetEast / toTargetNorm;
 
-        let candidateLat = cluster.position[0] + dLat;
-        let candidateLng = cluster.position[1] + dLng;
+        const randomDriftWeight = 0.45 + Math.random() * 0.55;
+        const rawVecNorth = zNorth + unitDriftNorth * randomDriftWeight;
+        const rawVecEast = zEast + unitDriftEast * randomDriftWeight;
+        const rawVecNorm = Math.max(1e-6, Math.hypot(rawVecNorth, rawVecEast));
 
-        // If heading toward an interior Metro Station, add a gentle radial drift so Brownian walkers don't stay trapped at far corners
-        if (closest.pickup.isMetro) {
-          const driftRatio = Math.min(
-            0.35,
-            (walkSpeedMetersPerSec * 0.55 * deltaSimSeconds) /
-              Math.max(1, closest.distMeters)
-          );
-          candidateLat += (closest.pickup.location[0] - cluster.position[0]) * driftRatio;
-          candidateLng += (closest.pickup.location[1] - cluster.position[1]) * driftRatio;
-        }
+        const stepDistMeters = Math.min(
+          walkSpeedMetersPerSec * deltaTwinSeconds,
+          closest.distMeters
+        );
+        const dNorthMeters = (rawVecNorth / rawVecNorm) * stepDistMeters;
+        const dEastMeters = (rawVecEast / rawVecNorm) * stepDistMeters;
 
-        const targetRef = closest.pickup.isMetro ? closest.pickup.location : srcCentroid;
+        const candidateLat = cluster.position[0] + dNorthMeters / metersPerDegLat;
+        const candidateLng = cluster.position[1] + dEastMeters / metersPerDegLng;
+
         const { position: safePos } = ensurePointInsideSourcePolygon(
           cluster.position,
           [candidateLat, candidateLng],
           srcTurfPoly,
-          targetRef
+          closest.pickup.location
         );
 
         return {
           ...cluster,
           position: safePos,
+          targetPickupId: closest.pickup.id,
         };
       }
     }
 
-    // --- BEHAVIOR 3: SELF-DIRECTED (RANDOM ZIG-ZAG TOWARDS CLOSEST PICKUP WITH BRIEF OPPOSITE-DIRECTION WALKS) ---
-    // Move towards the closest pickup point in a random zig-zag pattern, sometimes walking in the
-    // opposite direction for very short periods of time, while always staying within the Source Area.
+    // --- BEHAVIOR 3: SELF-DIRECTED (RANDOM ZIG-ZAG TOWARDS CLOSEST PICKUP WITH CORNER-ESCAPE RANDOMNESS AT 5 KM/H) ---
+    // Move towards the closest pickup point in a random zig-zag pattern at 5 km/h, sometimes walking in the
+    // opposite direction for very short periods of time, while always staying within the Source Area
+    // and adapting heading when encountering polygon boundaries/corners so dots never get stuck in corners.
     if (cluster.behavior === 'self-directed') {
       const metersPerDegLat = 111320;
       const metersPerDegLng = Math.max(
@@ -1598,49 +2092,53 @@ export function stepSimulationState(
       const targetBearingRad = Math.atan2(toPickupEast, toPickupNorth);
 
       let zigZagSide: 1 | -1 = cluster.zigZagSide ?? 1;
-      let zigZagTimerSeconds = (cluster.zigZagTimerSeconds ?? 0) - deltaSimSeconds;
+      let zigZagTimerSeconds = (cluster.zigZagTimerSeconds ?? 0) - deltaTwinSeconds;
       let zigZagAngleOffsetRad =
-        cluster.zigZagAngleOffsetRad ?? zigZagSide * ((45 * Math.PI) / 180);
+        cluster.zigZagAngleOffsetRad ?? zigZagSide * ((38 * Math.PI) / 180);
       let isReversingBrief = Boolean(cluster.isReversingBrief);
 
       if (zigZagTimerSeconds <= 0) {
         // Switch lateral zig-zag tack (left <-> right)
         zigZagSide = zigZagSide === 1 ? -1 : 1;
 
-        // Sometimes (~20% of legs when not already reversing and >24m from pickup),
-        // walk in the opposite direction (away from pickup) for a very short period (1.6s to 3.8s)
-        if (!isReversingBrief && closest.distMeters > 24 && Math.random() < 0.20) {
+        // Sometimes (~12% of legs when not already reversing and >35m from pickup),
+        // walk in the opposite direction (away from pickup) for a very short period (1.2s to 2.4s)
+        if (!isReversingBrief && closest.distMeters > 35 && Math.random() < 0.12) {
           isReversingBrief = true;
-          zigZagTimerSeconds = 1.6 + Math.random() * 2.2;
+          zigZagTimerSeconds = 1.2 + Math.random() * 1.2;
           const revCantRad = zigZagSide * (((15 + Math.random() * 30) * Math.PI) / 180);
           zigZagAngleOffsetRad = Math.PI + revCantRad;
         } else {
           isReversingBrief = false;
-          zigZagTimerSeconds = 3.8 + Math.random() * 5.2;
-          const tackAngleDeg = 35 + Math.random() * 30; // 35 deg to 65 deg zig-zag tack
+          zigZagTimerSeconds = 3.2 + Math.random() * 4.5;
+          const tackAngleDeg = 22 + Math.random() * 28; // 22 deg to 50 deg zig-zag tack
           zigZagAngleOffsetRad = zigZagSide * ((tackAngleDeg * Math.PI) / 180);
         }
       }
 
-      // Damp lateral offset slightly only when right on the doorstep (<22m) so the zig-zag converges into the pickup
+      // Damp lateral offset when close (<28m) so the zig-zag converges reliably into the pickup
       const effectiveOffsetRad =
-        closest.distMeters <= 22 && !isReversingBrief
-          ? zigZagAngleOffsetRad * 0.4
+        closest.distMeters <= 28 && !isReversingBrief
+          ? zigZagAngleOffsetRad * 0.35
           : zigZagAngleOffsetRad;
 
       // Add organic random angular jitter on each step
-      const stepJitterRad = (Math.random() - 0.5) * 0.22;
+      const stepJitterRad = (Math.random() - 0.5) * 0.32;
       const headingRad = targetBearingRad + effectiveOffsetRad + stepJitterRad;
 
-      const stepDistMeters =
-        walkSpeedMetersPerSec * (isReversingBrief ? 0.85 : 0.95) * deltaSimSeconds;
+      const stepDistMeters = walkSpeedMetersPerSec * deltaTwinSeconds;
       const dNorthMeters = stepDistMeters * Math.cos(headingRad);
       const dEastMeters = stepDistMeters * Math.sin(headingRad);
 
       const candidateLat = cluster.position[0] + dNorthMeters / metersPerDegLat;
       const candidateLng = cluster.position[1] + dEastMeters / metersPerDegLng;
 
-      const targetRef = closest.pickup.isMetro ? closest.pickup.location : srcCentroid;
+      // Use a randomized blend of pickup location and centroid as the interior reference when bouncing
+      const bounceBlend = 0.55 + Math.random() * 0.35;
+      const targetRef: [number, number] = [
+        closest.pickup.location[0] * bounceBlend + srcCentroid[0] * (1 - bounceBlend),
+        closest.pickup.location[1] * bounceBlend + srcCentroid[1] * (1 - bounceBlend),
+      ];
       const { position: safePos, bounced } = ensurePointInsideSourcePolygon(
         cluster.position,
         [candidateLat, candidateLng],
@@ -1649,11 +2147,27 @@ export function stepSimulationState(
       );
 
       if (bounced) {
-        // Flip tack away from boundary and cancel any outward reversal
-        zigZagSide = zigZagSide === 1 ? -1 : 1;
+        // Instead of deterministically flipping to +/-38 deg (which ping-pongs between two walls of a corner),
+        // align the next tack with the actual interior escape direction that succeeded, plus random angular jitter
         isReversingBrief = false;
-        zigZagAngleOffsetRad = zigZagSide * ((38 * Math.PI) / 180);
-        zigZagTimerSeconds = Math.max(2.5, zigZagTimerSeconds);
+        const actualNorth = (safePos[0] - cluster.position[0]) * metersPerDegLat;
+        const actualEast = (safePos[1] - cluster.position[1]) * metersPerDegLng;
+        const actualMoveMeters = Math.hypot(actualNorth, actualEast);
+
+        if (actualMoveMeters > 0.25) {
+          const actualBearingRad = Math.atan2(actualEast, actualNorth);
+          let deltaRad = actualBearingRad - targetBearingRad;
+          while (deltaRad > Math.PI) deltaRad -= Math.PI * 2;
+          while (deltaRad < -Math.PI) deltaRad += Math.PI * 2;
+          const escapeJitterRad = ((Math.random() - 0.5) * 40 * Math.PI) / 180;
+          zigZagAngleOffsetRad = deltaRad * 0.75 + escapeJitterRad;
+          zigZagSide = zigZagAngleOffsetRad >= 0 ? 1 : -1;
+        } else {
+          // Random full-range escape angle if displacement was minimal
+          zigZagSide = Math.random() < 0.5 ? 1 : -1;
+          zigZagAngleOffsetRad = ((Math.random() * 140 - 70) * Math.PI) / 180;
+        }
+        zigZagTimerSeconds = 3.5 + Math.random() * 3.0;
       }
 
       return {
@@ -1667,7 +2181,7 @@ export function stepSimulationState(
       };
     }
 
-    return cluster;
+    return { ...cluster };
   });
 
   // Calculate remaining moving evacuees in a Source Area
@@ -1692,7 +2206,7 @@ export function stepSimulationState(
   const finalizeEmptyVehicleAfterUnload = (veh: ActiveVehicleUnit): ActiveVehicleUnit => {
     updatedTelemetry.totalCompletedVehicleTrips += 1;
 
-    // If this vehicle was diverted mid-simulation to the closest Target Area and has a post-offload recomputed route,
+    // If this vehicle was diverted mid-twin to the closest Target Area and has a post-offload recomputed route,
     // transition it now to follow that existing route!
     const nextEvacCoords = veh.postOffloadEvacCoords || veh.evacCoords;
     const nextTargetId = veh.postOffloadTargetId || veh.targetId;
@@ -1765,7 +2279,7 @@ export function stepSimulationState(
     };
 
     if (veh.status === 'completed') return veh;
-    if (elapsedSimSeconds < veh.departureDelaySeconds) return veh;
+    if (elapsedTwinSeconds < veh.departureDelaySeconds) return veh;
 
     const pickup = pickupMap.get(veh.assignedPickupId);
     if (!pickup) return veh;
@@ -1775,8 +2289,8 @@ export function stepSimulationState(
     // Account for exact active time within tick if vehicle just passed its departureDelaySeconds
     const effectiveDeltaSec =
       veh.progressMeters === 0 && veh.status === 'to_pickup' && veh.departureDelaySeconds > 0
-        ? Math.min(deltaSimSeconds, Math.max(0, elapsedSimSeconds - veh.departureDelaySeconds))
-        : deltaSimSeconds;
+        ? Math.min(deltaTwinSeconds, Math.max(0, elapsedTwinSeconds - veh.departureDelaySeconds))
+        : deltaTwinSeconds;
 
     // STATE A: Driving empty along existing route TO Pickup Location (Blue Square or Metro Station) at configured transitSpeedKmh
     if (veh.status === 'to_pickup') {
@@ -1819,7 +2333,7 @@ export function stepSimulationState(
     // & WAIT UNTIL: (1) Occupancy >= 80%, OR (2) Waiting time >= 10 minutes (600 seconds) (or Metro platform cadence)
     // Whichever happens first, depart to Target Area IF there is at least 1 passenger!
     if (veh.status === 'waiting_for_80_pct') {
-      const nextWaitSeconds = veh.waitingAtPickupSeconds + deltaSimSeconds;
+      const nextWaitSeconds = veh.waitingAtPickupSeconds + deltaTwinSeconds;
 
       const reservedAhead = reservedQueueByPickup.get(pickup.id) || 0;
       const spaceNeeded = veh.maxCapacity - veh.currentOccupancy;
@@ -1828,7 +2342,7 @@ export function stepSimulationState(
       // draw waiting evacuees from other pickup queues in the same Source Area so Metro capacity is fully utilized!
       if (
         spaceNeeded > Math.max(0, pickup.waitingPopulation - reservedAhead) &&
-        (veh.isMetro || (pickup.waitingPopulation === 0 && getMovingInSource(veh.sourceId) === 0))
+        (veh.isMetro || getMovingInSource(veh.sourceId) === 0)
       ) {
         for (const otherPickup of pickupMap.values()) {
           const currentAvail = Math.max(0, pickup.waitingPopulation - reservedAhead);
@@ -1863,6 +2377,15 @@ export function stepSimulationState(
               pickup.waitingByBehavior.compliant += transferredByBehavior.compliant;
               pickup.waitingByBehavior['self-directed'] += transferredByBehavior['self-directed'];
               pickup.waitingByBehavior.disoriented += transferredByBehavior.disoriented;
+
+              transferWaitingClustersBetweenPickups(
+                updatedClusters,
+                otherPickup,
+                pickup,
+                transferredByBehavior,
+                sourceTurfPolyMap.get(veh.sourceId),
+                sourceCentroidMap.get(veh.sourceId) || pickup.location
+              );
             }
           }
         }
@@ -1882,7 +2405,7 @@ export function stepSimulationState(
             Math.min(veh.unitCount, availableQueueForVeh, spaceNeeded)
           );
           const exactBoarded =
-            (deltaSimSeconds * activeLoadingUnits) / loadUnloadSecPerPerson +
+            (deltaTwinSeconds * activeLoadingUnits) / loadUnloadSecPerPerson +
             (veh.loadingProgressRemainder || 0);
           boardedNow = Math.min(
             spaceNeeded,
@@ -1890,7 +2413,7 @@ export function stepSimulationState(
             Math.floor(exactBoarded)
           );
           veh.loadingProgressRemainder = exactBoarded - boardedNow;
-          veh.loadingElapsedSeconds = (veh.loadingElapsedSeconds || 0) + deltaSimSeconds;
+          veh.loadingElapsedSeconds = (veh.loadingElapsedSeconds || 0) + deltaTwinSeconds;
         }
 
         if (boardedNow > 0) {
@@ -1922,6 +2445,13 @@ export function stepSimulationState(
           pickup.boardedByBehavior.compliant += boardedBreakdown.compliant;
           pickup.boardedByBehavior['self-directed'] += boardedBreakdown['self-directed'];
           pickup.boardedByBehavior.disoriented += boardedBreakdown.disoriented;
+
+          deductBoardedFromWaitingClusters(
+            updatedClusters,
+            pickup.id,
+            veh.sourceId,
+            boardedBreakdown
+          );
         }
       } else {
         veh.loadingProgressRemainder = 0;
@@ -1936,7 +2466,7 @@ export function stepSimulationState(
       // Departure Conditions:
       const remainingQueueForVeh = Math.max(0, pickup.waitingPopulation - reservedAhead);
       const reached80Percent = occupancyRatio >= 0.80;
-      const reached10Minutes = nextWaitSeconds >= 600.0; // 10 minutes = 600 simulation seconds
+      const reached10Minutes = nextWaitSeconds >= 600.0; // 10 minutes = 600 twin seconds
       const reachedMetroCadence =
         Boolean(veh.isMetro) &&
         remainingQueueForVeh === 0 &&
@@ -2046,7 +2576,7 @@ export function stepSimulationState(
         0,
         veh.evacCumulative[veh.evacCumulative.length - 1] ?? 0
       );
-      const nextProgress = veh.progressMeters + speedMps * deltaSimSeconds;
+      const nextProgress = veh.progressMeters + speedMps * deltaTwinSeconds;
 
       if (nextProgress >= totalEvacDist) {
         const arrivalPos =
@@ -2062,7 +2592,7 @@ export function stepSimulationState(
             const countB = veh.occupancyByBehavior[beh] || 0;
             updatedTelemetry.evacuatedByBehavior[beh] += countB;
             updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] +=
-              countB * elapsedSimSeconds;
+              countB * elapsedTwinSeconds;
           });
 
           pickup.evacuatedCount += veh.currentOccupancy;
@@ -2107,7 +2637,7 @@ export function stepSimulationState(
 
     // STATE D: Unloading passengers at Target Shelter accounting for per-person unloading time
     if (veh.status === 'unloading') {
-      const nextUnloadElapsed = (veh.unloadingElapsedSeconds || 0) + deltaSimSeconds;
+      const nextUnloadElapsed = (veh.unloadingElapsedSeconds || 0) + deltaTwinSeconds;
       const initialOcc = Math.max(
         1,
         veh.unloadingInitialOccupancy || veh.currentOccupancy
@@ -2121,7 +2651,7 @@ export function stepSimulationState(
         // Each individual vehicle in `veh.unitCount` that carried passengers unloads 1 person every `loadUnloadSecPerPerson` seconds in parallel
         const activeUnloadingUnits = Math.max(1, Math.min(veh.unitCount, initialOcc));
         const exactUnloaded =
-          (deltaSimSeconds * activeUnloadingUnits) / loadUnloadSecPerPerson +
+          (deltaTwinSeconds * activeUnloadingUnits) / loadUnloadSecPerPerson +
           (veh.unloadingProgressRemainder || 0);
         unloadedNow = Math.min(veh.currentOccupancy, Math.floor(exactUnloaded));
         veh.unloadingProgressRemainder = exactUnloaded - unloadedNow;
@@ -2155,7 +2685,7 @@ export function stepSimulationState(
           const countB = unloadedBreakdown[beh] || 0;
           updatedTelemetry.evacuatedByBehavior[beh] += countB;
           updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] +=
-            countB * elapsedSimSeconds;
+            countB * elapsedTwinSeconds;
         });
 
         // Credit pickup location shelter delivery statistics

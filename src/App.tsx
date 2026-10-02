@@ -17,10 +17,11 @@ import {
   Sentinel2AggregationPeriod,
   GlofasForecastState,
   GlofasForecastOverlay,
-  SimulationTelemetryStats,
+  TwinTelemetryStats,
   BrusselsMetroLineFeature,
   BrusselsMetroStationFeature,
   BrusselsMetroConfig,
+  RoutingAlgorithm,
 } from './types/evacuation';
 import { PresetScenarioData } from './data/presets';
 import { BRUSSELS_METRO_INITIAL_DATA } from './data/brusselsMetroData';
@@ -32,20 +33,22 @@ import {
 import {
   computeAllEvacuationRoutes,
   computeDirectRouteToClosestTarget,
+  computeRejoinPathToClosestRoute,
+  findClosestPointOnPolyline,
 } from './services/routingEngine';
 import {
-  initializeSimulationState,
-  reconcileSimulationOnRestart,
-  stepSimulationState,
+  initializeTwinState,
+  reconcileTwinOnRestart,
+  stepTwinState,
   getRemainingPopulationBySource,
   createInitialTelemetryStats,
   generateHeatmapFromState,
-} from './services/simulationEngine';
+} from './services/twinEngine';
 import { LeftControlPanel } from './components/LeftControlPanel';
 import { EvacuationMap } from './components/EvacuationMap';
 import { BottomLogPanel } from './components/BottomLogPanel';
 import { RightTelemetryPanel } from './components/RightTelemetryPanel';
-import { SimulationReportModal } from './components/SimulationReportModal';
+import { TwinReportModal } from './components/TwinReportModal';
 
 export function App() {
   // Dynamic preset scenarios loaded exclusively at runtime from data/scenarios/*.pkl
@@ -78,23 +81,25 @@ export function App() {
   const [pendingDrawnPolygon, setPendingDrawnPolygon] = useState<[number, number][] | null>(null);
   const [pendingPlacedPoint, setPendingPlacedPoint] = useState<[number, number] | null>(null);
 
-  // Routing & Simulation states
+  // Routing & Twin states
+  const [routingAlgorithm, setRoutingAlgorithm] = useState<RoutingAlgorithm>('Basic OSM');
   const [computedRoutes, setComputedRoutes] = useState<ComputedRoute[]>([]);
   const [isComputingRoutes, setIsComputingRoutes] = useState<boolean>(false);
+  const routeComputeAbortRef = useRef<AbortController | null>(null);
 
   const [clusters, setClusters] = useState<SourceInternalCluster[]>([]);
   const [pickupStates, setPickupStates] = useState<PickupLocationState[]>([]);
   const [vehicles, setVehicles] = useState<ActiveVehicleUnit[]>([]);
   const [heatmapPoints, setHeatmapPoints] = useState<HeatmapPoint[]>([]);
-  const [telemetryStats, setTelemetryStats] = useState<SimulationTelemetryStats>(() =>
+  const [telemetryStats, setTelemetryStats] = useState<TwinTelemetryStats>(() =>
     createInitialTelemetryStats([])
   );
 
-  const [isSimulating, setIsSimulating] = useState<boolean>(false);
-  const [isSimulationInProgress, setIsSimulationInProgress] = useState<boolean>(false);
-  const [simSpeed, setSimSpeed] = useState<number>(2);
-  const [elapsedSimSeconds, setElapsedSimSeconds] = useState<number>(0);
-  const [isSimulationReportOpen, setIsSimulationReportOpen] = useState<boolean>(false);
+  const [isTwinning, setIsTwinning] = useState<boolean>(false);
+  const [isTwinInProgress, setIsTwinInProgress] = useState<boolean>(false);
+  const [twinSpeed, setTwinSpeed] = useState<number>(2);
+  const [elapsedTwinSeconds, setElapsedTwinSeconds] = useState<number>(0);
+  const [isTwinReportOpen, setIsTwinReportOpen] = useState<boolean>(false);
 
   // Telemetry metrics
   const [totalEvacuated, setTotalEvacuated] = useState<number>(0);
@@ -102,7 +107,7 @@ export function App() {
   const [totalRemainingAtSource, setTotalRemainingAtSource] = useState<number>(0);
   const [totalWaitingAtPickups, setTotalWaitingAtPickups] = useState<number>(0);
 
-  // System & Simulation Logs
+  // System & Twin Logs
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
   // Independent Cockpit Panel Collapse States & Map Labels Visibility
@@ -144,19 +149,27 @@ export function App() {
           setPresetScenarios(map);
 
           const firstScenario = scenarios[0];
+          const freshSources = firstScenario.sourceAreas.map((s) => ({
+            ...s,
+            disabled: false,
+          }));
           const freshTargets = firstScenario.targetAreas.map((t) => ({
             ...t,
             currentOccupancy: 0,
             disabled: false,
           }));
+          const freshAvoids = firstScenario.avoidAreas.map((a) => ({
+            ...a,
+            disabled: false,
+          }));
 
           baselinePopulationsRef.current = Object.fromEntries(
-            firstScenario.sourceAreas.map((s) => [s.id, s.population])
+            freshSources.map((s) => [s.id, s.population])
           );
 
-          const initialSim = initializeSimulationState(
+          const initialTwin = initializeTwinState(
             [],
-            firstScenario.sourceAreas,
+            freshSources,
             freshTargets,
             firstScenario.vehicleFleets
           );
@@ -164,19 +177,19 @@ export function App() {
           setSelectedPreset(firstScenario.id);
           setMapCenter(firstScenario.center);
           setMapZoom(firstScenario.zoom);
-          setSourceAreas(firstScenario.sourceAreas);
+          setSourceAreas(freshSources);
           setTargetAreas(freshTargets);
-          setAvoidAreas(firstScenario.avoidAreas);
+          setAvoidAreas(freshAvoids);
           setVehicleFleets(firstScenario.vehicleFleets);
           setComputedRoutes([]);
-          setClusters(initialSim.clusters);
-          setPickupStates(initialSim.pickupStates);
-          setVehicles(initialSim.vehicles);
-          setHeatmapPoints(initialSim.heatmapPoints);
-          setTelemetryStats(initialSim.telemetryStats);
+          setClusters(initialTwin.clusters);
+          setPickupStates(initialTwin.pickupStates);
+          setVehicles(initialTwin.vehicles);
+          setHeatmapPoints(initialTwin.heatmapPoints);
+          setTelemetryStats(initialTwin.telemetryStats);
           setTotalEvacuated(0);
           setTotalInTransit(0);
-          setTotalRemainingAtSource(initialSim.totalRemainingAtSource);
+          setTotalRemainingAtSource(initialTwin.totalRemainingAtSource);
           setTotalWaitingAtPickups(0);
 
           const nowFormatted = new Date().toLocaleTimeString();
@@ -185,39 +198,40 @@ export function App() {
             {
               id: `log-startup-${Date.now()}`,
               timestamp: nowFormatted,
-              simTimeFormatted: '00:00',
+              twinTimeFormatted: '00:00',
               level: 'INFO',
-              message: `Dynamically loaded ${scenarios.length} scenario(s) from data/scenarios/*.pkl. Active scenario: "${firstScenario.name}" (${firstScenario.sourceAreas.length} sources, ${freshTargets.length} shelters, ${firstScenario.avoidAreas.length} avoid areas, ${firstScenario.vehicleFleets.length} vehicle fleets).`,
+              message: `Dynamically loaded ${scenarios.length} scenario(s) from data/scenarios/*.pkl. Active scenario: "${firstScenario.name}" (${freshSources.length} sources, ${freshTargets.length} shelters, ${freshAvoids.length} avoid areas, ${firstScenario.vehicleFleets.length} vehicle fleets).`,
             },
           ]);
 
           // Compute initial evacuation routes for the dynamically loaded startup scenario
+          const activeSources = freshSources.filter((s) => !s.disabled);
           const activeTargets = freshTargets.filter((t) => !t.disabled);
-          if (firstScenario.sourceAreas.length > 0 && activeTargets.length > 0) {
+          if (activeSources.length > 0 && activeTargets.length > 0) {
             setIsComputingRoutes(true);
             try {
               const routeResult = await computeAllEvacuationRoutes(
-                firstScenario.sourceAreas,
+                freshSources,
                 freshTargets,
-                firstScenario.avoidAreas,
+                freshAvoids,
                 firstScenario.vehicleFleets
               );
               if (cancelled) return;
               setComputedRoutes(routeResult.routes);
               setLogs((prev) => [...prev, ...routeResult.logs]);
 
-              const routedSim = initializeSimulationState(
+              const routedTwin = initializeTwinState(
                 routeResult.routes,
-                firstScenario.sourceAreas,
+                freshSources,
                 freshTargets,
                 firstScenario.vehicleFleets
               );
-              setClusters(routedSim.clusters);
-              setPickupStates(routedSim.pickupStates);
-              setVehicles(routedSim.vehicles);
-              setHeatmapPoints(routedSim.heatmapPoints);
-              setTelemetryStats(routedSim.telemetryStats);
-              setTotalRemainingAtSource(routedSim.totalRemainingAtSource);
+              setClusters(routedTwin.clusters);
+              setPickupStates(routedTwin.pickupStates);
+              setVehicles(routedTwin.vehicles);
+              setHeatmapPoints(routedTwin.heatmapPoints);
+              setTelemetryStats(routedTwin.telemetryStats);
+              setTotalRemainingAtSource(routedTwin.totalRemainingAtSource);
             } catch (err) {
               if (!cancelled) {
                 setLogs((prev) => [
@@ -225,7 +239,7 @@ export function App() {
                   {
                     id: `log-startup-err-${Date.now()}`,
                     timestamp: new Date().toLocaleTimeString(),
-                    simTimeFormatted: '00:00',
+                    twinTimeFormatted: '00:00',
                     level: 'WARN',
                     message: `Initial route computation encountered an error: ${String(err)}`,
                   },
@@ -246,7 +260,7 @@ export function App() {
             {
               id: `log-scenarios-err-${Date.now()}`,
               timestamp: new Date().toLocaleTimeString(),
-              simTimeFormatted: '00:00',
+              twinTimeFormatted: '00:00',
               level: 'WARN',
               message: `Could not load preset scenarios from /api/scenarios: ${String(err)}`,
             },
@@ -337,17 +351,17 @@ export function App() {
   ]);
 
   const appendLog = useCallback(
-    (level: LogEntry['level'], message: string, simSec: number = 0) => {
-      const mins = Math.floor(simSec / 60);
-      const secs = Math.floor(simSec % 60);
-      const simFormatted = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    (level: LogEntry['level'], message: string, twinSec: number = 0) => {
+      const mins = Math.floor(twinSec / 60);
+      const secs = Math.floor(twinSec % 60);
+      const twinFormatted = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 
       setLogs((prev) => [
         ...prev,
         {
           id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           timestamp: new Date().toLocaleTimeString(),
-          simTimeFormatted: simFormatted,
+          twinTimeFormatted: twinFormatted,
           level,
           message,
         },
@@ -359,7 +373,7 @@ export function App() {
   // Live remaining population per Source Area ID
   const remainingBySource = useMemo(() => {
     // When paused after edits or before start, respect src.population if user edited it
-    if (!isSimulating) {
+    if (!isTwinning) {
       const map: Record<string, number> = {};
       sourceAreas.forEach((s) => {
         map[s.id] = s.population;
@@ -370,20 +384,20 @@ export function App() {
       sourceAreas,
       clusters,
       pickupStates,
-      elapsedSimSeconds > 0
+      elapsedTwinSeconds > 0
     );
-  }, [sourceAreas, clusters, pickupStates, elapsedSimSeconds, isSimulating]);
+  }, [sourceAreas, clusters, pickupStates, elapsedTwinSeconds, isTwinning]);
 
   // Switch preset scenario (only when paused)
   const handleSelectPreset = (preset: PresetScenarioId) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before switching preset scenarios.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before switching preset scenarios.');
       return;
     }
 
-    setIsSimulating(false);
-    setIsSimulationInProgress(false);
-    setElapsedSimSeconds(0);
+    setIsTwinning(false);
+    setIsTwinInProgress(false);
+    setElapsedTwinSeconds(0);
     setHasPendingTopologyChanges(false);
     setSelectedPreset(preset);
     setSelectedEntityId(null);
@@ -393,42 +407,50 @@ export function App() {
 
     const data = preset !== 'custom' ? presetScenarios[preset] : undefined;
     if (data) {
+      const freshSources = data.sourceAreas.map((s) => ({
+        ...s,
+        disabled: false,
+      }));
       baselinePopulationsRef.current = Object.fromEntries(
-        data.sourceAreas.map((s) => [s.id, s.population])
+        freshSources.map((s) => [s.id, s.population])
       );
       const freshTargets = data.targetAreas.map((t) => ({
         ...t,
         currentOccupancy: 0,
         disabled: false,
       }));
-      const initialSim = initializeSimulationState(
+      const freshAvoids = data.avoidAreas.map((a) => ({
+        ...a,
+        disabled: false,
+      }));
+      const initialTwin = initializeTwinState(
         [],
-        data.sourceAreas,
+        freshSources,
         freshTargets,
         data.vehicleFleets
       );
 
       setMapCenter(data.center);
       setMapZoom(data.zoom);
-      setSourceAreas(data.sourceAreas);
+      setSourceAreas(freshSources);
       setTargetAreas(freshTargets);
-      setAvoidAreas(data.avoidAreas);
+      setAvoidAreas(freshAvoids);
       setVehicleFleets(data.vehicleFleets);
       setComputedRoutes([]);
-      setClusters(initialSim.clusters);
-      setPickupStates(initialSim.pickupStates);
-      setVehicles(initialSim.vehicles);
-      setHeatmapPoints(initialSim.heatmapPoints);
-      setTelemetryStats(initialSim.telemetryStats);
+      setClusters(initialTwin.clusters);
+      setPickupStates(initialTwin.pickupStates);
+      setVehicles(initialTwin.vehicles);
+      setHeatmapPoints(initialTwin.heatmapPoints);
+      setTelemetryStats(initialTwin.telemetryStats);
 
       setTotalEvacuated(0);
       setTotalInTransit(0);
-      setTotalRemainingAtSource(initialSim.totalRemainingAtSource);
+      setTotalRemainingAtSource(initialTwin.totalRemainingAtSource);
       setTotalWaitingAtPickups(0);
 
       appendLog(
         'INFO',
-        `Loaded preset scenario: "${data.name}" (${data.sourceAreas.length} sources, ${data.targetAreas.length} shelters, ${data.avoidAreas.length} avoid areas, ${data.vehicleFleets.length} vehicle fleets).`
+        `Loaded preset scenario: "${data.name}" (${freshSources.length} sources, ${freshTargets.length} shelters, ${freshAvoids.length} avoid areas, ${data.vehicleFleets.length} vehicle fleets).`
       );
     } else {
       baselinePopulationsRef.current = {};
@@ -453,33 +475,54 @@ export function App() {
     }
   };
 
+  const handleStopComputingRoutes = useCallback(() => {
+    if (routeComputeAbortRef.current) {
+      routeComputeAbortRef.current.abort();
+      routeComputeAbortRef.current = null;
+    }
+    setIsComputingRoutes(false);
+    appendLog('WARN', 'Route calculation stopped by user.');
+  }, [appendLog]);
+
   // Run OSRM + Obstacle Avoidance Route Computation & Establish Blue Square Pickups
   // Note: Only land routes over streets with the configured vehicleFleets are computed here;
   // Brussels Metro lines remain static and unaffected by avoidAreas.
   const handleComputeRoutes = useCallback(async () => {
-    if (isSimulating || isSimulationInProgress) {
+    if (isTwinning || isTwinInProgress) {
       appendLog(
         'WARN',
-        'Cannot compute evacuation routes while a simulation is in progress. Wait until the simulation finishes or reset the simulation first.'
+        'Cannot compute evacuation routes while a twin is in progress. Wait until the twin finishes or reset the twin first.'
       );
       return;
     }
 
+    const activeSources = sourceAreas.filter((s) => !s.disabled);
     const activeTargets = targetAreas.filter((t) => !t.disabled);
-    if (sourceAreas.length === 0 || activeTargets.length === 0) {
+    if (activeSources.length === 0 || activeTargets.length === 0) {
       appendLog(
         'WARN',
-        'Cannot compute routes: At least 1 Source Area and 1 active (enabled) Target Shelter are required.'
+        'Cannot compute routes: At least 1 active (enabled) Source Area and 1 active (enabled) Target Shelter are required.'
       );
       return;
     }
 
-    setIsSimulating(false);
-    setIsSimulationInProgress(false);
+    if (routeComputeAbortRef.current) {
+      routeComputeAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    routeComputeAbortRef.current = abortController;
+
+    const isPausedMidSimulation =
+      elapsedTwinSeconds > 0 && !activeSources.every((s) => s.population === 0) && vehicles.length > 0;
+
+    setIsTwinning(false);
+    if (!isPausedMidSimulation) {
+      setIsTwinInProgress(false);
+    }
     setIsComputingRoutes(true);
 
-    // If computing routes after a completed simulation (where source populations reached 0), restore baseline populations
-    const allZeroPop = sourceAreas.every((s) => s.population === 0);
+    // If computing routes after a completed twin (where active source populations reached 0), restore baseline populations
+    const allZeroPop = activeSources.every((s) => s.population === 0);
     const effectiveSourceAreas = allZeroPop
       ? sourceAreas.map((s) => ({
           ...s,
@@ -496,61 +539,171 @@ export function App() {
         effectiveSourceAreas,
         targetAreas,
         avoidAreas,
-        vehicleFleets
+        vehicleFleets,
+        routingAlgorithm,
+        abortController.signal
       );
+
+      // If user clicked 'stop calculation', restore map without including the calculated routes
+      if (abortController.signal.aborted) {
+        return;
+      }
 
       setComputedRoutes(result.routes);
       setLogs((prev) => [...prev, ...result.logs]);
       setHasPendingTopologyChanges(false);
 
-      // Initialize micro-simulation state ready for playback
-      const initialSimState = initializeSimulationState(
-        result.routes,
-        effectiveSourceAreas,
-        targetAreas,
-        vehicleFleets,
-        activeMetroEvacuationOptions
-      );
+      if (isPausedMidSimulation) {
+        const directRoutesToClosestTarget: Record<
+          string,
+          { target: TargetArea; coordinates: [number, number][] }
+        > = {};
+        const rejoinRoutesToClosestEvacRoute: Record<
+          string,
+          { route: ComputedRoute; coordinates: [number, number][] }
+        > = {};
 
-      if (initialSimState.newLogs.length > 0) {
-        initialSimState.newLogs.forEach((msg) => appendLog('ROUTING', msg, 0));
+        const streetVehicles = vehicles.filter((v) => v.vehicleType !== 'Metro' && !v.isMetro);
+        for (const veh of streetVehicles) {
+          if (abortController.signal.aborted) {
+            return;
+          }
+          if (veh.currentOccupancy > 0) {
+            directRoutesToClosestTarget[veh.id] = await computeDirectRouteToClosestTarget(
+              veh.currentPosition,
+              targetAreas,
+              avoidAreas
+            );
+          }
+
+          const fleet = vehicleFleets.find((f) => f.id === veh.fleetId);
+          const isStillAtDepot =
+            veh.progressMeters === 0 &&
+            Boolean(fleet) &&
+            Math.hypot(
+              (veh.currentPosition[0] - fleet!.location[0]) * 111320,
+              (veh.currentPosition[1] - fleet!.location[1]) * 71500
+            ) <= 50;
+          const origRoute = result.routes.find((r) => r.id === veh.assignedRouteId);
+          const origSnap =
+            origRoute && origRoute.coordinates && origRoute.coordinates.length >= 2
+              ? findClosestPointOnPolyline(veh.currentPosition, origRoute.coordinates)
+              : null;
+          const isOnOrigEvacRoute =
+            !isStillAtDepot &&
+            origRoute !== undefined &&
+            origSnap !== null &&
+            origSnap.distanceMeters <= 40;
+
+          if (!isStillAtDepot && !isOnOrigEvacRoute && result.routes.length > 0) {
+            const rejoin = await computeRejoinPathToClosestRoute(
+              veh.currentPosition,
+              result.routes,
+              avoidAreas,
+              veh.currentOccupancy > 0 ? 'to_target' : 'to_pickup'
+            );
+            if (rejoin) {
+              rejoinRoutesToClosestEvacRoute[veh.id] = rejoin;
+            }
+          }
+        }
+
+        if (abortController.signal.aborted) {
+          return;
+        }
+
+        const currentTargetOccupancies: Record<string, number> = {};
+        targetAreas.forEach((t) => {
+          currentTargetOccupancies[t.id] = t.currentOccupancy;
+        });
+
+        const reconciled = reconcileTwinOnRestart(
+          result.routes,
+          effectiveSourceAreas,
+          targetAreas,
+          vehicleFleets,
+          vehicles,
+          currentTargetOccupancies,
+          directRoutesToClosestTarget,
+          telemetryStats,
+          pickupStates,
+          activeMetroEvacuationOptions,
+          clusters,
+          rejoinRoutesToClosestEvacRoute
+        );
+
+        setClusters(reconciled.clusters);
+        setPickupStates(reconciled.pickupStates);
+        setVehicles(reconciled.vehicles);
+        setHeatmapPoints(reconciled.heatmapPoints);
+        setTelemetryStats(reconciled.telemetryStats);
+        setTotalEvacuated(reconciled.totalEvacuated);
+        setTotalInTransit(reconciled.totalInTransit);
+        setTotalRemainingAtSource(reconciled.totalRemainingAtSource);
+        setTotalWaitingAtPickups(reconciled.totalWaitingAtPickups);
+
+        reconciled.newLogs.forEach((msg) => appendLog('TWIN', msg, elapsedTwinSeconds));
+      } else {
+        // Initialize micro-twin state ready for playback at t = 0
+        const initialTwinState = initializeTwinState(
+          result.routes,
+          effectiveSourceAreas,
+          targetAreas,
+          vehicleFleets,
+          activeMetroEvacuationOptions
+        );
+
+        if (initialTwinState.newLogs.length > 0) {
+          initialTwinState.newLogs.forEach((msg) => appendLog('ROUTING', msg, 0));
+        }
+
+        setClusters(initialTwinState.clusters);
+        setPickupStates(initialTwinState.pickupStates);
+        setVehicles(initialTwinState.vehicles);
+        setHeatmapPoints(initialTwinState.heatmapPoints);
+        setTelemetryStats(initialTwinState.telemetryStats);
+        setElapsedTwinSeconds(0);
+
+        setTotalEvacuated(0);
+        setTotalInTransit(0);
+        setTotalRemainingAtSource(initialTwinState.totalRemainingAtSource);
+        setTotalWaitingAtPickups(0);
+        setTargetAreas((prev) => prev.map((t) => ({ ...t, currentOccupancy: 0 })));
       }
-
-      setClusters(initialSimState.clusters);
-      setPickupStates(initialSimState.pickupStates);
-      setVehicles(initialSimState.vehicles);
-      setHeatmapPoints(initialSimState.heatmapPoints);
-      setTelemetryStats(initialSimState.telemetryStats);
-      setElapsedSimSeconds(0);
-
-      setTotalEvacuated(0);
-      setTotalInTransit(0);
-      setTotalRemainingAtSource(initialSimState.totalRemainingAtSource);
-      setTotalWaitingAtPickups(0);
-      setTargetAreas((prev) => prev.map((t) => ({ ...t, currentOccupancy: 0 })));
     } catch (err) {
-      appendLog('WARN', `Route computation encountered an error: ${String(err)}`);
+      if (!abortController.signal.aborted) {
+        appendLog('WARN', `Route computation encountered an error: ${String(err)}`);
+      }
     } finally {
-      setIsComputingRoutes(false);
+      if (routeComputeAbortRef.current === abortController) {
+        routeComputeAbortRef.current = null;
+        setIsComputingRoutes(false);
+      }
     }
   }, [
     sourceAreas,
     targetAreas,
     avoidAreas,
     vehicleFleets,
+    routingAlgorithm,
     appendLog,
-    isSimulating,
-    isSimulationInProgress,
+    isTwinning,
+    isTwinInProgress,
     activeMetroEvacuationOptions,
+    elapsedTwinSeconds,
+    vehicles,
+    telemetryStats,
+    pickupStates,
+    clusters,
   ]);
 
   // When paused at t=0 and scenario / Source/Target areas or Brussels Metro evacuation settings change,
-  // refresh the initialized simulation state so spatially uniform evacuee clusters, heatmaps,
+  // refresh the initialized twin state so spatially uniform evacuee clusters,
   // metro pickups, drop-offs, and trains are immediately distributed and ready on the map.
   useEffect(() => {
-    if (isSimulating || isSimulationInProgress || elapsedSimSeconds > 0) return;
+    if (isTwinning || isTwinInProgress || elapsedTwinSeconds > 0) return;
 
-    const freshState = initializeSimulationState(
+    const freshState = initializeTwinState(
       computedRoutes,
       sourceAreas,
       targetAreas,
@@ -569,47 +722,51 @@ export function App() {
     targetAreas,
     vehicleFleets,
     computedRoutes,
-    isSimulating,
-    isSimulationInProgress,
-    elapsedSimSeconds,
+    isTwinning,
+    isTwinInProgress,
+    elapsedTwinSeconds,
   ]);
 
-  // Run / Resume Simulation (with automatic mid-simulation route recomputation & vehicle diversion if topology changed)
-  const handleRunSimulation = async () => {
-    if (sourceAreas.length === 0) {
-      appendLog('WARN', 'Cannot run simulation: At least 1 Source Area is required.');
+  // Run / Resume Twin (with automatic mid-twin route recomputation & vehicle diversion if topology changed)
+  const handleRunTwin = async () => {
+    const activeSources = sourceAreas.filter((s) => !s.disabled);
+    if (activeSources.length === 0) {
+      appendLog(
+        'WARN',
+        'Cannot run twin: No active Source Areas available! Add or enable at least one Source Area.'
+      );
       return;
     }
     const activeTargets = targetAreas.filter((t) => !t.disabled);
     if (activeTargets.length === 0) {
-      appendLog('WARN', 'Cannot run simulation: No active Target Shelters available! Add or enable at least one Target Shelter.');
+      appendLog('WARN', 'Cannot run twin: No active Target Shelters available! Add or enable at least one Target Shelter.');
       return;
     }
 
-    // If restarting after a previous simulation finished (where source populations reached 0), restore baseline populations first
-    const isRestartingCompletedSim =
+    // If restarting after a previous twin finished (where active source populations reached 0), restore baseline populations first
+    const isRestartingCompletedTwin =
       (totalRemainingAtSource === 0 && totalInTransit === 0 && totalEvacuated > 0) ||
-      sourceAreas.every((s) => s.population === 0);
+      activeSources.every((s) => s.population === 0);
 
-    const effectiveSourceAreas = isRestartingCompletedSim
+    const effectiveSourceAreas = isRestartingCompletedTwin
       ? sourceAreas.map((s) => ({
           ...s,
           population: baselinePopulationsRef.current[s.id] ?? s.population,
         }))
       : sourceAreas;
 
-    if (isRestartingCompletedSim) {
+    if (isRestartingCompletedTwin) {
       setSourceAreas(effectiveSourceAreas);
       setTargetAreas((prev) => prev.map((t) => ({ ...t, currentOccupancy: 0 })));
-      setElapsedSimSeconds(0);
+      setElapsedTwinSeconds(0);
       setTotalEvacuated(0);
       setTotalInTransit(0);
       setTotalWaitingAtPickups(0);
     }
 
-    const effectiveElapsedSimSec = isRestartingCompletedSim ? 0 : elapsedSimSeconds;
+    const effectiveElapsedTwinSec = isRestartingCompletedTwin ? 0 : elapsedTwinSeconds;
 
-    // Determine which Source Areas still need street routes (those not covered by active Metro Corridors)
+    // Determine which active Source Areas still need street routes (those not covered by active Metro Corridors)
     const metroCoveredSourceIds = new Set(
       activeMetroEvacuationOptions?.enabled
         ? activeMetroEvacuationOptions.corridors.map((c) => c.sourceId)
@@ -617,15 +774,20 @@ export function App() {
     );
     const needsStreetRoutes =
       vehicleFleets.length > 0 &&
-      effectiveSourceAreas.some((s) => !metroCoveredSourceIds.has(s.id));
+      effectiveSourceAreas.some((s) => !s.disabled && !metroCoveredSourceIds.has(s.id));
 
     // If topology/population/fleets were modified while paused (or routes/vehicles not yet initialized), recompute & initialize before resuming!
     if (
       hasPendingTopologyChanges ||
-      isRestartingCompletedSim ||
+      isRestartingCompletedTwin ||
       (needsStreetRoutes && computedRoutes.length === 0) ||
       vehicles.length === 0
     ) {
+      if (routeComputeAbortRef.current) {
+        routeComputeAbortRef.current.abort();
+      }
+      const abortController = new AbortController();
+      routeComputeAbortRef.current = abortController;
       setIsComputingRoutes(true);
       try {
         let nextStreetRoutes = computedRoutes;
@@ -633,16 +795,22 @@ export function App() {
         if (needsStreetRoutes && (hasPendingTopologyChanges || computedRoutes.length === 0)) {
           appendLog(
             'ROUTING',
-            'Computing street evacuation routes for Source Areas served by street vehicle fleets...',
-            effectiveElapsedSimSec
+            `Computing street evacuation routes (${routingAlgorithm}) for Source Areas served by street vehicle fleets...`,
+            effectiveElapsedTwinSec
           );
 
           const routeResult = await computeAllEvacuationRoutes(
             effectiveSourceAreas,
             targetAreas,
             avoidAreas,
-            vehicleFleets
+            vehicleFleets,
+            routingAlgorithm,
+            abortController.signal
           );
+
+          if (abortController.signal.aborted) {
+            return;
+          }
 
           nextStreetRoutes = routeResult.routes;
           setComputedRoutes(routeResult.routes);
@@ -652,22 +820,65 @@ export function App() {
           setComputedRoutes([]);
         }
 
-        if (effectiveElapsedSimSec > 0 && vehicles.length > 0) {
+        if (effectiveElapsedTwinSec > 0 && vehicles.length > 0) {
           // Compute direct routes from each loaded street vehicle's current position to the CLOSEST active Target Area
+          // and compute rejoin paths to the closest evacuation route for any off-route street vehicle
           const directRoutesToClosestTarget: Record<
             string,
             { target: TargetArea; coordinates: [number, number][] }
           > = {};
+          const rejoinRoutesToClosestEvacRoute: Record<
+            string,
+            { route: ComputedRoute; coordinates: [number, number][] }
+          > = {};
 
-          const loadedVehicles = vehicles.filter(
-            (v) => v.currentOccupancy > 0 && v.vehicleType !== 'Metro'
-          );
-          for (const veh of loadedVehicles) {
-            directRoutesToClosestTarget[veh.id] = await computeDirectRouteToClosestTarget(
-              veh.currentPosition,
-              targetAreas,
-              avoidAreas
-            );
+          const streetVehicles = vehicles.filter((v) => v.vehicleType !== 'Metro' && !v.isMetro);
+          for (const veh of streetVehicles) {
+            if (abortController.signal.aborted) {
+              return;
+            }
+            if (veh.currentOccupancy > 0) {
+              directRoutesToClosestTarget[veh.id] = await computeDirectRouteToClosestTarget(
+                veh.currentPosition,
+                targetAreas,
+                avoidAreas
+              );
+            }
+
+            const fleet = vehicleFleets.find((f) => f.id === veh.fleetId);
+            const isStillAtDepot =
+              veh.progressMeters === 0 &&
+              Boolean(fleet) &&
+              Math.hypot(
+                (veh.currentPosition[0] - fleet!.location[0]) * 111320,
+                (veh.currentPosition[1] - fleet!.location[1]) * 71500
+              ) <= 50;
+            const origRoute = nextStreetRoutes.find((r) => r.id === veh.assignedRouteId);
+            const origSnap =
+              origRoute && origRoute.coordinates && origRoute.coordinates.length >= 2
+                ? findClosestPointOnPolyline(veh.currentPosition, origRoute.coordinates)
+                : null;
+            const isOnOrigEvacRoute =
+              !isStillAtDepot &&
+              origRoute !== undefined &&
+              origSnap !== null &&
+              origSnap.distanceMeters <= 40;
+
+            if (!isStillAtDepot && !isOnOrigEvacRoute && nextStreetRoutes.length > 0) {
+              const rejoin = await computeRejoinPathToClosestRoute(
+                veh.currentPosition,
+                nextStreetRoutes,
+                avoidAreas,
+                veh.currentOccupancy > 0 ? 'to_target' : 'to_pickup'
+              );
+              if (rejoin) {
+                rejoinRoutesToClosestEvacRoute[veh.id] = rejoin;
+              }
+            }
+          }
+
+          if (abortController.signal.aborted) {
+            return;
           }
 
           const currentTargetOccupancies: Record<string, number> = {};
@@ -675,7 +886,7 @@ export function App() {
             currentTargetOccupancies[t.id] = t.currentOccupancy;
           });
 
-          const reconciled = reconcileSimulationOnRestart(
+          const reconciled = reconcileTwinOnRestart(
             nextStreetRoutes,
             effectiveSourceAreas,
             targetAreas,
@@ -685,7 +896,9 @@ export function App() {
             directRoutesToClosestTarget,
             telemetryStats,
             pickupStates,
-            activeMetroEvacuationOptions
+            activeMetroEvacuationOptions,
+            clusters,
+            rejoinRoutesToClosestEvacRoute
           );
 
           setClusters(reconciled.clusters);
@@ -699,66 +912,70 @@ export function App() {
           setTotalWaitingAtPickups(reconciled.totalWaitingAtPickups);
 
           reconciled.newLogs.forEach((msg) =>
-            appendLog('SIMULATION', msg, effectiveElapsedSimSec)
+            appendLog('TWIN', msg, effectiveElapsedTwinSec)
           );
         } else {
           // Fresh start at t = 0
-          const initialSimState = initializeSimulationState(
+          const initialTwinState = initializeTwinState(
             nextStreetRoutes,
             effectiveSourceAreas,
             targetAreas,
             vehicleFleets,
             activeMetroEvacuationOptions
           );
-          setClusters(initialSimState.clusters);
-          setPickupStates(initialSimState.pickupStates);
-          setVehicles(initialSimState.vehicles);
-          setHeatmapPoints(initialSimState.heatmapPoints);
-          setTelemetryStats(initialSimState.telemetryStats);
+          setClusters(initialTwinState.clusters);
+          setPickupStates(initialTwinState.pickupStates);
+          setVehicles(initialTwinState.vehicles);
+          setHeatmapPoints(initialTwinState.heatmapPoints);
+          setTelemetryStats(initialTwinState.telemetryStats);
           setTotalEvacuated(0);
           setTotalInTransit(0);
-          setTotalRemainingAtSource(initialSimState.totalRemainingAtSource);
+          setTotalRemainingAtSource(initialTwinState.totalRemainingAtSource);
           setTotalWaitingAtPickups(0);
 
-          initialSimState.newLogs.forEach((msg) =>
-            appendLog('SIMULATION', msg, 0)
+          initialTwinState.newLogs.forEach((msg) =>
+            appendLog('TWIN', msg, 0)
           );
         }
 
         setHasPendingTopologyChanges(false);
       } catch (err) {
-        appendLog('WARN', `Failed to initialize routes on start: ${String(err)}`);
-        setIsComputingRoutes(false);
+        if (!abortController.signal.aborted) {
+          appendLog('WARN', `Failed to initialize routes on start: ${String(err)}`);
+        }
         return;
       } finally {
-        setIsComputingRoutes(false);
+        if (routeComputeAbortRef.current === abortController) {
+          routeComputeAbortRef.current = null;
+          setIsComputingRoutes(false);
+        }
       }
     }
 
-    setIsSimulationReportOpen(false);
-    setIsSimulationInProgress(true);
-    setIsSimulating(true);
+    setIsTwinReportOpen(false);
+    setIsTwinInProgress(true);
+    setIsTwinning(true);
     appendLog(
-      'SIMULATION',
-      `Simulation running (${simSpeed}x). Evacuees moving within source zones toward pickup locations${
+      'TWIN',
+      `Twin running (${twinSpeed}x). Evacuees moving within source zones toward pickup locations${
         activeMetroEvacuationOptions
           ? ` (Brussels Metro Active: ${activeMetroEvacuationOptions.corridors.length} station corridor(s), ${activeMetroEvacuationOptions.trainCount} train(s) × ${activeMetroEvacuationOptions.trainCapacity} pax)`
           : ''
       }.`,
-      effectiveElapsedSimSec
+      effectiveElapsedTwinSec
     );
   };
 
-  // Pause Simulation and snapshot remaining people into sourceAreas
-  const handleStopSimulation = () => {
-    setIsSimulating(false);
+  // Pause Twin and snapshot remaining people into sourceAreas
+  const handleStopTwin = () => {
+    setIsTwinning(false);
 
     // Sync each Source Area's population property to the exact remaining unboarded headcount
     const liveRemaining = getRemainingPopulationBySource(
       sourceAreas,
       clusters,
       pickupStates,
-      elapsedSimSeconds > 0
+      elapsedTwinSeconds > 0
     );
 
     setSourceAreas((prev) =>
@@ -769,17 +986,17 @@ export function App() {
     );
 
     appendLog(
-      'SIMULATION',
-      'Simulation paused. You can now modify Source/Target/Avoid areas, adjust population counts, disable Target Shelters, or add/remove vehicles.',
-      elapsedSimSeconds
+      'TWIN',
+      'Twin paused. You can now modify Source/Target/Avoid areas, adjust population counts, disable Target Shelters, or add/remove vehicles.',
+      elapsedTwinSeconds
     );
   };
 
-  // Reset Simulation back to t = 0
-  const handleResetSimulation = () => {
-    setIsSimulating(false);
-    setIsSimulationInProgress(false);
-    setElapsedSimSeconds(0);
+  // Reset Twin back to t = 0
+  const handleResetTwin = () => {
+    setIsTwinning(false);
+    setIsTwinInProgress(false);
+    setElapsedTwinSeconds(0);
     setHasPendingTopologyChanges(false);
 
     const restoredSources = sourceAreas.map((s) => ({
@@ -788,7 +1005,7 @@ export function App() {
     }));
     setSourceAreas(restoredSources);
 
-    const freshState = initializeSimulationState(
+    const freshState = initializeTwinState(
       computedRoutes,
       restoredSources,
       targetAreas,
@@ -808,22 +1025,22 @@ export function App() {
     setTargetAreas((prev) => prev.map((t) => ({ ...t, currentOccupancy: 0 })));
 
     appendLog(
-      'SIMULATION',
-      'Simulation reset to t=00:00. All evacuees returned to initial positions inside source zones.'
+      'TWIN',
+      'Twin reset to t=00:00. All evacuees returned to initial positions inside source zones.'
     );
   };
 
-  // Keep latest simulation state in ref for interval loop
-  const simStateRef = useRef({
+  // Keep latest twin state in ref for interval loop
+  const twinStateRef = useRef({
     clusters,
     pickupStates,
     vehicles,
     targetOccupancies: {} as Record<string, number>,
     telemetryStats,
-    elapsedSimSeconds,
+    elapsedTwinSeconds,
     sourceAreas,
     targetAreas,
-    simSpeed,
+    twinSpeed,
   });
 
   useEffect(() => {
@@ -832,30 +1049,30 @@ export function App() {
       occMap[t.id] = t.currentOccupancy;
     });
 
-    simStateRef.current = {
+    twinStateRef.current = {
       clusters,
       pickupStates,
       vehicles,
       targetOccupancies: occMap,
       telemetryStats,
-      elapsedSimSeconds,
+      elapsedTwinSeconds,
       sourceAreas,
       targetAreas,
-      simSpeed,
+      twinSpeed,
     };
   }, [
     clusters,
     pickupStates,
     vehicles,
     telemetryStats,
-    elapsedSimSeconds,
+    elapsedTwinSeconds,
     sourceAreas,
     targetAreas,
-    simSpeed,
+    twinSpeed,
   ]);
 
   useEffect(() => {
-    if (!isSimulating) return;
+    if (!isTwinning) return;
 
     const intervalMs = 100; // 10 ticks per second
     let lastTickMs = performance.now();
@@ -866,12 +1083,12 @@ export function App() {
       const wallDeltaSec = Math.min(0.5, Math.max(0.01, (nowMs - lastTickMs) / 1000));
       lastTickMs = nowMs;
 
-      const state = simStateRef.current;
-      // 1x playback = 1 simulation second per 1 real-time second
-      const deltaSimSec = wallDeltaSec * state.simSpeed;
-      const nextElapsed = state.elapsedSimSeconds + deltaSimSec;
+      const state = twinStateRef.current;
+      // 1x playback = 1 twin second per 1 real-time second
+      const deltaTwinSec = wallDeltaSec * state.twinSpeed;
+      const nextElapsed = state.elapsedTwinSeconds + deltaTwinSec;
 
-      const stepResult = stepSimulationState(
+      const stepResult = stepTwinState(
         {
           clusters: state.clusters,
           pickupStates: state.pickupStates,
@@ -886,7 +1103,7 @@ export function App() {
           totalWaitingAtPickups: 0,
         },
         nextElapsed,
-        deltaSimSec,
+        deltaTwinSec,
         state.sourceAreas,
         state.targetAreas
       );
@@ -896,7 +1113,7 @@ export function App() {
       setVehicles(stepResult.vehicles);
       setHeatmapPoints(stepResult.heatmapPoints);
       setTelemetryStats(stepResult.telemetryStats);
-      setElapsedSimSeconds(nextElapsed);
+      setElapsedTwinSeconds(nextElapsed);
 
       setTotalEvacuated(stepResult.totalEvacuated);
       setTotalInTransit(stepResult.totalInTransit);
@@ -912,7 +1129,7 @@ export function App() {
 
       if (stepResult.newLogs.length > 0) {
         stepResult.newLogs.forEach((msg) => {
-          appendLog('SIMULATION', msg, nextElapsed);
+          appendLog('TWIN', msg, nextElapsed);
         });
       }
 
@@ -922,44 +1139,44 @@ export function App() {
         stepResult.totalInTransit === 0 &&
         stepResult.totalEvacuated > 0
       ) {
-        setIsSimulating(false);
-        setIsSimulationInProgress(false);
-        setSourceAreas((prev) => prev.map((s) => ({ ...s, population: 0 })));
+        setIsTwinning(false);
+        setIsTwinInProgress(false);
+        setSourceAreas((prev) => prev.map((s) => (s.disabled ? s : { ...s, population: 0 })));
         appendLog(
-          'SIMULATION',
-          `Evacuation simulation complete! All ${stepResult.totalEvacuated.toLocaleString()} evacuees transported from pickup locations to target shelters. Source area heatmaps fully cooled.`,
+          'TWIN',
+          `Evacuation twin complete! All ${stepResult.totalEvacuated.toLocaleString()} evacuees transported from pickup locations to target shelters.`,
           nextElapsed
         );
       }
     }, intervalMs);
 
     return () => clearInterval(timer);
-  }, [isSimulating, appendLog]);
+  }, [isTwinning, appendLog]);
 
   // Entity CRUD Handlers (All strictly enforce pause state)
   const handleAddSourceArea = (src: Omit<SourceArea, 'id'>) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before adding a Source Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before adding a Source Area.');
       return;
     }
-    const newSrc: SourceArea = { ...src, id: `src-${Date.now()}` };
+    const newSrc: SourceArea = { ...src, id: `src-${Date.now()}`, disabled: false };
     baselinePopulationsRef.current[newSrc.id] = newSrc.population;
     setSourceAreas((prev) => [...prev, newSrc]);
     setHasPendingTopologyChanges(true);
     setTotalRemainingAtSource((prev) => prev + newSrc.population);
     appendLog(
       'INFO',
-      `Added Source Area "${newSrc.name}" (${newSrc.population.toLocaleString()} evacuees). Routes will recompute automatically when simulation restarts.`,
-      elapsedSimSeconds
+      `Added Source Area "${newSrc.name}" (${newSrc.population.toLocaleString()} evacuees). Routes will recompute automatically when twin restarts.`,
+      elapsedTwinSeconds
     );
   };
 
   const handleUpdateSourceArea = (updatedSrc: SourceArea) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before modifying a Source Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before modifying a Source Area.');
       return;
     }
-    if (!isSimulationInProgress && elapsedSimSeconds === 0) {
+    if (!isTwinInProgress && elapsedTwinSeconds === 0) {
       baselinePopulationsRef.current[updatedSrc.id] = updatedSrc.population;
     } else {
       baselinePopulationsRef.current[updatedSrc.id] = Math.max(
@@ -970,22 +1187,53 @@ export function App() {
     setSourceAreas((prev) => prev.map((s) => (s.id === updatedSrc.id ? updatedSrc : s)));
     setHasPendingTopologyChanges(true);
 
-    // Recalculate total remaining across sources
+    // Recalculate total remaining across active sources
     const newTotalRem = sourceAreas
       .map((s) => (s.id === updatedSrc.id ? updatedSrc : s))
+      .filter((s) => !s.disabled)
       .reduce((acc, s) => acc + s.population, 0);
     setTotalRemainingAtSource(newTotalRem);
 
     appendLog(
       'INFO',
       `Modified Source Area "${updatedSrc.name}" (Remaining people set to ${updatedSrc.population.toLocaleString()}). Routes will recompute on restart.`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
+    );
+  };
+
+  const handleToggleDisableSourceArea = (id: string) => {
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before disabling/enabling a Source Area.');
+      return;
+    }
+    const src = sourceAreas.find((s) => s.id === id);
+    if (!src) return;
+
+    const nextDisabled = !src.disabled;
+    const nextSources = sourceAreas.map((s) =>
+      s.id === id ? { ...s, disabled: nextDisabled } : s
+    );
+    setSourceAreas(nextSources);
+    setHasPendingTopologyChanges(true);
+
+    // Update total remaining across active sources while paused
+    const nextTotalRemaining = nextSources
+      .filter((s) => !s.disabled)
+      .reduce((acc, s) => acc + s.population, 0);
+    setTotalRemainingAtSource(nextTotalRemaining);
+
+    appendLog(
+      nextDisabled ? 'WARN' : 'INFO',
+      nextDisabled
+        ? `Disabled Source Area "${src.name}" — excluded from evacuation routing and twin simulation.`
+        : `Re-enabled Source Area "${src.name}" for evacuation routing and twin simulation.`,
+      elapsedTwinSeconds
     );
   };
 
   const handleDeleteSourceArea = (id: string) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before removing a Source Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before removing a Source Area.');
       return;
     }
     delete baselinePopulationsRef.current[id];
@@ -1020,7 +1268,9 @@ export function App() {
       )
     );
 
-    const nextTotalRemaining = nextSources.reduce((acc, s) => acc + s.population, 0);
+    const nextTotalRemaining = nextSources
+      .filter((s) => !s.disabled)
+      .reduce((acc, s) => acc + s.population, 0);
     const nextWaitingInQueues = nextPickups.reduce((acc, p) => acc + p.waitingPopulation, 0);
     const nextBoarding = nextVehicles
       .filter((v) => v.status === 'waiting_for_80_pct')
@@ -1033,21 +1283,21 @@ export function App() {
     setTotalWaitingAtPickups(nextWaitingInQueues + nextBoarding);
     setTotalInTransit(nextInTransit);
 
-    if (elapsedSimSeconds === 0) {
+    if (elapsedTwinSeconds === 0) {
       setTelemetryStats(createInitialTelemetryStats(nextSources, nextClusters));
     }
 
     setHasPendingTopologyChanges(true);
     appendLog(
       'WARN',
-      `Removed Source Area "${target?.name || id}" from simulation configuration and map.`,
-      elapsedSimSeconds
+      `Removed Source Area "${target?.name || id}" from twin configuration and map.`,
+      elapsedTwinSeconds
     );
   };
 
   const handleAddTargetArea = (tgt: Omit<TargetArea, 'id' | 'currentOccupancy'>) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before adding a Target Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before adding a Target Area.');
       return;
     }
     const newTgt: TargetArea = {
@@ -1061,13 +1311,13 @@ export function App() {
     appendLog(
       'INFO',
       `Added Target Shelter "${newTgt.name}" (Capacity: ${newTgt.capacity.toLocaleString()}). Routes will recompute on restart.`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
   };
 
   const handleUpdateTargetArea = (updatedTgt: TargetArea) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before modifying a Target Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before modifying a Target Area.');
       return;
     }
     setTargetAreas((prev) => prev.map((t) => (t.id === updatedTgt.id ? updatedTgt : t)));
@@ -1075,13 +1325,13 @@ export function App() {
     appendLog(
       'INFO',
       `Modified Target Shelter "${updatedTgt.name}". Routes will recompute on restart.`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
   };
 
   const handleToggleDisableTargetArea = (id: string) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before disabling/enabling a Target Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before disabling/enabling a Target Area.');
       return;
     }
     const target = targetAreas.find((t) => t.id === id);
@@ -1098,13 +1348,13 @@ export function App() {
       nextDisabled
         ? `Disabled Target Shelter "${target.name}" — it will receive no more people. Routes will redirect to active shelters on restart.`
         : `Re-enabled Target Shelter "${target.name}" to receive evacuees.`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
   };
 
   const handleDeleteTargetArea = (id: string) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before removing a Target Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before removing a Target Area.');
       return;
     }
     const target = targetAreas.find((t) => t.id === id);
@@ -1154,39 +1404,62 @@ export function App() {
     setHasPendingTopologyChanges(true);
     appendLog(
       'WARN',
-      `Removed Target Area "${target?.name || id}" from simulation configuration and map.`,
-      elapsedSimSeconds
+      `Removed Target Area "${target?.name || id}" from twin configuration and map.`,
+      elapsedTwinSeconds
     );
   };
 
   const handleAddAvoidArea = (avoid: Omit<AvoidArea, 'id'>) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before adding an Avoid Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before adding an Avoid Area.');
       return;
     }
-    const newAvoid: AvoidArea = { ...avoid, id: `avoid-${Date.now()}` };
+    const newAvoid: AvoidArea = { ...avoid, id: `avoid-${Date.now()}`, disabled: false };
     setAvoidAreas((prev) => [...prev, newAvoid]);
     setHasPendingTopologyChanges(true);
     appendLog(
       'WARN',
       `Defined Avoid Area "${newAvoid.name}". Routes will detour around it on restart.`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
   };
 
   const handleUpdateAvoidArea = (updatedAvoid: AvoidArea) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before modifying an Avoid Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before modifying an Avoid Area.');
       return;
     }
     setAvoidAreas((prev) => prev.map((a) => (a.id === updatedAvoid.id ? updatedAvoid : a)));
     setHasPendingTopologyChanges(true);
-    appendLog('INFO', `Modified Avoid Area "${updatedAvoid.name}".`, elapsedSimSeconds);
+    appendLog('INFO', `Modified Avoid Area "${updatedAvoid.name}".`, elapsedTwinSeconds);
+  };
+
+  const handleToggleDisableAvoidArea = (id: string) => {
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before disabling/enabling an Avoid Area.');
+      return;
+    }
+    const avoid = avoidAreas.find((a) => a.id === id);
+    if (!avoid) return;
+
+    const nextDisabled = !avoid.disabled;
+    setAvoidAreas((prev) =>
+      prev.map((a) => (a.id === id ? { ...a, disabled: nextDisabled } : a))
+    );
+    setHasPendingTopologyChanges(true);
+
+    appendLog(
+      nextDisabled ? 'WARN' : 'INFO',
+      nextDisabled
+        ? `Disabled Avoid Area "${avoid.name}" — routes may now pass through this zone on recomputation.`
+        : `Re-enabled Avoid Area "${avoid.name}" — strict routing exclusion active.`,
+      elapsedTwinSeconds
+    );
   };
 
   const handleDeleteAvoidArea = (id: string) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before removing an Avoid Area.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before removing an Avoid Area.');
       return;
     }
     const target = avoidAreas.find((a) => a.id === id);
@@ -1197,14 +1470,14 @@ export function App() {
     setHasPendingTopologyChanges(true);
     appendLog(
       'INFO',
-      `Removed Avoid Area "${target?.name || id}" from simulation configuration and map.`,
-      elapsedSimSeconds
+      `Removed Avoid Area "${target?.name || id}" from twin configuration and map.`,
+      elapsedTwinSeconds
     );
   };
 
   const handleAddVehicleFleet = (fleet: Omit<VehicleFleet, 'id'>) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before adding a Vehicle Fleet.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before adding a Vehicle Fleet.');
       return;
     }
     const newFleet: VehicleFleet = { ...fleet, id: `veh-${Date.now()}` };
@@ -1212,14 +1485,14 @@ export function App() {
     setHasPendingTopologyChanges(true);
     appendLog(
       'INFO',
-      `Added Vehicle Fleet "${newFleet.name}" (${newFleet.count}x ${newFleet.type}, ${newFleet.capacityPerUnit} seats/unit, ${newFleet.transitSpeedKmh ?? 25} km/h transit speed, ${newFleet.loadUnloadTimePerPersonSeconds}s/person load/unload). Will be deployed on simulation restart.`,
-      elapsedSimSeconds
+      `Added Vehicle Fleet "${newFleet.name}" (${newFleet.count}x ${newFleet.type}, ${newFleet.capacityPerUnit} seats/unit, ${newFleet.transitSpeedKmh ?? 25} km/h transit speed, ${newFleet.loadUnloadTimePerPersonSeconds}s/person load/unload). Will be deployed on twin restart.`,
+      elapsedTwinSeconds
     );
   };
 
   const handleUpdateVehicleFleet = (updatedFleet: VehicleFleet) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before modifying a Vehicle Fleet.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before modifying a Vehicle Fleet.');
       return;
     }
     const prevFleet = vehicleFleets.find((v) => v.id === updatedFleet.id);
@@ -1258,25 +1531,25 @@ export function App() {
     appendLog(
       'INFO',
       `Modified Vehicle Fleet "${updatedFleet.name}" (${updatedFleet.count}x ${updatedFleet.type}, ${updatedFleet.capacityPerUnit} seats/unit, ${speedKmh} km/h transit speed, ${updatedFleet.loadUnloadTimePerPersonSeconds}s/person load/unload).`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
   };
 
   const handleDeleteVehicleFleet = (id: string) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before removing a Vehicle Fleet.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before removing a Vehicle Fleet.');
       return;
     }
     const target = vehicleFleets.find((v) => v.id === id);
     setVehicleFleets((prev) => prev.filter((v) => v.id !== id));
     setHasPendingTopologyChanges(true);
-    appendLog('WARN', `Removed Vehicle Fleet "${target?.name || id}".`, elapsedSimSeconds);
+    appendLog('WARN', `Removed Vehicle Fleet "${target?.name || id}".`, elapsedTwinSeconds);
   };
 
   // Drawing Handlers
   const handleStartDrawing = (type: 'source' | 'target' | 'avoid' | 'vehicle') => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before drawing or placing entities.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before drawing or placing entities.');
       return;
     }
     setPendingDrawnPolygon(null);
@@ -1431,7 +1704,7 @@ export function App() {
     appendLog(
       'INFO',
       `Space Data: Selected aggregation period "${sentinel2Layer.aggregationPeriod}" (current date: ${sentinel2Layer.currentDate}) -> Derived Sentinel-2 dates: ${startDate} to ${endDate}. Calling Google Earth Engine...`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
 
     try {
@@ -1463,20 +1736,20 @@ export function App() {
         appendLog(
           'INFO',
           `Google Earth Engine: Rendered Sentinel-2 Optical RGB median composite for dates ${usedRange[0]} to ${usedRange[1]} (derived from "${sentinel2Layer.aggregationPeriod}", ${data.imageCount} scenes, RGB bands B4/B3/B2).`,
-          elapsedSimSeconds
+          elapsedTwinSeconds
         );
       } else {
         appendLog(
           'WARN',
           `Google Earth Engine Sentinel-2 query failed for dates ${startDate} to ${endDate}: ${data.error || 'Unknown server error'}`,
-          elapsedSimSeconds
+          elapsedTwinSeconds
         );
       }
     } catch (err) {
       appendLog(
         'WARN',
         `Failed to reach server-side Google Earth Engine endpoint: ${String(err)}`,
-        elapsedSimSeconds
+        elapsedTwinSeconds
       );
     } finally {
       setIsLoadingSentinel2(false);
@@ -1494,7 +1767,7 @@ export function App() {
     appendLog(
       'INFO',
       `Space Data: Selected aggregation period "${sentinel2Layer.aggregationPeriod}" (current date: ${sentinel2Layer.currentDate}) -> Derived Sentinel-1 SAR dates: ${startDate} to ${endDate}. Calling Google Earth Engine (COPERNICUS/S1_GRD)...`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
 
     try {
@@ -1526,20 +1799,20 @@ export function App() {
         appendLog(
           'INFO',
           `Google Earth Engine: Rendered Sentinel-1 SAR false-color composite (COPERNICUS/S1_GRD, bands VV, VH, VV/VH) for dates ${usedRange[0]} to ${usedRange[1]} (derived from "${sentinel2Layer.aggregationPeriod}", ${data.imageCount} scenes).`,
-          elapsedSimSeconds
+          elapsedTwinSeconds
         );
       } else {
         appendLog(
           'WARN',
           `Google Earth Engine Sentinel-1 SAR query failed for dates ${startDate} to ${endDate}: ${data.error || 'Unknown server error'}`,
-          elapsedSimSeconds
+          elapsedTwinSeconds
         );
       }
     } catch (err) {
       appendLog(
         'WARN',
         `Failed to reach server-side Google Earth Engine endpoint: ${String(err)}`,
-        elapsedSimSeconds
+        elapsedTwinSeconds
       );
     } finally {
       setIsLoadingSentinel1(false);
@@ -1584,7 +1857,7 @@ export function App() {
     appendLog(
       'INFO',
       `CEMS Early Warning River Discharge Prediction: Requesting 24h, 48h, and 72h forecasts for date ${targetDate} (100 km radius around [${poi[0].toFixed(4)}, ${poi[1].toFixed(4)}]) via scripts/download_glofas.py...`,
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
 
     try {
@@ -1624,7 +1897,7 @@ export function App() {
           appendLog(
             'INFO',
             `CEMS GloFAS Cleanup: Deleted ${data.deletedFiles.length} file(s) from previous days in tmp_downloads.`,
-            elapsedSimSeconds
+            elapsedTwinSeconds
           );
         }
 
@@ -1635,20 +1908,20 @@ export function App() {
               ? `Reused existing GeoTIFF for today (${data.geotiffPath}) to spare download time.`
               : `Downloaded GRIB2 & converted to 3-band GeoTIFF (${data.geotiffPath}).`
           } Added 3 map overlays (24h, 48h, 72h forecasts: pixels < 10 m³/s fully transparent, pixels > 10 m³/s clipped at 80 with White -> Red color map and controlled by transparency sliders).`,
-          elapsedSimSeconds
+          elapsedTwinSeconds
         );
       } else {
         appendLog(
           'WARN',
           `CEMS GloFAS forecast download failed: ${data.error || 'Unknown error'}`,
-          elapsedSimSeconds
+          elapsedTwinSeconds
         );
       }
     } catch (err) {
       appendLog(
         'WARN',
         `Failed to execute CEMS GloFAS forecast endpoint: ${String(err)}`,
-        elapsedSimSeconds
+        elapsedTwinSeconds
       );
     } finally {
       setIsLoadingGlofas(false);
@@ -1696,19 +1969,19 @@ export function App() {
         next
           ? `Brussels Metro Network overlay enabled on map (${brusselsMetroNetwork.lines.filter((l) => l.variant === 1).length} lines, ${brusselsMetroNetwork.stations.length} stations).`
           : 'Brussels Metro Network overlay hidden on map.',
-        elapsedSimSeconds
+        elapsedTwinSeconds
       );
       return { ...prev, showNetworkOverlay: next };
     });
   };
 
   const handleToggleUseBrusselsMetroForEvacuation = (checked: boolean) => {
-    if (isSimulating) {
-      appendLog('WARN', 'Pause simulation before toggling Brussels Metro evacuation.');
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before toggling Brussels Metro evacuation.');
       return;
     }
     setBrusselsMetroConfig((prev) => ({ ...prev, useForEvacuation: checked }));
-    if (elapsedSimSeconds > 0) {
+    if (elapsedTwinSeconds > 0) {
       setHasPendingTopologyChanges(true);
     }
     appendLog(
@@ -1716,24 +1989,24 @@ export function App() {
       checked
         ? `Brussels Metro Evacuation enabled: ${brusselsMetroConfig.trainCount} train(s) × ${brusselsMetroConfig.trainCapacity} pax across ${metroCorridors.length} underground corridor(s) (${metroCorridors.map((c) => `${c.sourceStation.name_fr} → ${c.targetStation.name_fr}`).join(', ')}).`
         : 'Brussels Metro Evacuation disabled.',
-      elapsedSimSeconds
+      elapsedTwinSeconds
     );
   };
 
   const handleChangeBrusselsMetroTrainCount = (count: number) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     const validCount = Math.max(1, Math.round(count));
     setBrusselsMetroConfig((prev) => ({ ...prev, trainCount: validCount }));
-    if (elapsedSimSeconds > 0) {
+    if (elapsedTwinSeconds > 0) {
       setHasPendingTopologyChanges(true);
     }
   };
 
   const handleChangeBrusselsMetroTrainCapacity = (capacity: number) => {
-    if (isSimulating) return;
+    if (isTwinning) return;
     const validCap = Math.max(1, Math.round(capacity));
     setBrusselsMetroConfig((prev) => ({ ...prev, trainCapacity: validCap }));
-    if (elapsedSimSeconds > 0) {
+    if (elapsedTwinSeconds > 0) {
       setHasPendingTopologyChanges(true);
     }
   };
@@ -1756,6 +2029,7 @@ export function App() {
         remainingBySource={remainingBySource}
         onAddSourceArea={handleAddSourceArea}
         onUpdateSourceArea={handleUpdateSourceArea}
+        onToggleDisableSourceArea={handleToggleDisableSourceArea}
         onDeleteSourceArea={handleDeleteSourceArea}
         onAddTargetArea={handleAddTargetArea}
         onUpdateTargetArea={handleUpdateTargetArea}
@@ -1763,25 +2037,29 @@ export function App() {
         onDeleteTargetArea={handleDeleteTargetArea}
         onAddAvoidArea={handleAddAvoidArea}
         onUpdateAvoidArea={handleUpdateAvoidArea}
+        onToggleDisableAvoidArea={handleToggleDisableAvoidArea}
         onDeleteAvoidArea={handleDeleteAvoidArea}
         onAddVehicleFleet={handleAddVehicleFleet}
         onUpdateVehicleFleet={handleUpdateVehicleFleet}
         onDeleteVehicleFleet={handleDeleteVehicleFleet}
+        routingAlgorithm={routingAlgorithm}
+        onChangeRoutingAlgorithm={setRoutingAlgorithm}
         onComputeRoutes={handleComputeRoutes}
+        onStopComputingRoutes={handleStopComputingRoutes}
         isComputingRoutes={isComputingRoutes}
         hasComputedRoutes={computedRoutes.length > 0}
-        onRunSimulation={handleRunSimulation}
-        onStopSimulation={handleStopSimulation}
-        onResetSimulation={handleResetSimulation}
-        onOpenSimulationReport={() => {
-          if (!isSimulating) {
-            setIsSimulationReportOpen(true);
+        onRunTwin={handleRunTwin}
+        onStopTwin={handleStopTwin}
+        onResetTwin={handleResetTwin}
+        onOpenTwinReport={() => {
+          if (!isTwinning) {
+            setIsTwinReportOpen(true);
           }
         }}
-        isSimulating={isSimulating}
-        isSimulationInProgress={isSimulationInProgress}
-        simSpeed={simSpeed}
-        onChangeSimSpeed={setSimSpeed}
+        isTwinning={isTwinning}
+        isTwinInProgress={isTwinInProgress}
+        twinSpeed={twinSpeed}
+        onChangeTwinSpeed={setTwinSpeed}
         activeDrawMode={activeDrawMode}
         onStartDrawing={handleStartDrawing}
         pendingDrawnPolygon={pendingDrawnPolygon}
@@ -1833,7 +2111,9 @@ export function App() {
             vehicles={vehicles}
             clusters={clusters}
             heatmapPoints={heatmapPoints}
-            isSimulating={isSimulating}
+            isTwinning={isTwinning}
+            isComputingRoutes={isComputingRoutes}
+            onStopComputingRoutes={handleStopComputingRoutes}
             activeDrawMode={activeDrawMode}
             onUpdateDrawMode={setActiveDrawMode}
             onFinishDrawingPolygon={handleFinishDrawingPolygon}
@@ -1870,25 +2150,25 @@ export function App() {
         vehicleFleets={vehicleFleets}
         computedRoutes={computedRoutes}
         pickupStates={pickupStates}
-        elapsedSimSeconds={elapsedSimSeconds}
+        elapsedTwinSeconds={elapsedTwinSeconds}
         totalEvacuated={totalEvacuated}
         totalInTransit={totalInTransit}
         totalRemainingAtSource={totalRemainingAtSource}
         totalWaitingAtPickups={totalWaitingAtPickups}
-        isSimulating={isSimulating}
+        isTwinning={isTwinning}
       />
 
-      {/* Centered Simulation Report Modal (enabled only when simulation is paused) */}
-      <SimulationReportModal
-        isOpen={isSimulationReportOpen && !isSimulating}
-        onClose={() => setIsSimulationReportOpen(false)}
+      {/* Centered Twin Report Modal (enabled only when twin is paused) */}
+      <TwinReportModal
+        isOpen={isTwinReportOpen && !isTwinning}
+        onClose={() => setIsTwinReportOpen(false)}
         scenarioName={
           selectedPreset === 'custom'
             ? 'Custom Scenario'
             : presetScenarios[selectedPreset]?.name ?? selectedPreset
         }
-        elapsedSimSeconds={elapsedSimSeconds}
-        simSpeed={simSpeed}
+        elapsedTwinSeconds={elapsedTwinSeconds}
+        twinSpeed={twinSpeed}
         sourceAreas={sourceAreas}
         targetAreas={targetAreas}
         avoidAreas={avoidAreas}

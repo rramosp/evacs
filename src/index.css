@@ -322,14 +322,14 @@ body,
   cursor: not-allowed;
 }
 
-.sim-buttons-grid {
+.twin-buttons-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 6px;
   margin-top: 8px;
 }
 
-.btn-sim-action {
+.btn-twin-action {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -345,37 +345,37 @@ body,
   transition: all 0.15s ease;
 }
 
-.btn-sim-action.run-btn {
+.btn-twin-action.run-btn {
   background-color: hsl(160, 84%, 28%);
   border-color: hsl(160, 84%, 38%);
   color: #ecfdf5;
 }
 
-.btn-sim-action.run-btn:hover:not(:disabled) {
+.btn-twin-action.run-btn:hover:not(:disabled) {
   background-color: hsl(160, 84%, 33%);
 }
 
-.btn-sim-action.run-btn.active-running {
+.btn-twin-action.run-btn.active-running {
   background-color: hsl(160, 84%, 36%);
   box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.25);
 }
 
-.btn-sim-action.stop-btn:hover:not(:disabled) {
+.btn-twin-action.stop-btn:hover:not(:disabled) {
   background-color: hsl(0, 70%, 35%);
   border-color: hsl(0, 70%, 48%);
 }
 
-.btn-sim-action.reset-btn:hover:not(:disabled) {
+.btn-twin-action.reset-btn:hover:not(:disabled) {
   background-color: var(--bg-card-hover);
   border-color: var(--text-muted);
 }
 
-.btn-sim-action:disabled {
+.btn-twin-action:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-.sim-speed-bar {
+.twin-speed-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1072,8 +1072,8 @@ body,
   color: #c084fc;
 }
 
-/* Moving Simulation Vehicles */
-.sim-vehicle-marker {
+/* Moving Twin Vehicles */
+.twin-vehicle-marker {
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -1084,11 +1084,11 @@ body,
   box-shadow: 0 0 10px rgba(16, 185, 129, 0.6);
 }
 
-.sim-veh-icon {
+.twin-veh-icon {
   font-size: 12px;
 }
 
-.sim-veh-badge {
+.twin-veh-badge {
   font-family: var(--font-mono);
   font-size: 9.5px;
   font-weight: 700;
@@ -1103,7 +1103,7 @@ body,
 }
 
 /* ==========================================================================
-   BOTTOM PANEL: SYSTEM & SIMULATION CONSOLE (50% Width x 25% Height)
+   BOTTOM PANEL: SYSTEM & TWIN CONSOLE (50% Width x 25% Height)
    ========================================================================== */
 .bottom-panel-header {
   display: flex;
@@ -1220,7 +1220,7 @@ body,
   flex-shrink: 0;
 }
 
-.log-sim-time {
+.log-twin-time {
   color: #38bdf8;
   font-size: 10.5px;
   font-weight: 600;
@@ -1245,7 +1245,7 @@ body,
   color: #c084fc;
 }
 
-.badge-simulation {
+.badge-twin {
   background-color: rgba(16, 185, 129, 0.18);
   color: #34d399;
 }
@@ -1330,7 +1330,7 @@ body,
   gap: 14px;
 }
 
-.sim-status-banner {
+.twin-status-banner {
   background-color: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
@@ -1340,7 +1340,7 @@ body,
   justify-content: space-between;
 }
 
-.sim-status-banner.running {
+.twin-status-banner.running {
   border-color: var(--accent-target);
   background: linear-gradient(90deg, rgba(16, 185, 129, 0.12) 0%, var(--bg-card) 100%);
 }
@@ -1369,7 +1369,7 @@ body,
   color: var(--text-primary);
 }
 
-.sim-badge {
+.twin-badge {
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
@@ -1379,7 +1379,7 @@ body,
   color: var(--text-muted);
 }
 
-.sim-badge.active {
+.twin-badge.active {
   background-color: var(--accent-target);
   color: #041f16;
 }
@@ -1689,25 +1689,25 @@ body,
 }
 
 /* Vehicle Marker State Variations */
-.sim-vehicle-marker.boarding-wait {
+.twin-vehicle-marker.boarding-wait {
   background-color: #7c2d12;
   border-color: #fb923c;
   box-shadow: 0 0 12px rgba(251, 146, 60, 0.75);
 }
 
-.sim-vehicle-marker.evac-enroute {
+.twin-vehicle-marker.evac-enroute {
   background-color: #065f46;
   border-color: #34d399;
   box-shadow: 0 0 12px rgba(16, 185, 129, 0.75);
 }
 
-.sim-vehicle-marker.unloading-shelter {
+.twin-vehicle-marker.unloading-shelter {
   background-color: #0f766e;
   border-color: #2dd4bf;
   box-shadow: 0 0 14px rgba(45, 212, 191, 0.85);
 }
 
-.sim-vehicle-marker.approach-empty {
+.twin-vehicle-marker.approach-empty {
   background-color: #1e1b4b;
   border-color: #818cf8;
   opacity: 0.88;

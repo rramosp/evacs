@@ -9,7 +9,7 @@ import {
   PickupLocationState,
   SourceInternalCluster,
   ActiveVehicleUnit,
-  SimulationTelemetryStats,
+  TwinTelemetryStats,
   PopulationBehaviorType,
   BehaviorCounts,
 } from '../types/evacuation';
@@ -17,7 +17,7 @@ import {
   formatMMSS,
   createZeroBehaviorCounts,
   computeBehaviorCountsFromSources,
-} from '../services/simulationEngine';
+} from '../services/twinEngine';
 import {
   FileBarChart2,
   X,
@@ -33,12 +33,12 @@ import {
   TrendingUp,
 } from 'lucide-react';
 
-interface SimulationReportModalProps {
+interface TwinReportModalProps {
   isOpen: boolean;
   onClose: () => void;
   scenarioName: string;
-  elapsedSimSeconds: number;
-  simSpeed: number;
+  elapsedTwinSeconds: number;
+  twinSpeed: number;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
   avoidAreas: AvoidArea[];
@@ -47,7 +47,7 @@ interface SimulationReportModalProps {
   clusters: SourceInternalCluster[];
   pickupStates: PickupLocationState[];
   vehicles: ActiveVehicleUnit[];
-  telemetryStats: SimulationTelemetryStats;
+  telemetryStats: TwinTelemetryStats;
   totalEvacuated: number;
   totalInTransit: number;
   totalRemainingAtSource: number;
@@ -78,12 +78,12 @@ const BEHAVIOR_LABELS: Record<
   },
 };
 
-export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
+export const TwinReportModal: React.FC<TwinReportModalProps> = ({
   isOpen,
   onClose,
   scenarioName,
-  elapsedSimSeconds,
-  simSpeed,
+  elapsedTwinSeconds,
+  twinSpeed,
   sourceAreas,
   targetAreas,
   avoidAreas,
@@ -145,7 +145,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
   });
 
   // If clusters haven't been initialized yet, derive directly from sourceAreas
-  const hasActiveSimulationEntities =
+  const hasActiveTwinEntities =
     clusters.length > 0 || totalEvacuated > 0 || totalInTransit > 0;
   const fallbackSourceByBehavior = computeBehaviorCountsFromSources(sourceAreas);
 
@@ -156,7 +156,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
     disoriented: waitingInQueueByBehavior.disoriented + boardingInVehiclesByBehavior.disoriented,
   };
 
-  const notEvacuatedByBehavior: BehaviorCounts = hasActiveSimulationEntities
+  const notEvacuatedByBehavior: BehaviorCounts = hasActiveTwinEntities
     ? {
         compliant:
           movingInZoneByBehavior.compliant +
@@ -336,7 +336,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
     globalWaitDenom > 0 ? globalWaitNumer / globalWaitDenom : null;
 
   // 4. Additional Valuable Operational Metrics
-  const elapsedMinutes = elapsedSimSeconds / 60;
+  const elapsedMinutes = elapsedTwinSeconds / 60;
   const evacuationRatePerMin =
     elapsedMinutes > 0 ? totalEvacuated / elapsedMinutes : 0;
   const totalBoardedAllPickups = pickupStates.reduce(
@@ -365,9 +365,9 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
     const payload = {
       generatedAt: new Date().toISOString(),
       scenarioName,
-      elapsedSimulationSeconds: Math.round(elapsedSimSeconds),
-      elapsedSimulationFormatted: formatMMSS(elapsedSimSeconds),
-      playbackSpeedMultiplier: simSpeed,
+      elapsedTwinSeconds: Math.round(elapsedTwinSeconds),
+      elapsedTwinFormatted: formatMMSS(elapsedTwinSeconds),
+      playbackSpeedMultiplier: twinSpeed,
       summary: {
         totalInitialPopulation,
         peopleEvacuatedToShelter: totalEvacuated,
@@ -392,7 +392,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
         evacuatedToShelter: evacuatedByBehavior[b],
         stillNotEvacuated: notEvacuatedByBehavior[b],
         stillNotEvacuatedDetail: {
-          movingInSourceZone: hasActiveSimulationEntities
+          movingInSourceZone: hasActiveTwinEntities
             ? movingInZoneByBehavior[b]
             : fallbackSourceByBehavior[b],
           waitingAtPickupLocation: waitingAtPickupsByBehavior[b],
@@ -454,14 +454,14 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `evac-sim-report-${Math.round(elapsedSimSeconds)}s.json`;
+    a.download = `evac-twin-report-${Math.round(elapsedTwinSeconds)}s.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   return createPortal(
     <div
-      id="simulation-report-modal-backdrop"
+      id="twin-report-modal-backdrop"
       onClick={onClose}
       style={{
         position: 'fixed',
@@ -476,10 +476,10 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
       }}
     >
       <div
-        id="simulation-report-modal"
+        id="twin-report-modal"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="simulation-report-modal-title"
+        aria-labelledby="twin-report-modal-title"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 'min(1060px, 95vw)',
@@ -528,7 +528,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <h2
-                  id="simulation-report-modal-title"
+                  id="twin-report-modal-title"
                   style={{
                     margin: 0,
                     fontSize: '1.05rem',
@@ -537,7 +537,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                     color: '#f8fafc',
                   }}
                 >
-                  SIMULATION REPORT — TACTICAL EVACUATION ANALYTICS
+                  TWIN REPORT — TACTICAL EVACUATION ANALYTICS
                 </h2>
                 <span
                   style={{
@@ -561,8 +561,8 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                 >
                   {totalNotEvacuated === 0 && totalEvacuated > 0
                     ? 'COMPLETED (100%)'
-                    : elapsedSimSeconds > 0
-                    ? `PAUSED AT T+${formatMMSS(elapsedSimSeconds)}`
+                    : elapsedTwinSeconds > 0
+                    ? `PAUSED AT T+${formatMMSS(elapsedTwinSeconds)}`
                     : 'INITIAL SNAPSHOT (T+00:00)'}
                 </span>
               </div>
@@ -574,18 +574,18 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                 }}
               >
                 Scenario: <strong style={{ color: '#e2e8f0' }}>{scenarioName}</strong> &bull;
-                Simulation Clock:{' '}
+                Twin Clock:{' '}
                 <strong style={{ color: '#38bdf8', fontFamily: 'monospace' }}>
-                  {formatMMSS(elapsedSimSeconds)} ({Math.round(elapsedSimSeconds)}s)
+                  {formatMMSS(elapsedTwinSeconds)} ({Math.round(elapsedTwinSeconds)}s)
                 </strong>{' '}
-                &bull; Speed: <strong>{simSpeed}x</strong>
+                &bull; Speed: <strong>{twinSpeed}x</strong>
               </p>
             </div>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <button
-              id="btn-export-simulation-report-json"
+              id="btn-export-twin-report-json"
               type="button"
               onClick={handleDownloadJsonReport}
               style={{
@@ -601,13 +601,13 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                 fontWeight: 600,
                 cursor: 'pointer',
               }}
-              title="Download full simulation report as JSON"
+              title="Download full twin report as JSON"
             >
               <Download size={14} />
               <span>Export JSON</span>
             </button>
             <button
-              id="btn-close-simulation-report"
+              id="btn-close-twin-report"
               type="button"
               onClick={onClose}
               style={{
@@ -922,7 +922,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                     const initPop = initialByBehavior[b];
                     const evacPop = evacuatedByBehavior[b];
                     const notEvacPop = notEvacuatedByBehavior[b];
-                    const movingPop = hasActiveSimulationEntities
+                    const movingPop = hasActiveTwinEntities
                       ? movingInZoneByBehavior[b]
                       : fallbackSourceByBehavior[b];
                     const waitingPop = waitingAtPickupsByBehavior[b];
@@ -1097,7 +1097,7 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                       }}
                     >
                       Zone:{' '}
-                      {(hasActiveSimulationEntities
+                      {(hasActiveTwinEntities
                         ? movingInZoneByBehavior.compliant +
                           movingInZoneByBehavior['self-directed'] +
                           movingInZoneByBehavior.disoriented
@@ -1658,7 +1658,8 @@ export const SimulationReportModal: React.FC<SimulationReportModalProps> = ({
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <ShieldAlert size={16} style={{ color: '#f87171', flexShrink: 0 }} />
                   <span>
-                    <strong>Avoid Area Avoidance:</strong> {avoidAreas.length} active Avoid Areas
+                    <strong>Avoid Area Avoidance:</strong>{' '}
+                    {avoidAreas.filter((a) => !a.disabled).length} active Avoid Areas
                     enforced; <strong>{detourRoutesCount}</strong> of {computedRoutes.length}{' '}
                     corridors dynamically detoured with zero polygon intersection.
                   </span>

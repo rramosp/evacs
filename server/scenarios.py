@@ -46,7 +46,7 @@ def extract_polygons_lat_lng(geom, line_buffer_deg=0.00025):
         coords = list(geom.exterior.coords)
         if len(coords) > 3 and coords[0] == coords[-1]:
             coords = coords[:-1]
-        ring = [[round(float(lat), 6), round(float(lon), 6)] for lon, lat in coords]
+        ring = [[float(lat), float(lon)] for lon, lat in coords]
         if len(ring) < 3:
             return []
         return [(ring, max(float(geom.area), 1e-12))]

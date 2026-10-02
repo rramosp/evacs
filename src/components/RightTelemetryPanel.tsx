@@ -30,12 +30,12 @@ interface RightTelemetryPanelProps {
   vehicleFleets: VehicleFleet[];
   computedRoutes: ComputedRoute[];
   pickupStates: PickupLocationState[];
-  elapsedSimSeconds: number;
+  elapsedTwinSeconds: number;
   totalEvacuated: number;
   totalInTransit: number;
   totalRemainingAtSource: number;
   totalWaitingAtPickups: number;
-  isSimulating: boolean;
+  isTwinning: boolean;
 }
 
 export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
@@ -46,21 +46,23 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
   vehicleFleets,
   computedRoutes,
   pickupStates,
-  elapsedSimSeconds,
+  elapsedTwinSeconds,
   totalEvacuated,
   totalInTransit,
   totalRemainingAtSource,
   totalWaitingAtPickups,
-  isSimulating,
+  isTwinning,
 }) => {
   const [minimalMode, setMinimalMode] = useState<boolean>(false);
+
+  const activeSourceAreas = sourceAreas.filter((s) => !s.disabled);
 
   const accountedTotalPopulation =
     totalEvacuated + totalInTransit + totalRemainingAtSource;
   const totalPopulation =
     accountedTotalPopulation > 0
       ? accountedTotalPopulation
-      : sourceAreas.reduce((acc, s) => acc + s.population, 0);
+      : activeSourceAreas.reduce((acc, s) => acc + s.population, 0);
 
   const isCompletelyEvacuated =
     totalPopulation > 0 &&
@@ -75,17 +77,26 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
       ? 100
       : Math.min(99, Math.floor((totalEvacuated / totalPopulation) * 100));
 
-  const formatSimTime = (sec: number) => {
-    const mins = Math.floor(sec / 60);
-    const remSec = Math.floor(sec % 60);
-    return `${String(mins).padStart(2, '0')}:${String(remSec).padStart(2, '0')}`;
+  const formatTwinTime = (sec: number) => {
+    const totalSec = Math.max(0, Math.floor(sec));
+    const days = Math.floor(totalSec / 86400);
+    const hours = Math.floor((totalSec % 86400) / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const remSec = totalSec % 60;
+    if (days > 0) {
+      return `${days}d ${hours}h ${mins}m ${remSec}s`;
+    }
+    if (hours > 0) {
+      return `${hours}h ${mins}m ${remSec}s`;
+    }
+    return `${mins}m ${remSec}s`;
   };
 
-  const totalCompliant = sourceAreas.reduce(
+  const totalCompliant = activeSourceAreas.reduce(
     (acc, s) => acc + Math.round((s.population * s.behavior.compliant) / 100),
     0
   );
-  const totalSelfDirected = sourceAreas.reduce(
+  const totalSelfDirected = activeSourceAreas.reduce(
     (acc, s) => acc + Math.round((s.population * s.behavior['self-directed']) / 100),
     0
   );
@@ -175,17 +186,17 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
         </div>
       ) : (
         <div className="telemetry-scroll-content">
-          {/* Simulation Clock & Status Banner */}
-          <div className={`sim-status-banner ${isSimulating ? 'running' : ''}`}>
+          {/* Twin Clock & Status Banner */}
+          <div className={`twin-status-banner ${isTwinning ? 'running' : ''}`}>
             <div className="clock-display">
               <Clock size={18} />
               <div className="clock-text">
                 <span className="clock-label">ELAPSED EVACUATION TIME</span>
-                <span className="clock-digits">{formatSimTime(elapsedSimSeconds)}</span>
+                <span className="clock-digits">{formatTwinTime(elapsedTwinSeconds)}</span>
               </div>
             </div>
-            <div className={`sim-badge ${isSimulating ? 'active' : ''}`}>
-              {isSimulating ? 'LIVE ANIMATION' : elapsedSimSeconds > 0 ? 'PAUSED' : 'STANDBY'}
+            <div className={`twin-badge ${isTwinning ? 'active' : ''}`}>
+              {isTwinning ? 'LIVE ANIMATION' : elapsedTwinSeconds > 0 ? 'PAUSED' : 'STANDBY'}
             </div>
           </div>
 
@@ -357,7 +368,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
                   <span className="behavior-dot disoriented" />
                   <div>
                     <div className="behavior-title">Disoriented Population</div>
-                    <div className="behavior-desc">Wander inside zone until within 50m</div>
+                    <div className="behavior-desc">Wander randomly with pickup-seeking drift (135m capture)</div>
                   </div>
                 </div>
                 <span className="behavior-count">{totalDisoriented.toLocaleString()}</span>

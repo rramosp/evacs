@@ -8,7 +8,7 @@ import {
   BrusselsMetroCorridor,
 } from '../types/evacuation';
 import { getPolygonCentroid, toTurfPolygon } from './routingEngine';
-import { buildCumulativeDistances } from './simulationEngine';
+import { buildCumulativeDistances } from './twinEngine';
 
 /**
  * Geographic bounding box for the Brussels-Capital Region & STIB Metro network
@@ -79,6 +79,7 @@ export function findBrusselsMetroStationsInAreas(
             areaId: src.id,
             areaName: src.name,
             areaType: 'source',
+            disabled: Boolean(src.disabled),
           });
         }
       }
@@ -329,8 +330,9 @@ export function buildBrusselsMetroEvacuationCorridors(
     targetAreas
   );
 
+  const activeSourceStations = sourceStations.filter((s) => !s.disabled);
   const activeTargetStations = targetStations.filter((t) => !t.disabled);
-  if (sourceStations.length === 0 || activeTargetStations.length === 0) {
+  if (activeSourceStations.length === 0 || activeTargetStations.length === 0) {
     return [];
   }
 
@@ -338,9 +340,9 @@ export function buildBrusselsMetroEvacuationCorridors(
   const connectedPairs = new Set<string>();
   const connectedTargetKeys = new Set<string>();
 
-  // 1. For each station inside a Source Area (Pickup Point), connect it to the best station
+  // 1. For each station inside an active Source Area (Pickup Point), connect it to the best station
   //    inside an active Target Area (Drop-Off Point), preferring direct same-line Target Stations first
-  sourceStations.forEach((srcMatch) => {
+  activeSourceStations.forEach((srcMatch) => {
     const candidates = activeTargetStations.map((tgtMatch) => {
       const sharesLine = srcMatch.station.lines.some((l) =>
         tgtMatch.station.lines.includes(l)
@@ -389,12 +391,12 @@ export function buildBrusselsMetroEvacuationCorridors(
   });
 
   // 2. Ensure every Metro Station inside an active Target Area is also established as a Drop-Off Point
-  //    by connecting any not-yet-connected Target Station from its optimal Source Area Metro Station
+  //    by connecting any not-yet-connected Target Station from its optimal active Source Area Metro Station
   activeTargetStations.forEach((tgtMatch) => {
     const tgtKey = `${tgtMatch.areaId}:${tgtMatch.station.id}`;
     if (connectedTargetKeys.has(tgtKey)) return;
 
-    const candidates = sourceStations.map((srcMatch) => {
+    const candidates = activeSourceStations.map((srcMatch) => {
       const sharesLine = srcMatch.station.lines.some((l) =>
         tgtMatch.station.lines.includes(l)
       );
