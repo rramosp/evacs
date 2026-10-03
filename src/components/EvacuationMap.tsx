@@ -4,7 +4,7 @@ import 'leaflet/dist/leaflet.css';
 import {
   SourceArea,
   TargetArea,
-  AvoidArea,
+  RedArea,
   VehicleFleet,
   ComputedRoute,
   PickupLocationState,
@@ -18,6 +18,7 @@ import {
   BrusselsMetroLineFeature,
   BrusselsMetroStationFeature,
   BrusselsMetroCorridor,
+  DataOverlayLayer,
 } from '../types/evacuation';
 import { getPolygonCentroid } from '../services/routingEngine';
 import { formatMMSS } from '../services/twinEngine';
@@ -55,7 +56,7 @@ interface EvacuationMapProps {
   showLabels?: boolean;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
-  avoidAreas: AvoidArea[];
+  redAreas: RedArea[];
   vehicleFleets: VehicleFleet[];
   computedRoutes: ComputedRoute[];
   pickupStates: PickupLocationState[];
@@ -79,6 +80,8 @@ interface EvacuationMapProps {
   brusselsMetroLines?: BrusselsMetroLineFeature[];
   brusselsMetroStations?: BrusselsMetroStationFeature[];
   activeMetroCorridors?: BrusselsMetroCorridor[];
+  dataOverlays?: DataOverlayLayer[];
+  focusTarget?: { position: [number, number]; zoom: number; requestId: number } | null;
 }
 
 export const EvacuationMap: React.FC<EvacuationMapProps> = ({
@@ -87,7 +90,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   showLabels = true,
   sourceAreas,
   targetAreas,
-  avoidAreas,
+  redAreas,
   vehicleFleets,
   computedRoutes,
   pickupStates,
@@ -111,6 +114,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   brusselsMetroLines = [],
   brusselsMetroStations = [],
   activeMetroCorridors = [],
+  dataOverlays = [],
+  focusTarget = null,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -118,6 +123,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   const sentinel2TileLayerRef = useRef<L.TileLayer | null>(null);
   const sentinel1TileLayerRef = useRef<L.TileLayer | null>(null);
   const glofasLayerGroupRef = useRef<L.LayerGroup | null>(null);
+  const dataOverlaysLayerGroupRef = useRef<L.LayerGroup | null>(null);
 
   // Layer groups
   const polygonsLayerGroupRef = useRef<L.LayerGroup | null>(null);
@@ -131,6 +137,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   const [osmStyle, setOsmStyle] = useState<OsmLayerStyle>('standard');
   const [showRoutes, setShowRoutes] = useState<boolean>(true);
   const [showZones, setShowZones] = useState<boolean>(true);
+  const [showPopulation, setShowPopulation] = useState<boolean>(true);
 
   const cycleOsmStyle = () => {
     setOsmStyle((prev) =>
@@ -169,6 +176,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
     tileLayerRef.current = tileLayer;
     glofasLayerGroupRef.current = L.layerGroup().addTo(map);
+    dataOverlaysLayerGroupRef.current = L.layerGroup().addTo(map);
     polygonsLayerGroupRef.current = L.layerGroup().addTo(map);
     brusselsMetroLayerGroupRef.current = L.layerGroup().addTo(map);
     routesLayerGroupRef.current = L.layerGroup().addTo(map);
@@ -188,7 +196,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       if (
         currentMode.type === 'source' ||
         currentMode.type === 'target' ||
-        currentMode.type === 'avoid'
+        currentMode.type === 'red'
       ) {
         onUpdateDrawMode({
           ...currentMode,
@@ -360,6 +368,56 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     };
   }, [glofasForecast]);
 
+  // Synchronize independent tile ('Google Satellite'), GeoJSON, and GeoTIFF overlay layers
+  useEffect(() => {
+    const layerGroup = dataOverlaysLayerGroupRef.current;
+    if (!layerGroup) return;
+
+    layerGroup.clearLayers();
+    if (!dataOverlays || dataOverlays.length === 0) return;
+
+    for (const layer of dataOverlays) {
+      if (!layer.visible) continue;
+
+      if (layer.format === 'tile' && layer.tileUrl) {
+        L.tileLayer(layer.tileUrl, {
+          subdomains: layer.subdomains ?? ['mt0', 'mt1', 'mt2', 'mt3'],
+          maxZoom: 20,
+          zIndex: 4,
+          attribution: layer.attribution ?? `Overlay: ${layer.name}`,
+        }).addTo(layerGroup);
+      } else if (layer.format === 'geojson' && layer.geojson) {
+        const geoLayer = L.geoJSON(layer.geojson, {
+          style: () => ({
+            color: layer.color || '#38bdf8',
+            weight: 2,
+            fillColor: layer.color || '#38bdf8',
+            fillOpacity: 0.35,
+          }),
+          pointToLayer: (_feature, latlng) =>
+            L.circleMarker(latlng, {
+              radius: 6,
+              color: layer.color || '#38bdf8',
+              fillColor: layer.color || '#38bdf8',
+              fillOpacity: 0.7,
+              weight: 2,
+            }),
+        });
+        geoLayer.bindTooltip(`Overlay: ${layer.name}`, {
+          sticky: true,
+          direction: 'top',
+        });
+        geoLayer.addTo(layerGroup);
+      } else if (layer.format === 'geotiff' && layer.dataUrl && layer.bounds) {
+        L.imageOverlay(layer.dataUrl, layer.bounds, {
+          opacity: 0.82,
+          zIndex: 14,
+          attribution: `Overlay: ${layer.name}`,
+        }).addTo(layerGroup);
+      }
+    }
+  }, [dataOverlays]);
+
   // Fly to new center/zoom when preset changes
   const prevCenterRef = useRef<[number, number]>(center);
   useEffect(() => {
@@ -373,7 +431,17 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     }
   }, [center, zoom]);
 
-  // Render Source, Target, Avoid Area Polygons & Vehicle Staging Depots
+  // Zoom to a specific Pickup Location or Metro Station when clicked in the Right Telemetry Panel
+  useEffect(() => {
+    if (!focusTarget || !mapInstanceRef.current) return;
+    setShowRoutes(true);
+    const map = mapInstanceRef.current;
+    const targetZoom = Math.max(map.getZoom(), focusTarget.zoom);
+    map.flyTo(focusTarget.position, targetZoom, { duration: 0.85 });
+    prevCenterRef.current = focusTarget.position;
+  }, [focusTarget]);
+
+  // Render Source, Target, Red Area Polygons & Vehicle Staging Depots
   useEffect(() => {
     const group = polygonsLayerGroupRef.current;
     if (!group) return;
@@ -504,36 +572,39 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       }
     });
 
-    // 3. Avoid Areas (Crimson Red Hazard when Active, Slate Gray when Disabled)
-    avoidAreas.forEach((avoid) => {
-      const isSelected = selectedEntityId === avoid.id;
-      const isDisabled = Boolean(avoid.disabled);
-      const poly = L.polygon(avoid.polygon, {
-        color: isDisabled ? '#94a3b8' : isSelected ? '#f87171' : '#ef4444',
-        weight: isSelected ? 3 : 2,
-        fillColor: isDisabled ? '#64748b' : '#ef4444',
-        fillOpacity: isDisabled ? 0.16 : isSelected ? 0.45 : 0.32,
-        dashArray: isDisabled ? '5, 5' : '6, 6',
-      });
+    // 3. Red Areas (Crimson Red Hazard when Active, Slate Gray when Disabled)
+    redAreas.forEach((red) => {
+      const isSelected = selectedEntityId === red.id;
+      const isDisabled = Boolean(red.disabled);
+      const poly = L.polygon(
+        red.polygons && red.polygons.length > 0 ? red.polygons : red.polygon,
+        {
+          color: isDisabled ? '#94a3b8' : isSelected ? '#f87171' : '#ef4444',
+          weight: isSelected ? 3 : 2,
+          fillColor: isDisabled ? '#64748b' : '#ef4444',
+          fillOpacity: isDisabled ? 0.16 : isSelected ? 0.45 : 0.32,
+          dashArray: isDisabled ? '5, 5' : '6, 6',
+        }
+      );
 
       poly.on('click', (e) => {
         L.DomEvent.stopPropagation(e);
-        onSelectEntity(avoid.id);
+        onSelectEntity(red.id);
       });
 
       poly.addTo(group);
       if (showLabels) {
-        const centroid = getPolygonCentroid(avoid.polygon);
+        const centroid = getPolygonCentroid(red.polygon);
         const labelHtml = `
-          <div class="map-zone-badge map-zone-avoid ${isSelected ? 'selected' : ''}" style="${
+          <div class="map-zone-badge map-zone-red ${isSelected ? 'selected' : ''}" style="${
           isDisabled ? 'border-color: #64748b; background: rgba(15, 23, 42, 0.92);' : ''
         }">
             <div class="zone-badge-title">
-              ⛔ AVOID AREA ${
+              ⛔ RED AREA ${
           isDisabled ? '<span style="color:#f87171">[DISABLED]</span>' : ''
         }
             </div>
-            <div class="zone-badge-sub">${avoid.name}</div>
+            <div class="zone-badge-sub">${red.name}</div>
           </div>
         `;
 
@@ -545,7 +616,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             iconAnchor: [85, 20],
           }),
         });
-        marker.on('click', () => onSelectEntity(avoid.id));
+        marker.on('click', () => onSelectEntity(red.id));
         marker.addTo(group);
       }
     });
@@ -587,7 +658,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
   }, [
     sourceAreas,
     targetAreas,
-    avoidAreas,
+    redAreas,
     vehicleFleets,
     selectedEntityId,
     showZones,
@@ -719,7 +790,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           `<div class="route-tooltip">
             <strong style="color:#38bdf8">🚇 ACTIVE METRO EVACUATION CORRIDOR (${corridor.lineLabel})</strong><br/>
             <b>${corridor.sourceStation.name_fr}</b> (${corridor.sourceName}) &rarr; <b>${corridor.targetStation.name_fr}</b> (${corridor.targetName})<br/>
-            Distance: <b>${distKm} km</b> (Underground — Immune to Avoid Areas)
+            Distance: <b>${distKm} km</b> (Underground — Immune to Red Areas)
           </div>`,
           { sticky: true }
         );
@@ -735,7 +806,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     activeMetroCorridors,
   ]);
 
-  // Render Computed Evacuation Routes (for Source Areas not overridden by active Metro Corridors)
+  // Render Computed Evacuation Routes (always visible for all active Source/Target Areas, regardless of Metro evacuation)
   useEffect(() => {
     const routesGroup = routesLayerGroupRef.current;
     if (!routesGroup) return;
@@ -743,7 +814,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
     if (!showRoutes || computedRoutes.length === 0) return;
 
-    const metroSourceIds = new Set(activeMetroCorridors.map((c) => c.sourceId));
     const disabledSourceIds = new Set(
       sourceAreas.filter((s) => s.disabled).map((s) => s.id)
     );
@@ -754,7 +824,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     computedRoutes
       .filter(
         (route) =>
-          !metroSourceIds.has(route.sourceId) &&
           !disabledSourceIds.has(route.sourceId) &&
           !disabledTargetIds.has(route.targetId)
       )
@@ -789,7 +858,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
         polyline.addTo(routesGroup);
       });
-  }, [computedRoutes, showRoutes, activeMetroCorridors, sourceAreas, targetAreas]);
+  }, [computedRoutes, showRoutes, sourceAreas, targetAreas]);
 
   // Render Blue Square Pickup Locations & Active Metro Station Pickup and Drop-Off Points with Live Queue & Boarding/Unloading Badges
   useEffect(() => {
@@ -797,7 +866,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (!pickupGroup) return;
     pickupGroup.clearLayers();
 
-    const metroSourceIds = new Set(activeMetroCorridors.map((c) => c.sourceId));
     const disabledSourceIds = new Set(
       sourceAreas.filter((s) => s.disabled).map((s) => s.id)
     );
@@ -809,7 +877,6 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
       computedRoutes
         .filter(
           (route) =>
-            !metroSourceIds.has(route.sourceId) &&
             !disabledSourceIds.has(route.sourceId) &&
             !disabledTargetIds.has(route.targetId)
         )
@@ -1062,41 +1129,43 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     );
 
     // 1. Render micro-dots for crowd clusters (50 people per full dot; < 50 for remainder or partially-boarded waiting dots)
-    clusters
-      .filter(
-        (c) =>
-          !disabledSourceIds.has(c.sourceId) &&
-          (c.status === 'moving_in_zone' || c.status === 'waiting_at_pickup') &&
-          c.headcount > 0
-      )
-      .forEach((c) => {
-        const dotColor =
-          c.behavior === 'compliant'
-            ? '#0284c7'
-            : c.behavior === 'self-directed'
-            ? '#d97706'
-            : '#e11d48';
+    if (showPopulation) {
+      clusters
+        .filter(
+          (c) =>
+            !disabledSourceIds.has(c.sourceId) &&
+            (c.status === 'moving_in_zone' || c.status === 'waiting_at_pickup') &&
+            c.headcount > 0
+        )
+        .forEach((c) => {
+          const dotColor =
+            c.behavior === 'compliant'
+              ? '#0284c7'
+              : c.behavior === 'self-directed'
+              ? '#d97706'
+              : '#e11d48';
 
-        const dotRadius =
-          c.headcount >= 50 ? 4 : Math.max(2.6, 2.6 + 1.4 * (c.headcount / 50));
-        const statusText =
-          c.status === 'waiting_at_pickup'
-            ? 'Waiting at pickup for evacuation vehicles'
-            : 'Moving toward pickup';
+          const dotRadius =
+            c.headcount >= 50 ? 4 : Math.max(2.6, 2.6 + 1.4 * (c.headcount / 50));
+          const statusText =
+            c.status === 'waiting_at_pickup'
+              ? 'Waiting at pickup for evacuation vehicles'
+              : 'Moving toward pickup';
 
-        L.circleMarker(c.position, {
-          radius: dotRadius,
-          color: '#090d16',
-          weight: 1.2,
-          fillColor: dotColor,
-          fillOpacity: 0.92,
-        })
-          .bindTooltip(
-            `<b>${c.behavior.toUpperCase()} Cluster</b> (${c.headcount} / 50 evacuees)<br/>${statusText}`,
-            { direction: 'top' }
-          )
-          .addTo(group);
-      });
+          L.circleMarker(c.position, {
+            radius: dotRadius,
+            color: '#090d16',
+            weight: 1.2,
+            fillColor: dotColor,
+            fillOpacity: 0.92,
+          })
+            .bindTooltip(
+              `<b>${c.behavior.toUpperCase()} Cluster</b> (${c.headcount} / 50 evacuees)<br/>${statusText}`,
+              { direction: 'top' }
+            )
+            .addTo(group);
+        });
+    }
 
     // 2. Render active vehicles (en route to pickup, waiting/loading for 80% occupancy, en route to shelter, or unloading at shelter)
     vehicles
@@ -1207,7 +1276,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
 
         marker.addTo(group);
       });
-  }, [vehicles, clusters, isTwinning, sourceAreas]);
+  }, [vehicles, clusters, isTwinning, sourceAreas, showPopulation]);
 
   // Render drawing preview polygon/markers
   useEffect(() => {
@@ -1220,7 +1289,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
     if (
       activeDrawMode.type === 'source' ||
       activeDrawMode.type === 'target' ||
-      activeDrawMode.type === 'avoid'
+      activeDrawMode.type === 'red'
     ) {
       const pts = activeDrawMode.points;
       const color =
@@ -1384,6 +1453,18 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
           {showRoutes ? <Eye size={15} /> : <EyeOff size={15} />}
           <span>Routes & Pickups ({computedRoutes.length})</span>
         </button>
+
+        <button
+          id="btn-toggle-population"
+          type="button"
+          className={`map-tool-btn ${showPopulation ? 'active' : ''}`}
+          onClick={() => setShowPopulation(!showPopulation)}
+          disabled={isComputingRoutes}
+          title="Toggle Population Cluster Dots"
+        >
+          {showPopulation ? <Eye size={15} /> : <EyeOff size={15} />}
+          <span>Population</span>
+        </button>
       </div>
 
       {/* Interactive Map Legend */}
@@ -1399,8 +1480,8 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
             <span>Target Shelter</span>
           </div>
           <div className="legend-item">
-            <span className="legend-swatch avoid-swatch" />
-            <span>Avoid Area</span>
+            <span className="legend-swatch red-swatch" />
+            <span>Red Area</span>
           </div>
           <div className="legend-item">
             <span className="legend-swatch pickup-square-swatch" />
@@ -1522,7 +1603,7 @@ export const EvacuationMap: React.FC<EvacuationMapProps> = ({
                     ? 'Source Evacuation Area'
                     : activeDrawMode.type === 'target'
                     ? 'Target Shelter Area'
-                    : 'Avoid Area'}
+                    : 'Red Area'}
                   :
                 </strong>{' '}
                 Click on the map to add polygon vertices ({activeDrawMode.points.length} placed, min 3 required).

@@ -36,6 +36,8 @@ interface RightTelemetryPanelProps {
   totalRemainingAtSource: number;
   totalWaitingAtPickups: number;
   isTwinning: boolean;
+  selectedEntityId?: string | null;
+  onFocusPickupLocation?: (pickup: PickupLocationState) => void;
 }
 
 export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
@@ -52,6 +54,8 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
   totalRemainingAtSource,
   totalWaitingAtPickups,
   isTwinning,
+  selectedEntityId,
+  onFocusPickupLocation,
 }) => {
   const [minimalMode, setMinimalMode] = useState<boolean>(false);
 
@@ -147,7 +151,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
     <aside className="cockpit-right-panel" id="right-telemetry-panel">
       <header className="right-panel-header">
         <div className="right-title-row">
-          <Activity size={16} className="telemetry-icon" />
+          <Activity size={19} className="telemetry-icon" />
           <h2 className="right-panel-title">Situational Telemetry</h2>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -189,7 +193,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
           {/* Twin Clock & Status Banner */}
           <div className={`twin-status-banner ${isTwinning ? 'running' : ''}`}>
             <div className="clock-display">
-              <Clock size={18} />
+              <Clock size={20} />
               <div className="clock-text">
                 <span className="clock-label">ELAPSED EVACUATION TIME</span>
                 <span className="clock-digits">{formatTwinTime(elapsedTwinSeconds)}</span>
@@ -260,37 +264,54 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
             <section className="telemetry-card">
               <div className="telemetry-card-header">
                 <div className="header-with-icon">
-                  <MapPin size={14} style={{ color: '#3b82f6' }} />
+                  <MapPin size={17} style={{ color: '#3b82f6' }} />
                   <span>PICKUP &amp; METRO STATIONS (LIVE QUEUE)</span>
                 </div>
               </div>
 
               <div className="pickup-queues-list">
-                {pickupStates.map((p, i) => (
-                  <div key={p.id} className="pickup-queue-item">
-                    <div className="pickup-queue-top">
-                      <span className="pickup-queue-name">
-                        {p.isMetro ? `🚇 #${i + 1} ${p.label}` : `🟦 #${i + 1} ${p.label}`}
-                      </span>
-                      <span className="pickup-queue-count">
-                        Queue: <strong>{p.waitingPopulation}</strong>
-                      </span>
+                {pickupStates.map((p, i) => {
+                  const isSelected = selectedEntityId === p.id;
+                  return (
+                    <div
+                      key={p.id}
+                      id={`pickup-queue-item-${p.id}`}
+                      className={`pickup-queue-item clickable ${isSelected ? 'selected' : ''}`}
+                      role="button"
+                      tabIndex={0}
+                      title={`Click to zoom to ${p.label} on the map`}
+                      onClick={() => onFocusPickupLocation?.(p)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onFocusPickupLocation?.(p);
+                        }
+                      }}
+                    >
+                      <div className="pickup-queue-top">
+                        <span className="pickup-queue-name">
+                          {p.isMetro ? `🚇 #${i + 1} ${p.label}` : `🟦 #${i + 1} ${p.label}`}
+                        </span>
+                        <span className="pickup-queue-count">
+                          Queue: <strong>{p.waitingPopulation}</strong>
+                        </span>
+                      </div>
+                      {p.boardingVehicleInfo ? (
+                        <div className="pickup-boarding-status active">
+                          {p.isMetro ? '🚇' : '🚌'} {p.boardingVehicleInfo}
+                        </div>
+                      ) : (
+                        <div className="pickup-boarding-status">
+                          Boarded: {p.totalBoardedCount.toLocaleString()} &bull; Dropped off
+                          {p.isMetro && p.metroTargetStationName
+                            ? ` at ${p.metroTargetStationName}`
+                            : ''}
+                          : {p.evacuatedCount.toLocaleString()} evacuees
+                        </div>
+                      )}
                     </div>
-                    {p.boardingVehicleInfo ? (
-                      <div className="pickup-boarding-status active">
-                        {p.isMetro ? '🚇' : '🚌'} {p.boardingVehicleInfo}
-                      </div>
-                    ) : (
-                      <div className="pickup-boarding-status">
-                        Boarded: {p.totalBoardedCount.toLocaleString()} &bull; Dropped off
-                        {p.isMetro && p.metroTargetStationName
-                          ? ` at ${p.metroTargetStationName}`
-                          : ''}
-                        : {p.evacuatedCount.toLocaleString()} evacuees
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </section>
           )}
@@ -299,7 +320,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
           <section className="telemetry-card">
             <div className="telemetry-card-header">
               <div className="header-with-icon">
-                <Building2 size={14} />
+                <Building2 size={17} />
                 <span>TARGET SHELTER OCCUPANCY</span>
               </div>
             </div>
@@ -335,7 +356,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
           <section className="telemetry-card">
             <div className="telemetry-card-header">
               <div className="header-with-icon">
-                <Users size={14} />
+                <Users size={17} />
                 <span>INTERNAL ZONE BEHAVIOR MODEL</span>
               </div>
             </div>
@@ -380,7 +401,7 @@ export const RightTelemetryPanel: React.FC<RightTelemetryPanelProps> = ({
           <section className="telemetry-card">
             <div className="telemetry-card-header">
               <div className="header-with-icon">
-                <Bus size={14} />
+                <Bus size={17} />
                 <span>AUTHORITY TRANSPORT FLEETS</span>
               </div>
             </div>

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   SourceArea,
   TargetArea,
-  AvoidArea,
+  RedArea,
   VehicleFleet,
   PresetScenarioId,
   ActiveDrawMode,
@@ -16,6 +16,7 @@ import {
   BrusselsMetroCorridor,
   BrusselsMetroConfig,
   RoutingAlgorithm,
+  DataOverlayLayer,
 } from '../types/evacuation';
 import {
   Route,
@@ -37,6 +38,7 @@ import {
   CheckCircle2,
   Lock,
   Satellite,
+  Layers,
   Eye,
   EyeOff,
   ChevronDown,
@@ -57,7 +59,7 @@ interface LeftControlPanelProps {
   onToggleShowLabels: () => void;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
-  avoidAreas: AvoidArea[];
+  redAreas: RedArea[];
   vehicleFleets: VehicleFleet[];
   remainingBySource: Record<string, number>;
   onAddSourceArea: (src: Omit<SourceArea, 'id'>) => void;
@@ -68,10 +70,10 @@ interface LeftControlPanelProps {
   onUpdateTargetArea: (tgt: TargetArea) => void;
   onToggleDisableTargetArea: (id: string) => void;
   onDeleteTargetArea: (id: string) => void;
-  onAddAvoidArea: (avoid: Omit<AvoidArea, 'id'>) => void;
-  onUpdateAvoidArea: (avoid: AvoidArea) => void;
-  onToggleDisableAvoidArea: (id: string) => void;
-  onDeleteAvoidArea: (id: string) => void;
+  onAddRedArea: (red: Omit<RedArea, 'id'>) => void;
+  onUpdateRedArea: (red: RedArea) => void;
+  onToggleDisableRedArea: (id: string) => void;
+  onDeleteRedArea: (id: string) => void;
   onAddVehicleFleet: (fleet: Omit<VehicleFleet, 'id'>) => void;
   onUpdateVehicleFleet: (fleet: VehicleFleet) => void;
   onDeleteVehicleFleet: (id: string) => void;
@@ -90,7 +92,7 @@ interface LeftControlPanelProps {
   twinSpeed: number;
   onChangeTwinSpeed: (speed: number) => void;
   activeDrawMode: ActiveDrawMode;
-  onStartDrawing: (type: 'source' | 'target' | 'avoid' | 'vehicle') => void;
+  onStartDrawing: (type: 'source' | 'target' | 'red' | 'vehicle') => void;
   pendingDrawnPolygon: [number, number][] | null;
   pendingPlacedPoint: [number, number] | null;
   onClearPendingGeometry: () => void;
@@ -122,6 +124,9 @@ interface LeftControlPanelProps {
   onToggleUseBrusselsMetroForEvacuation: (checked: boolean) => void;
   onChangeBrusselsMetroTrainCount: (count: number) => void;
   onChangeBrusselsMetroTrainCapacity: (capacity: number) => void;
+  dataOverlays: DataOverlayLayer[];
+  onToggleDataOverlayVisibility: (id: string) => void;
+  onAddOverlayAsRedArea: (layer: DataOverlayLayer, simplified?: boolean) => void;
 }
 
 export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
@@ -134,7 +139,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onToggleShowLabels,
   sourceAreas,
   targetAreas,
-  avoidAreas,
+  redAreas,
   vehicleFleets,
   remainingBySource,
   onAddSourceArea,
@@ -145,10 +150,10 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onUpdateTargetArea,
   onToggleDisableTargetArea,
   onDeleteTargetArea,
-  onAddAvoidArea,
-  onUpdateAvoidArea,
-  onToggleDisableAvoidArea,
-  onDeleteAvoidArea,
+  onAddRedArea,
+  onUpdateRedArea,
+  onToggleDisableRedArea,
+  onDeleteRedArea,
   onAddVehicleFleet,
   onUpdateVehicleFleet,
   onDeleteVehicleFleet,
@@ -199,15 +204,19 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onToggleUseBrusselsMetroForEvacuation,
   onChangeBrusselsMetroTrainCount,
   onChangeBrusselsMetroTrainCapacity,
+  dataOverlays,
+  onToggleDataOverlayVisibility,
+  onAddOverlayAsRedArea,
 }) => {
-  const [activeTab, setActiveTab] = useState<'sources' | 'targets' | 'avoids' | 'vehicles'>('sources');
+  const [activeTab, setActiveTab] = useState<'sources' | 'targets' | 'reds' | 'vehicles'>('sources');
   const [isParametersCollapsed, setIsParametersCollapsed] = useState<boolean>(true);
   const [isExecutionCollapsed, setIsExecutionCollapsed] = useState<boolean>(true);
   const [isSpaceDataCollapsed, setIsSpaceDataCollapsed] = useState<boolean>(true);
-  const [isBrusselsMetroCollapsed, setIsBrusselsMetroCollapsed] = useState<boolean>(false);
+  const [isBrusselsMetroCollapsed, setIsBrusselsMetroCollapsed] = useState<boolean>(true);
+  const [isOverlaysCollapsed, setIsOverlaysCollapsed] = useState<boolean>(true);
   const [isPlanetScopeModalOpen, setIsPlanetScopeModalOpen] = useState<boolean>(false);
   const [pendingRemovalArea, setPendingRemovalArea] = useState<{
-    type: 'source' | 'target' | 'avoid';
+    type: 'source' | 'target' | 'red';
     id: string;
     name: string;
   } | null>(null);
@@ -215,7 +224,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   // Editing state for inline modal/form
   const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
   const [editingTargetId, setEditingTargetId] = useState<string | null>(null);
-  const [editingAvoidId, setEditingAvoidId] = useState<string | null>(null);
+  const [editingRedId, setEditingRedId] = useState<string | null>(null);
   const [editingVehicleId, setEditingVehicleId] = useState<string | null>(null);
 
   // Form states for creating or editing entities
@@ -232,7 +241,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     capacity: 25000,
   });
 
-  const [avoidForm, setAvoidForm] = useState({
+  const [redForm, setRedForm] = useState({
     name: '',
   });
 
@@ -270,9 +279,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         polygon: pendingDrawnPolygon,
         disabled: false,
       });
-    } else if (pendingDrawnPolygon && activeDrawMode?.type === 'avoid') {
-      onAddAvoidArea({
-        name: avoidForm.name || `Avoid Area #${avoidAreas.length + 1}`,
+    } else if (pendingDrawnPolygon && activeDrawMode?.type === 'red') {
+      onAddRedArea({
+        name: redForm.name || `Red Area #${redAreas.length + 1}`,
         polygon: pendingDrawnPolygon,
         disabled: false,
       });
@@ -348,20 +357,20 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
     setEditingTargetId(null);
   };
 
-  // Start editing an existing Avoid Area (only when paused)
-  const startEditAvoid = (avoid: AvoidArea) => {
+  // Start editing an existing Red Area (only when paused)
+  const startEditRed = (red: RedArea) => {
     if (isTwinning) return;
-    setEditingAvoidId(avoid.id);
-    setAvoidForm({ name: avoid.name });
+    setEditingRedId(red.id);
+    setRedForm({ name: red.name });
   };
 
-  const saveEditAvoid = (avoid: AvoidArea) => {
+  const saveEditRed = (red: RedArea) => {
     if (isTwinning) return;
-    onUpdateAvoidArea({
-      ...avoid,
-      name: avoidForm.name,
+    onUpdateRedArea({
+      ...red,
+      name: redForm.name,
     });
-    setEditingAvoidId(null);
+    setEditingRedId(null);
   };
 
   // Start editing an existing Vehicle Fleet (only when paused)
@@ -481,12 +490,12 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           disabled={isTwinning}
           onChange={(e) => onSelectPreset(e.target.value as PresetScenarioId)}
         >
+          <option value="custom">Custom / Blank Scenario</option>
           {presetScenarios.map((scenario) => (
             <option key={scenario.id} value={scenario.id}>
               {scenario.name}
             </option>
           ))}
-          <option value="custom">Custom / Blank Scenario</option>
         </select>
 
         {/* Show Labels On/Off Toggle */}
@@ -582,7 +591,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
 
       {/* Top-Justified Stack of 3 Collapsible Sections: 1. Parameters, 2. Execution & Twin, 3. Space Data */}
       <div className="left-panel-sections-stack">
-      {/* 1. Parameters Section (Sources, Targets, Avoid Areas, Vehicles — Collapsible) */}
+      {/* 1. Parameters Section (Sources, Targets, Red Areas, Vehicles — Collapsible) */}
       <section
         className="panel-section parameters-controls-section"
         style={{ padding: isParametersCollapsed ? '12px 16px' : '12px 0 0 0' }}
@@ -610,9 +619,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               PARAMETERS
             </span>
             {isParametersCollapsed ? (
-              <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+              <ChevronRight size={18} style={{ color: '#94a3b8' }} />
             ) : (
-              <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+              <ChevronDown size={18} style={{ color: '#38bdf8' }} />
             )}
           </button>
         </div>
@@ -653,8 +662,8 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                 ? 'Source Evacuation Area'
                 : activeDrawMode?.type === 'target'
                 ? 'Target Shelter Area'
-                : activeDrawMode?.type === 'avoid'
-                ? 'Avoid Area'
+                : activeDrawMode?.type === 'red'
+                ? 'Red Area'
                 : 'Vehicle Fleet Depot'}
             </span>
             <button type="button" onClick={onClearPendingGeometry} className="btn-icon-only">
@@ -756,15 +765,15 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               </>
             )}
 
-            {activeDrawMode?.type === 'avoid' && (
+            {activeDrawMode?.type === 'red' && (
               <div className="form-group">
-                <label>Avoid Area Name</label>
+                <label>Red Area Name</label>
                 <input
                   type="text"
                   required
                   placeholder="e.g., Collapsed Bridge Sector"
-                  value={avoidForm.name}
-                  onChange={(e) => setAvoidForm({ ...avoidForm, name: e.target.value })}
+                  value={redForm.name}
+                  onChange={(e) => setRedForm({ ...redForm, name: e.target.value })}
                 />
               </div>
             )}
@@ -902,11 +911,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         </button>
         <button
           type="button"
-          className={`entity-tab-btn ${activeTab === 'avoids' ? 'active' : ''}`}
-          onClick={() => setActiveTab('avoids')}
+          className={`entity-tab-btn ${activeTab === 'reds' ? 'active' : ''}`}
+          onClick={() => setActiveTab('reds')}
         >
           <ShieldAlert size={14} />
-          <span>Avoid Areas ({avoidAreas.length})</span>
+          <span>Red Areas ({redAreas.length})</span>
         </button>
         <button
           type="button"
@@ -1386,62 +1395,62 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           </div>
         )}
 
-        {/* TAB 3: AVOID AREAS */}
-        {activeTab === 'avoids' && (
+        {/* TAB 3: RED AREAS */}
+        {activeTab === 'reds' && (
           <div className="entity-tab-content">
             <div className="tab-header-action">
               <span className="tab-desc">Blocked / Hazard Zones (Can be disabled or removed)</span>
               <button
                 type="button"
-                className="btn-add-entity avoid-add"
+                className="btn-add-entity red-add"
                 disabled={isTwinning}
-                title={isTwinning ? 'Pause twin to add an Avoid Area' : 'Draw new Avoid Area on map'}
+                title={isTwinning ? 'Pause twin to add a Red Area' : 'Draw new Red Area on map'}
                 onClick={() => {
-                  setAvoidForm({
-                    name: `Avoid Area #${avoidAreas.length + 1}`,
+                  setRedForm({
+                    name: `Red Area #${redAreas.length + 1}`,
                   });
-                  onStartDrawing('avoid');
+                  onStartDrawing('red');
                 }}
               >
                 <Plus size={14} />
-                <span>Add Avoid Area</span>
+                <span>Add Red Area</span>
               </button>
             </div>
 
-            {avoidAreas.map((avoid) => {
-              const isEditing = editingAvoidId === avoid.id;
-              const isSelected = selectedEntityId === avoid.id;
-              const isDisabled = Boolean(avoid.disabled);
+            {redAreas.map((red) => {
+              const isEditing = editingRedId === red.id;
+              const isSelected = selectedEntityId === red.id;
+              const isDisabled = Boolean(red.disabled);
 
               return (
                 <div
-                  key={avoid.id}
-                  className={`entity-item-card avoid-card ${isSelected ? 'selected' : ''}`}
+                  key={red.id}
+                  className={`entity-item-card red-card ${isSelected ? 'selected' : ''}`}
                   style={{
                     opacity: isDisabled ? 0.72 : 1,
                     borderColor: isDisabled ? '#64748b' : undefined,
                   }}
-                  onClick={() => onSelectEntity(avoid.id)}
+                  onClick={() => onSelectEntity(red.id)}
                 >
                   {isEditing ? (
                     <div className="inline-edit-form" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="text"
-                        value={avoidForm.name}
-                        onChange={(e) => setAvoidForm({ name: e.target.value })}
+                        value={redForm.name}
+                        onChange={(e) => setRedForm({ name: e.target.value })}
                       />
                       <div className="inline-edit-actions">
                         <button
                           type="button"
                           className="btn-inline-save"
-                          onClick={() => saveEditAvoid(avoid)}
+                          onClick={() => saveEditRed(red)}
                         >
                           <Check size={13} /> Save
                         </button>
                         <button
                           type="button"
                           className="btn-inline-cancel"
-                          onClick={() => setEditingAvoidId(null)}
+                          onClick={() => setEditingRedId(null)}
                         >
                           Cancel
                         </button>
@@ -1452,11 +1461,11 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                       <div className="entity-card-top">
                         <div className="entity-title-group">
                           <span
-                            className="entity-dot avoid-dot"
+                            className="entity-dot red-dot"
                             style={{ background: isDisabled ? '#64748b' : undefined }}
                           />
                           <span className="entity-name">
-                            {avoid.name}
+                            {red.name}
                             {isDisabled && (
                               <span
                                 style={{
@@ -1476,25 +1485,25 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             type="button"
                             className="btn-entity-icon"
                             disabled={isTwinning}
-                            title={isTwinning ? 'Pause twin to modify Avoid Area' : 'Modify Avoid Area'}
+                            title={isTwinning ? 'Pause twin to modify Red Area' : 'Modify Red Area'}
                             onClick={(e) => {
                               e.stopPropagation();
-                              startEditAvoid(avoid);
+                              startEditRed(red);
                             }}
                           >
                             <Pencil size={13} />
                           </button>
                           <button
-                            id={`btn-disable-avoid-${avoid.id}`}
+                            id={`btn-disable-red-${red.id}`}
                             type="button"
                             className="btn-entity-icon"
                             disabled={isTwinning}
                             title={
                               isTwinning
-                                ? 'Pause twin to disable/enable Avoid Area'
+                                ? 'Pause twin to disable/enable Red Area'
                                 : isDisabled
-                                ? 'Enable Avoid Area to block evacuation routes'
-                                : 'Disable Avoid Area (routes may pass through this zone)'
+                                ? 'Enable Red Area to block evacuation routes'
+                                : 'Disable Red Area (routes may pass through this zone)'
                             }
                             style={{
                               padding: '3px 7px',
@@ -1516,7 +1525,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              onToggleDisableAvoidArea(avoid.id);
+                              onToggleDisableRedArea(red.id);
                             }}
                           >
                             {isDisabled ? (
@@ -1530,7 +1539,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             )}
                           </button>
                           <button
-                            id={`btn-remove-avoid-${avoid.id}`}
+                            id={`btn-remove-red-${red.id}`}
                             type="button"
                             className="btn-entity-icon delete"
                             disabled={isTwinning}
@@ -1550,16 +1559,16 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                             }}
                             title={
                               isTwinning
-                                ? 'Pause twin to remove Avoid Area'
-                                : `Remove Avoid Area "${avoid.name}"`
+                                ? 'Pause twin to remove Red Area'
+                                : `Remove Red Area "${red.name}"`
                             }
                             onClick={(e) => {
                               e.stopPropagation();
                               if (!isTwinning) {
                                 setPendingRemovalArea({
-                                  type: 'avoid',
-                                  id: avoid.id,
-                                  name: avoid.name,
+                                  type: 'red',
+                                  id: red.id,
+                                  name: red.name,
                                 });
                               }
                             }}
@@ -1795,9 +1804,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             EXECUTION & TWIN
           </span>
           {isExecutionCollapsed ? (
-            <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+            <ChevronRight size={18} style={{ color: '#94a3b8' }} />
           ) : (
-            <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+            <ChevronDown size={18} style={{ color: '#38bdf8' }} />
           )}
         </button>
 
@@ -1961,7 +1970,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             <div className="twin-speed-bar">
               <span className="speed-label">Playback Speed:</span>
               <div className="speed-pills">
-                {[1, 2, 5, 10, 25, 50, 100].map((spd) => (
+                {[1, 2, 5, 10, 25, 50, 100, 500, 1000].map((spd) => (
                   <button
                     key={spd}
                     type="button"
@@ -2001,9 +2010,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
             SPACE DATA
           </span>
           {isSpaceDataCollapsed ? (
-            <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+            <ChevronRight size={18} style={{ color: '#94a3b8' }} />
           ) : (
-            <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+            <ChevronDown size={18} style={{ color: '#38bdf8' }} />
           )}
         </button>
 
@@ -2412,7 +2421,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
         >
           <div
             style={{
-              fontSize: '0.75rem',
+              fontSize: '0.95rem',
               fontWeight: 700,
               color: '#fca5a5',
               marginBottom: '6px',
@@ -2638,16 +2647,16 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                 marginBottom: 0,
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: '6px',
+                gap: '8px',
               }}
             >
-              <TrainFront size={13} style={{ color: '#38bdf8' }} />
+              <TrainFront size={17} style={{ color: '#38bdf8' }} />
               <span>Brussels Metro</span>
             </span>
             {isBrusselsMetroCollapsed ? (
-              <ChevronRight size={15} style={{ color: '#94a3b8' }} />
+              <ChevronRight size={18} style={{ color: '#94a3b8' }} />
             ) : (
-              <ChevronDown size={15} style={{ color: '#38bdf8' }} />
+              <ChevronDown size={18} style={{ color: '#38bdf8' }} />
             )}
           </button>
 
@@ -3120,7 +3129,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                           <div key={c.id} style={{ color: '#bae6fd' }}>
                             🚇 Pickup: <strong>{c.sourceStation.name_fr}</strong> &rarr; Drop-Off:{' '}
                             <strong>{c.targetStation.name_fr}</strong> ({c.lineLabel},{' '}
-                            {(c.distanceMeters / 1000).toFixed(1)} km, Immune to Avoid Areas)
+                            {(c.distanceMeters / 1000).toFixed(1)} km, Immune to Red Areas)
                           </div>
                         ))}
                       </div>
@@ -3132,6 +3141,238 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
           )}
         </section>
       )}
+
+      {/* 5. Overlays Section (Independent GeoJSON / GeoTIFF files from data/overlays) */}
+      <section
+        id="overlays-section"
+        className="panel-section overlays-section"
+      >
+        <button
+          id="toggle-overlays-section"
+          type="button"
+          aria-expanded={!isOverlaysCollapsed}
+          onClick={() => setIsOverlaysCollapsed((prev) => !prev)}
+          style={{
+            width: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            marginBottom: isOverlaysCollapsed ? 0 : '8px',
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          <span
+            className="section-label"
+            style={{
+              marginBottom: 0,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <Layers size={17} style={{ color: '#38bdf8' }} />
+            <span>Overlays</span>
+          </span>
+          {isOverlaysCollapsed ? (
+            <ChevronRight size={18} style={{ color: '#94a3b8' }} />
+          ) : (
+            <ChevronDown size={18} style={{ color: '#38bdf8' }} />
+          )}
+        </button>
+
+        {!isOverlaysCollapsed && (
+          <div
+            id="overlays-layer-list"
+            style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}
+          >
+            {dataOverlays.length === 0 ? (
+              <div
+                style={{
+                  fontSize: '0.72rem',
+                  color: '#64748b',
+                  fontStyle: 'italic',
+                  padding: '6px 8px',
+                }}
+              >
+                No overlay files found in data/overlays
+              </div>
+            ) : (
+              dataOverlays.map((layer) => (
+                <div
+                  key={layer.id}
+                  id={`overlay-item-${layer.name}`}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '6px',
+                    padding: '6px 9px',
+                    borderRadius: '6px',
+                    background: layer.visible
+                      ? 'rgba(14, 165, 233, 0.14)'
+                      : 'rgba(15, 23, 42, 0.78)',
+                    border: layer.visible
+                      ? `1px solid ${layer.color}`
+                      : '1px solid rgba(148, 163, 184, 0.24)',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      minWidth: 0,
+                      flex: 1,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: '9px',
+                        height: '9px',
+                        borderRadius: '50%',
+                        backgroundColor: layer.color,
+                        flexShrink: 0,
+                        opacity: layer.visible ? 1 : 0.45,
+                        boxShadow: layer.visible ? `0 0 6px ${layer.color}` : 'none',
+                      }}
+                    />
+                    <span
+                      style={{
+                        fontSize: '0.75rem',
+                        fontWeight: layer.visible ? 700 : 600,
+                        color: layer.visible ? '#f8fafc' : '#cbd5e1',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}
+                      title={`${layer.name} (${layer.fileName})`}
+                    >
+                      {layer.name}
+                    </span>
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      gap: '5px',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {layer.format === 'geojson' && (
+                      <>
+                        <button
+                          id={`btn-add-overlay-red-area-${layer.name}`}
+                          type="button"
+                          disabled={isTwinning}
+                          onClick={() => onAddOverlayAsRedArea(layer, false)}
+                          title={
+                            isTwinning
+                              ? 'Pause twin to add overlay as a Red Area'
+                              : `Add "${layer.name}" as a Red Area`
+                          }
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            height: '26px',
+                            padding: '0 8px',
+                            borderRadius: '5px',
+                            fontSize: '0.68rem',
+                            fontWeight: 600,
+                            border: '1px solid rgba(239, 68, 68, 0.45)',
+                            background: 'rgba(239, 68, 68, 0.16)',
+                            color: '#fca5a5',
+                            cursor: isTwinning ? 'not-allowed' : 'pointer',
+                            opacity: isTwinning ? 0.4 : 1,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          <Plus size={12} />
+                          <span>add as red area</span>
+                        </button>
+                        <button
+                          id={`btn-add-overlay-simplified-red-area-${layer.name}`}
+                          type="button"
+                          disabled={isTwinning}
+                          onClick={() => onAddOverlayAsRedArea(layer, true)}
+                          title={
+                            isTwinning
+                              ? 'Pause twin to add overlay as a simplified Red Area'
+                              : `Add "${layer.name}" as a simplified Red Area (simplify tolerance=0.0005, preserve_topology=True)`
+                          }
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            height: '26px',
+                            padding: '0 8px',
+                            borderRadius: '5px',
+                            fontSize: '0.68rem',
+                            fontWeight: 600,
+                            border: '1px solid rgba(249, 115, 22, 0.5)',
+                            background: 'rgba(249, 115, 22, 0.16)',
+                            color: '#fdba74',
+                            cursor: isTwinning ? 'not-allowed' : 'pointer',
+                            opacity: isTwinning ? 0.4 : 1,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          <Plus size={12} />
+                          <span>add as simplified red area</span>
+                        </button>
+                      </>
+                    )}
+
+                    <button
+                      id={`btn-toggle-overlay-${layer.name}`}
+                      type="button"
+                      onClick={() => onToggleDataOverlayVisibility(layer.id)}
+                      title={
+                        layer.visible
+                          ? `Hide overlay "${layer.name}" on map`
+                          : `Show overlay "${layer.name}" on map`
+                      }
+                      aria-label={
+                        layer.visible
+                          ? `Hide overlay ${layer.name}`
+                          : `Show overlay ${layer.name}`
+                      }
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: '28px',
+                        height: '26px',
+                        borderRadius: '5px',
+                        border: layer.visible
+                          ? '1px solid rgba(56, 189, 248, 0.5)'
+                          : '1px solid rgba(148, 163, 184, 0.25)',
+                        background: layer.visible
+                          ? 'rgba(2, 132, 199, 0.28)'
+                          : 'rgba(30, 41, 59, 0.7)',
+                        color: layer.visible ? '#38bdf8' : '#64748b',
+                        cursor: 'pointer',
+                        flexShrink: 0,
+                        padding: 0,
+                      }}
+                    >
+                      {layer.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </section>
       </div>
 
       {/* Area Removal Confirmation Popup Modal */}
@@ -3198,7 +3439,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     ? 'Source Area'
                     : pendingRemovalArea.type === 'target'
                     ? 'Target Area'
-                    : 'Avoid Area'}
+                    : 'Red Area'}
                 </strong>{' '}
                 <span style={{ color: '#fbbf24', fontWeight: 700 }}>
                   &ldquo;{pendingRemovalArea.name}&rdquo;
@@ -3253,9 +3494,9 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
                     } else if (type === 'target') {
                       if (editingTargetId === id) setEditingTargetId(null);
                       onDeleteTargetArea(id);
-                    } else if (type === 'avoid') {
-                      if (editingAvoidId === id) setEditingAvoidId(null);
-                      onDeleteAvoidArea(id);
+                    } else if (type === 'red') {
+                      if (editingRedId === id) setEditingRedId(null);
+                      onDeleteRedArea(id);
                     }
                     setPendingRemovalArea(null);
                   }}

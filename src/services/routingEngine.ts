@@ -2,7 +2,7 @@ import * as turf from '@turf/turf';
 import {
   SourceArea,
   TargetArea,
-  AvoidArea,
+  RedArea,
   VehicleFleet,
   ComputedRoute,
   LogEntry,
@@ -46,15 +46,90 @@ export function toTurfPolygon(coords: [number, number][]) {
 }
 
 /**
- * Check if a point ([lat, lng]) lies inside any active (non-disabled) Avoid Area polygon
+ * Return all constituent polygon rings ([lat, lng][][]) of a Red Area
  */
-export function isPointInAnyAvoidArea(pt: [number, number], avoidAreas: AvoidArea[]): boolean {
+function getRedAreaRings(red: RedArea): [number, number][][] {
+  if (red.polygons && red.polygons.length > 0) {
+    return red.polygons.filter((ring) => Array.isArray(ring) && ring.length >= 3);
+  }
+  return red.polygon && red.polygon.length >= 3 ? [red.polygon] : [];
+}
+
+/**
+ * Fast axis-aligned bounding box check for [lat, lng][] ring vs [minLat, maxLat, minLng, maxLng]
+ */
+function doesRingBboxOverlap(
+  ring: [number, number][],
+  minLat: number,
+  maxLat: number,
+  minLng: number,
+  maxLng: number
+): boolean {
+  let rMinLat = Infinity;
+  let rMaxLat = -Infinity;
+  let rMinLng = Infinity;
+  let rMaxLng = -Infinity;
+  for (let i = 0; i < ring.length; i++) {
+    const lat = ring[i][0];
+    const lng = ring[i][1];
+    if (lat < rMinLat) rMinLat = lat;
+    if (lat > rMaxLat) rMaxLat = lat;
+    if (lng < rMinLng) rMinLng = lng;
+    if (lng > rMaxLng) rMaxLng = lng;
+  }
+  return !(rMaxLat < minLat || rMinLat > maxLat || rMaxLng < minLng || rMinLng > maxLng);
+}
+
+/**
+ * Check if a point ([lat, lng]) lies inside any active (non-disabled) Red Area polygon
+ */
+export function isPointInAnyRedArea(pt: [number, number], redAreas: RedArea[]): boolean {
   const turfPt = turf.point([pt[1], pt[0]]);
-  for (const avoid of avoidAreas) {
-    if (avoid.disabled || avoid.polygon.length < 3) continue;
+  for (const red of redAreas) {
+    if (red.disabled) continue;
+    const rings = getRedAreaRings(red);
+    for (const ring of rings) {
+      if (!doesRingBboxOverlap(ring, pt[0], pt[0], pt[1], pt[1])) continue;
+      try {
+        const poly = toTurfPolygon(ring);
+        if (turf.booleanPointInPolygon(turfPt, poly)) {
+          return true;
+        }
+      } catch {
+        // Ignore invalid geometry
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if a single line segment ([lat1, lng1] -> [lat2, lng2]) intersects a Red Area polygon
+ */
+export function doesSegmentIntersectRedArea(
+  p1: [number, number],
+  p2: [number, number],
+  red: RedArea
+): boolean {
+  if (red.disabled) return false;
+  const rings = getRedAreaRings(red);
+  if (rings.length === 0) return false;
+  if (p1[0] === p2[0] && p1[1] === p2[1]) {
+    return isPointInAnyRedArea(p1, [red]);
+  }
+  const minLat = Math.min(p1[0], p2[0]);
+  const maxLat = Math.max(p1[0], p2[0]);
+  const minLng = Math.min(p1[1], p2[1]);
+  const maxLng = Math.max(p1[1], p2[1]);
+  const seg = turf.lineString([
+    [p1[1], p1[0]],
+    [p2[1], p2[0]],
+  ]);
+  for (const ring of rings) {
+    if (!doesRingBboxOverlap(ring, minLat, maxLat, minLng, maxLng)) continue;
     try {
-      const poly = toTurfPolygon(avoid.polygon);
-      if (turf.booleanPointInPolygon(turfPt, poly)) {
+      const poly = toTurfPolygon(ring);
+      if (turf.booleanIntersects(seg, poly)) {
         return true;
       }
     } catch {
@@ -65,40 +140,16 @@ export function isPointInAnyAvoidArea(pt: [number, number], avoidAreas: AvoidAre
 }
 
 /**
- * Check if a single line segment ([lat1, lng1] -> [lat2, lng2]) intersects an Avoid Area polygon
+ * Check if a single line segment intersects ANY active Red Area polygon
  */
-export function doesSegmentIntersectAvoidArea(
+export function doesSegmentIntersectAnyRedArea(
   p1: [number, number],
   p2: [number, number],
-  avoid: AvoidArea
+  redAreas: RedArea[]
 ): boolean {
-  if (avoid.disabled || avoid.polygon.length < 3) return false;
-  if (p1[0] === p2[0] && p1[1] === p2[1]) {
-    return isPointInAnyAvoidArea(p1, [avoid]);
-  }
-  try {
-    const seg = turf.lineString([
-      [p1[1], p1[0]],
-      [p2[1], p2[0]],
-    ]);
-    const poly = toTurfPolygon(avoid.polygon);
-    return turf.booleanIntersects(seg, poly);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Check if a single line segment intersects ANY active Avoid Area polygon
- */
-export function doesSegmentIntersectAnyAvoidArea(
-  p1: [number, number],
-  p2: [number, number],
-  avoidAreas: AvoidArea[]
-): boolean {
-  for (const avoid of avoidAreas) {
-    if (avoid.disabled) continue;
-    if (doesSegmentIntersectAvoidArea(p1, p2, avoid)) {
+  for (const red of redAreas) {
+    if (red.disabled) continue;
+    if (doesSegmentIntersectRedArea(p1, p2, red)) {
       return true;
     }
   }
@@ -106,47 +157,68 @@ export function doesSegmentIntersectAnyAvoidArea(
 }
 
 /**
- * Check if a polyline ([lat, lng][]) intersects an Avoid Area polygon
+ * Check if a polyline ([lat, lng][]) intersects a Red Area polygon
  */
-export function doesRouteIntersectAvoidArea(
+export function doesRouteIntersectRedArea(
   routeCoords: [number, number][],
-  avoid: AvoidArea
+  red: RedArea
 ): boolean {
-  if (avoid.disabled || routeCoords.length < 2 || avoid.polygon.length < 3) return false;
-  try {
-    const line = turf.lineString(routeCoords.map((c) => [c[1], c[0]]));
-    const poly = toTurfPolygon(avoid.polygon);
-    return turf.booleanIntersects(line, poly);
-  } catch {
-    return false;
+  if (red.disabled || routeCoords.length < 2) return false;
+  const rings = getRedAreaRings(red);
+  if (rings.length === 0) return false;
+
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  for (let i = 0; i < routeCoords.length; i++) {
+    const [lat, lng] = routeCoords[i];
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
   }
+
+  const line = turf.lineString(routeCoords.map((c) => [c[1], c[0]]));
+  for (const ring of rings) {
+    if (!doesRingBboxOverlap(ring, minLat, maxLat, minLng, maxLng)) continue;
+    try {
+      const poly = toTurfPolygon(ring);
+      if (turf.booleanIntersects(line, poly)) {
+        return true;
+      }
+    } catch {
+      // Ignore invalid geometry
+    }
+  }
+  return false;
 }
 
 /**
- * Return all active Avoid Areas intersected by a polyline
+ * Return all active Red Areas intersected by a polyline
  */
-export function findIntersectingAvoidAreas(
+export function findIntersectingRedAreas(
   routeCoords: [number, number][],
-  avoidAreas: AvoidArea[]
-): AvoidArea[] {
-  return avoidAreas.filter((avoid) => !avoid.disabled && doesRouteIntersectAvoidArea(routeCoords, avoid));
+  redAreas: RedArea[]
+): RedArea[] {
+  return redAreas.filter((red) => !red.disabled && doesRouteIntersectRedArea(routeCoords, red));
 }
 
 /**
- * If a point falls inside an Avoid Area polygon, project it to the nearest safe exterior position
+ * If a point falls inside a Red Area polygon, project it to the nearest safe exterior position
  */
-export function ensurePointOutsideAvoidAreas(
+export function ensurePointOutsideRedAreas(
   pt: [number, number],
-  avoidAreas: AvoidArea[]
+  redAreas: RedArea[]
 ): [number, number] {
-  if (!isPointInAnyAvoidArea(pt, avoidAreas)) return pt;
+  if (!isPointInAnyRedArea(pt, redAreas)) return pt;
 
-  const safeCandidates = buildSafeObstacleVertices(avoidAreas);
+  const safeCandidates = buildSafeObstacleVertices(redAreas);
   let bestPt: [number, number] = pt;
   let bestDist = Infinity;
 
   for (const cand of safeCandidates) {
-    if (!isPointInAnyAvoidArea(cand, avoidAreas)) {
+    if (!isPointInAnyRedArea(cand, redAreas)) {
       const d = turf.distance([pt[1], pt[0]], [cand[1], cand[0]]);
       if (d < bestDist) {
         bestDist = d;
@@ -160,17 +232,17 @@ export function ensurePointOutsideAvoidAreas(
 /**
  * Compute a specific, distinct Pickup Location ([lat, lng]) on/near the perimeter boundary
  * of the Source Area polygon so each route has its own dedicated assembly square,
- * ensuring the pickup location is never placed inside an Avoid Area.
+ * ensuring the pickup location is never placed inside a Red Area.
  */
 export function computeSpecificPickupPoint(
   source: SourceArea,
   targetCenter: [number, number],
   slotIndex: number,
-  avoidAreas: AvoidArea[] = []
+  redAreas: RedArea[] = []
 ): [number, number] {
   const poly = source.polygon;
   const centroid = getPolygonCentroid(poly);
-  if (!poly || poly.length < 3) return ensurePointOutsideAvoidAreas(centroid, avoidAreas);
+  if (!poly || poly.length < 3) return ensurePointOutsideRedAreas(centroid, redAreas);
 
   // Generate candidate perimeter anchor points (vertices + edge midpoints)
   const anchors: [number, number][] = [];
@@ -195,7 +267,7 @@ export function computeSpecificPickupPoint(
     turfPoly = null;
   }
 
-  // Try candidate anchors starting from slotIndex offset, picking the first that lies strictly inside the Source Area and outside any Avoid Area
+  // Try candidate anchors starting from slotIndex offset, picking the first that lies strictly inside the Source Area and outside any Red Area
   for (let offset = 0; offset < sortedByTarget.length; offset++) {
     const chosenAnchor =
       sortedByTarget[(slotIndex * 2 + offset) % sortedByTarget.length] || centroid;
@@ -205,7 +277,7 @@ export function computeSpecificPickupPoint(
       const candidate: [number, number] = [lat, lng];
       const insideSource =
         !turfPoly || turf.booleanPointInPolygon(turf.point([lng, lat]), turfPoly);
-      if (insideSource && !isPointInAnyAvoidArea(candidate, avoidAreas)) {
+      if (insideSource && !isPointInAnyRedArea(candidate, redAreas)) {
         return candidate;
       }
     }
@@ -216,7 +288,7 @@ export function computeSpecificPickupPoint(
       const pof = turf.pointOnFeature(turfPoly);
       const [lng, lat] = pof.geometry.coordinates;
       const pofCand: [number, number] = [Number(lat.toFixed(5)), Number(lng.toFixed(5))];
-      if (!isPointInAnyAvoidArea(pofCand, avoidAreas)) {
+      if (!isPointInAnyRedArea(pofCand, redAreas)) {
         return pofCand;
       }
     } catch {
@@ -224,89 +296,102 @@ export function computeSpecificPickupPoint(
     }
   }
 
-  return ensurePointOutsideAvoidAreas(centroid, avoidAreas);
+  return ensurePointOutsideRedAreas(centroid, redAreas);
 }
 
 /**
- * Build a set of safe exterior obstacle vertices around all Avoid Area polygons.
+ * Build a set of safe exterior obstacle vertices around all Red Area polygons.
  * Uses multi-tier buffered rings and outward vertex offsets so that shortest-path
- * visibility routing can cleanly circumnavigate any convex, concave, or overlapping Avoid Area.
+ * visibility routing can cleanly circumnavigate any convex, concave, or overlapping Red Area.
  */
-function buildSafeObstacleVertices(avoidAreas: AvoidArea[]): [number, number][] {
+function buildSafeObstacleVertices(redAreas: RedArea[]): [number, number][] {
   const vertices: [number, number][] = [];
 
-  for (const avoid of avoidAreas) {
-    if (avoid.disabled || avoid.polygon.length < 3) continue;
-    const poly = toTurfPolygon(avoid.polygon);
-    const centroid = getPolygonCentroid(avoid.polygon);
+  for (const red of redAreas) {
+    if (red.disabled) continue;
+    const rings = getRedAreaRings(red).slice(0, 5);
+    for (const targetRing of rings) {
+      if (targetRing.length < 3) continue;
+      // Downsample very dense GeoJSON rings before buffering so Turf stays fast
+      const sampleStep = Math.max(1, Math.floor(targetRing.length / 36));
+      const sampledRing =
+        sampleStep > 1
+          ? targetRing.filter((_, idx) => idx % sampleStep === 0)
+          : targetRing;
+      if (sampledRing.length < 3) continue;
 
-    // 1. Multi-tier buffered exterior rings around the Avoid Area polygon (80m and 220m clearance)
-    for (const bufferKm of [0.08, 0.22]) {
-      try {
-        const buffered = turf.buffer(poly, bufferKm, { units: 'kilometers', steps: 8 });
-        if (buffered && buffered.geometry) {
-          const coordsList =
-            buffered.geometry.type === 'Polygon'
-              ? [buffered.geometry.coordinates[0]]
-              : buffered.geometry.type === 'MultiPolygon'
-              ? buffered.geometry.coordinates.map((c) => c[0])
-              : [];
+      const poly = toTurfPolygon(sampledRing);
+      const centroid = getPolygonCentroid(sampledRing);
 
-          for (const ring of coordsList) {
-            // Downsample ring if very dense while preserving corners
-            const step = Math.max(1, Math.floor(ring.length / 18));
-            for (let i = 0; i < ring.length; i += step) {
-              const pt: [number, number] = [ring[i][1], ring[i][0]];
-              if (!isPointInAnyAvoidArea(pt, avoidAreas)) {
-                vertices.push(pt);
+      // 1. Multi-tier buffered exterior rings around the Red Area polygon (80m and 220m clearance)
+      for (const bufferKm of [0.08, 0.22]) {
+        try {
+          const buffered = turf.buffer(poly, bufferKm, { units: 'kilometers', steps: 8 });
+          if (buffered && buffered.geometry) {
+            const coordsList =
+              buffered.geometry.type === 'Polygon'
+                ? [buffered.geometry.coordinates[0]]
+                : buffered.geometry.type === 'MultiPolygon'
+                ? buffered.geometry.coordinates.map((c) => c[0])
+                : [];
+
+            for (const ring of coordsList) {
+              // Downsample ring if very dense while preserving corners
+              const step = Math.max(1, Math.floor(ring.length / 18));
+              for (let i = 0; i < ring.length; i += step) {
+                const pt: [number, number] = [ring[i][1], ring[i][0]];
+                if (!isPointInAnyRedArea(pt, redAreas)) {
+                  vertices.push(pt);
+                }
               }
             }
           }
+        } catch {
+          // Fallback handled below
         }
-      } catch {
-        // Fallback handled below
       }
-    }
 
-    // 2. Outward-projected vertices & edge midpoints from original polygon
-    for (let i = 0; i < avoid.polygon.length; i++) {
-      const p1 = avoid.polygon[i];
-      const p2 = avoid.polygon[(i + 1) % avoid.polygon.length];
-      const mid: [number, number] = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
+      // 2. Outward-projected vertices & edge midpoints from sampled polygon
+      const vStep = Math.max(1, Math.floor(sampledRing.length / 16));
+      for (let i = 0; i < sampledRing.length; i += vStep) {
+        const p1 = sampledRing[i];
+        const p2 = sampledRing[(i + 1) % sampledRing.length];
+        const mid: [number, number] = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
 
-      for (const rawPt of [p1, mid]) {
-        const dLat = rawPt[0] - centroid[0];
-        const dLng = rawPt[1] - centroid[1];
-        const dist = Math.hypot(dLat, dLng) || 0.0001;
-        for (const padDeg of [0.0011, 0.0028]) {
-          const extPt: [number, number] = [
-            rawPt[0] + (dLat / dist) * padDeg,
-            rawPt[1] + (dLng / dist) * padDeg,
-          ];
-          if (!isPointInAnyAvoidArea(extPt, avoidAreas)) {
-            vertices.push(extPt);
+        for (const rawPt of [p1, mid]) {
+          const dLat = rawPt[0] - centroid[0];
+          const dLng = rawPt[1] - centroid[1];
+          const dist = Math.hypot(dLat, dLng) || 0.0001;
+          for (const padDeg of [0.0011, 0.0028]) {
+            const extPt: [number, number] = [
+              rawPt[0] + (dLat / dist) * padDeg,
+              rawPt[1] + (dLng / dist) * padDeg,
+            ];
+            if (!isPointInAnyRedArea(extPt, redAreas)) {
+              vertices.push(extPt);
+            }
           }
         }
       }
-    }
 
-    // 3. Padded bounding box corners (guarantees global escape around concave shapes)
-    const bbox = turf.bbox(poly); // [minLng, minLat, maxLng, maxLat]
-    const latPad = Math.max(0.0022, (bbox[3] - bbox[1]) * 0.25);
-    const lngPad = Math.max(0.0028, (bbox[2] - bbox[0]) * 0.25);
-    const boxCorners: [number, number][] = [
-      [bbox[3] + latPad, bbox[0] - lngPad],
-      [bbox[3] + latPad, bbox[2] + lngPad],
-      [bbox[1] - latPad, bbox[2] + lngPad],
-      [bbox[1] - latPad, bbox[0] - lngPad],
-      [bbox[3] + latPad, (bbox[0] + bbox[2]) / 2],
-      [bbox[1] - latPad, (bbox[0] + bbox[2]) / 2],
-      [(bbox[1] + bbox[3]) / 2, bbox[0] - lngPad],
-      [(bbox[1] + bbox[3]) / 2, bbox[2] + lngPad],
-    ];
-    for (const bc of boxCorners) {
-      if (!isPointInAnyAvoidArea(bc, avoidAreas)) {
-        vertices.push(bc);
+      // 3. Padded bounding box corners (guarantees global escape around concave shapes)
+      const bbox = turf.bbox(poly); // [minLng, minLat, maxLng, maxLat]
+      const latPad = Math.max(0.0022, (bbox[3] - bbox[1]) * 0.25);
+      const lngPad = Math.max(0.0028, (bbox[2] - bbox[0]) * 0.25);
+      const boxCorners: [number, number][] = [
+        [bbox[3] + latPad, bbox[0] - lngPad],
+        [bbox[3] + latPad, bbox[2] + lngPad],
+        [bbox[1] - latPad, bbox[2] + lngPad],
+        [bbox[1] - latPad, bbox[0] - lngPad],
+        [bbox[3] + latPad, (bbox[0] + bbox[2]) / 2],
+        [bbox[1] - latPad, (bbox[0] + bbox[2]) / 2],
+        [(bbox[1] + bbox[3]) / 2, bbox[0] - lngPad],
+        [(bbox[1] + bbox[3]) / 2, bbox[2] + lngPad],
+      ];
+      for (const bc of boxCorners) {
+        if (!isPointInAnyRedArea(bc, redAreas)) {
+          vertices.push(bc);
+        }
       }
     }
   }
@@ -318,22 +403,22 @@ function buildSafeObstacleVertices(avoidAreas: AvoidArea[]): [number, number][] 
  * Compute the exact shortest collision-free path between `start` and `end`
  * using a Visibility Graph over safe exterior obstacle vertices + Dijkstra's algorithm.
  * Every edge in the returned path is mathematically verified to have ZERO intersection
- * with all Avoid Area polygons (`doesSegmentIntersectAnyAvoidArea === false`).
+ * with all Red Area polygons (`doesSegmentIntersectAnyRedArea === false`).
  */
 export function computeShortestCollisionFreePath(
   start: [number, number],
   end: [number, number],
-  avoidAreas: AvoidArea[],
+  redAreas: RedArea[],
   sidePreference: 'primary' | 'alternate' = 'primary'
 ): [number, number][] {
-  const safeStart = ensurePointOutsideAvoidAreas(start, avoidAreas);
-  const safeEnd = ensurePointOutsideAvoidAreas(end, avoidAreas);
+  const safeStart = ensurePointOutsideRedAreas(start, redAreas);
+  const safeEnd = ensurePointOutsideRedAreas(end, redAreas);
 
-  if (avoidAreas.length === 0 || !doesSegmentIntersectAnyAvoidArea(safeStart, safeEnd, avoidAreas)) {
+  if (redAreas.length === 0 || !doesSegmentIntersectAnyRedArea(safeStart, safeEnd, redAreas)) {
     return [safeStart, safeEnd];
   }
 
-  const obstacleNodes = buildSafeObstacleVertices(avoidAreas);
+  const obstacleNodes = buildSafeObstacleVertices(redAreas);
   const nodes: [number, number][] = [safeStart, ...obstacleNodes, safeEnd];
   const startIdx = 0;
   const endIdx = nodes.length - 1;
@@ -384,8 +469,8 @@ export function computeShortestCollisionFreePath(
 
       if (dist[u] + weight >= dist[v]) continue;
 
-      // Strictly forbid any edge that intersects ANY Avoid Area polygon
-      if (!doesSegmentIntersectAnyAvoidArea(uPt, vPt, avoidAreas)) {
+      // Strictly forbid any edge that intersects ANY Red Area polygon
+      if (!doesSegmentIntersectAnyRedArea(uPt, vPt, redAreas)) {
         dist[v] = dist[u] + weight;
         prev[v] = u;
       }
@@ -409,27 +494,27 @@ export function computeShortestCollisionFreePath(
 
 /**
  * Surgically inspect a polyline and replace any segment or contiguous sub-path
- * that enters or crosses any Avoid Area polygon with the shortest collision-free visibility-graph detour.
- * Guarantees 100% that the returned polyline has ZERO intersections with all Avoid Areas.
+ * that enters or crosses any Red Area polygon with the shortest collision-free visibility-graph detour.
+ * Guarantees 100% that the returned polyline has ZERO intersections with all Red Areas.
  */
-export function enforceStrictAvoidAreaAvoidance(
+export function enforceStrictRedAreaAvoidance(
   coords: [number, number][],
-  avoidAreas: AvoidArea[]
+  redAreas: RedArea[]
 ): [number, number][] {
-  if (avoidAreas.length === 0 || coords.length < 2) return coords;
+  if (redAreas.length === 0 || coords.length < 2) return coords;
 
-  // Ensure all vertices are outside Avoid Areas first
-  let current: [number, number][] = coords.map((pt) => ensurePointOutsideAvoidAreas(pt, avoidAreas));
+  // Ensure all vertices are outside Red Areas first
+  let current: [number, number][] = coords.map((pt) => ensurePointOutsideRedAreas(pt, redAreas));
 
-  // If the entire polyline already has zero intersections with all Avoid Areas, return immediately
-  if (findIntersectingAvoidAreas(current, avoidAreas).length === 0) {
+  // If the entire polyline already has zero intersections with all Red Areas, return immediately
+  if (findIntersectingRedAreas(current, redAreas).length === 0) {
     return current;
   }
 
-  // Iteratively repair any segment that intersects an Avoid Area by bridging safe anchors around it
+  // Iteratively repair any segment that intersects a Red Area by bridging safe anchors around it
   const maxPasses = 4;
   for (let pass = 0; pass < maxPasses; pass++) {
-    if (findIntersectingAvoidAreas(current, avoidAreas).length === 0) {
+    if (findIntersectingRedAreas(current, redAreas).length === 0) {
       break;
     }
 
@@ -442,14 +527,14 @@ export function enforceStrictAvoidAreaAvoidance(
 
       if (i === current.length - 1) break;
 
-      // Check if segment (current[i] -> current[i+1]) intersects any Avoid Area polygon
-      if (doesSegmentIntersectAnyAvoidArea(current[i], current[i + 1], avoidAreas)) {
+      // Check if segment (current[i] -> current[i+1]) intersects any Red Area polygon
+      if (doesSegmentIntersectAnyRedArea(current[i], current[i + 1], redAreas)) {
         // Look ahead to find the first safe vertex j > i whose onward path clears the obstacle
         let j = i + 1;
         while (
           j < current.length - 1 &&
-          (isPointInAnyAvoidArea(current[j], avoidAreas) ||
-            doesSegmentIntersectAnyAvoidArea(current[j], current[j + 1], avoidAreas))
+          (isPointInAnyRedArea(current[j], redAreas) ||
+            doesSegmentIntersectAnyRedArea(current[j], current[j + 1], redAreas))
         ) {
           j++;
         }
@@ -459,7 +544,7 @@ export function enforceStrictAvoidAreaAvoidance(
         const entryPt = current[i];
         const exitPt = current[exitIdx];
 
-        const detour = computeShortestCollisionFreePath(entryPt, exitPt, avoidAreas);
+        const detour = computeShortestCollisionFreePath(entryPt, exitPt, redAreas);
         // Append interior detour vertices + exitPt
         for (let k = 1; k < detour.length; k++) {
           repaired.push(detour[k]);
@@ -553,49 +638,49 @@ function synthesizeUrbanRoadPath(waypoints: [number, number][]): {
 
 /**
  * Full obstacle-avoiding route generator between `start` and `end`:
- * 1. Computes collision-free visibility waypoints around any Avoid Area polygons in the corridor.
+ * 1. Computes collision-free visibility waypoints around any Red Area polygons in the corridor.
  * 2. Requests an OSRM street route through those waypoints.
- * 3. If OSRM's road geometry still touches/crosses any Avoid Area polygon, applies
- *    `enforceStrictAvoidAreaAvoidance` so that every segment is 100% outside all Avoid Areas.
+ * 3. If OSRM's road geometry still touches/crosses any Red Area polygon, applies
+ *    `enforceStrictRedAreaAvoidance` so that every segment is 100% outside all Red Areas.
  */
 export async function computeObstacleAvoidingRoute(
   start: [number, number],
   end: [number, number],
-  avoidAreas: AvoidArea[],
+  redAreas: RedArea[],
   sidePreference: 'primary' | 'alternate' = 'primary'
 ): Promise<{
   coordinates: [number, number][];
-  avoidedAreaNames: string[];
+  avoidedRedAreaNames: string[];
   isDetour: boolean;
 }> {
-  const safeStart = ensurePointOutsideAvoidAreas(start, avoidAreas);
-  const safeEnd = ensurePointOutsideAvoidAreas(end, avoidAreas);
+  const safeStart = ensurePointOutsideRedAreas(start, redAreas);
+  const safeEnd = ensurePointOutsideRedAreas(end, redAreas);
 
   const avoidedSet = new Set<string>();
-  for (const avoid of findIntersectingAvoidAreas([safeStart, safeEnd], avoidAreas)) {
-    avoidedSet.add(avoid.name);
+  for (const red of findIntersectingRedAreas([safeStart, safeEnd], redAreas)) {
+    avoidedSet.add(red.name);
   }
 
   // Compute collision-free waypoints via Visibility Graph
   const visWaypoints = computeShortestCollisionFreePath(
     safeStart,
     safeEnd,
-    avoidAreas,
+    redAreas,
     sidePreference
   );
 
   // Query OSRM with the visibility waypoints
   const osrmResult = await fetchOSRMRoute(visWaypoints);
-  for (const avoid of findIntersectingAvoidAreas(osrmResult.coordinates, avoidAreas)) {
-    avoidedSet.add(avoid.name);
+  for (const red of findIntersectingRedAreas(osrmResult.coordinates, redAreas)) {
+    avoidedSet.add(red.name);
   }
 
-  // Enforce 100% strict Avoid Area polygon avoidance across every segment of the route
-  const strictCoords = enforceStrictAvoidAreaAvoidance(osrmResult.coordinates, avoidAreas);
+  // Enforce 100% strict Red Area polygon avoidance across every segment of the route
+  const strictCoords = enforceStrictRedAreaAvoidance(osrmResult.coordinates, redAreas);
 
   return {
     coordinates: strictCoords,
-    avoidedAreaNames: Array.from(avoidedSet),
+    avoidedRedAreaNames: Array.from(avoidedSet),
     isDetour: avoidedSet.size > 0 || visWaypoints.length > 2,
   };
 }
@@ -806,7 +891,7 @@ export function assignFleetsToRoutesByProximity(
 export async function computeApproachViaClosestPointOnRoute(
   startPt: [number, number],
   routeCoords: [number, number][],
-  avoidAreas: AvoidArea[],
+  redAreas: RedArea[],
   sidePreference: 'primary' | 'alternate' = 'primary',
   connectorCache?: Map<string, [number, number][]>
 ): Promise<[number, number][]> {
@@ -823,7 +908,7 @@ export async function computeApproachViaClosestPointOnRoute(
     const connectorRes = await computeObstacleAvoidingRoute(
       startPt,
       snap.point,
-      avoidAreas,
+      redAreas,
       sidePreference
     );
     connectorCoords = connectorRes.coordinates;
@@ -844,7 +929,7 @@ export async function computeApproachViaClosestPointOnRoute(
 export async function computeRejoinPathToClosestRoute(
   currentPos: [number, number],
   routes: ComputedRoute[],
-  avoidAreas: AvoidArea[],
+  redAreas: RedArea[],
   mode: 'to_pickup' | 'to_target'
 ): Promise<{
   route: ComputedRoute;
@@ -854,7 +939,7 @@ export async function computeRejoinPathToClosestRoute(
   const closest = findClosestEvacuationRoute(currentPos, routes);
   if (!closest) return null;
 
-  const activeAvoids = avoidAreas.filter((a) => !a.disabled);
+  const activeReds = redAreas.filter((a) => !a.disabled);
   const onRoutePortion =
     mode === 'to_pickup'
       ? buildRouteSuffixToPickup(closest.route.coordinates, closest.snap)
@@ -871,7 +956,7 @@ export async function computeRejoinPathToClosestRoute(
   const connectorRes = await computeObstacleAvoidingRoute(
     currentPos,
     closest.snap.point,
-    activeAvoids,
+    activeReds,
     'primary'
   );
 
@@ -889,10 +974,10 @@ export async function computeRejoinPathToClosestRoute(
 export async function computeDirectRouteToClosestTarget(
   currentPos: [number, number],
   targetAreas: TargetArea[],
-  avoidAreas: AvoidArea[]
+  redAreas: RedArea[]
 ): Promise<{ target: TargetArea; coordinates: [number, number][] }> {
   const activeTargets = targetAreas.filter((t) => !t.disabled);
-  const activeAvoids = avoidAreas.filter((a) => !a.disabled);
+  const activeReds = redAreas.filter((a) => !a.disabled);
   const candidates = activeTargets.length > 0 ? activeTargets : targetAreas;
 
   const sorted = [...candidates].sort((a, b) => {
@@ -909,7 +994,7 @@ export async function computeDirectRouteToClosestTarget(
   const result = await computeObstacleAvoidingRoute(
     currentPos,
     tgtCenter,
-    activeAvoids,
+    activeReds,
     'primary'
   );
 
@@ -945,15 +1030,234 @@ interface EvaccastV1ApiResponse {
 }
 
 /**
+ * Deterministically stringify all routing parameters (source, target, red areas,
+ * vehicles, capacities, populations, behaviors, speeds, load/unload rates, disabled states, etc.)
+ * so that even a single coordinate point or attribute change alters the serialized string.
+ */
+export function stringifyRoutingParameters(
+  sourceAreas: SourceArea[],
+  targetAreas: TargetArea[],
+  redAreas: RedArea[],
+  vehicleFleets: VehicleFleet[]
+): string {
+  const canonicalPayload = {
+    sourceAreas: sourceAreas.map((s) => ({
+      id: String(s.id),
+      name: String(s.name),
+      polygon: s.polygon.map((pt) => [Number(pt[0]), Number(pt[1])]),
+      population: Number(s.population),
+      behavior: {
+        compliant: Number(s.behavior.compliant),
+        'self-directed': Number(s.behavior['self-directed']),
+        disoriented: Number(s.behavior.disoriented),
+      },
+      disabled: Boolean(s.disabled),
+    })),
+    targetAreas: targetAreas.map((t) => ({
+      id: String(t.id),
+      name: String(t.name),
+      polygon: t.polygon.map((pt) => [Number(pt[0]), Number(pt[1])]),
+      capacity: Number(t.capacity),
+      disabled: Boolean(t.disabled),
+    })),
+    redAreas: redAreas.map((a) => ({
+      id: String(a.id),
+      name: String(a.name),
+      polygon: a.polygon.map((pt) => [Number(pt[0]), Number(pt[1])]),
+      ...(a.polygons && a.polygons.length > 1
+        ? {
+            polygons: a.polygons.map((ring) =>
+              ring.map((pt) => [Number(pt[0]), Number(pt[1])])
+            ),
+          }
+        : {}),
+      disabled: Boolean(a.disabled),
+    })),
+    vehicleFleets: vehicleFleets.map((v) => ({
+      id: String(v.id),
+      name: String(v.name),
+      type: String(v.type),
+      location: [Number(v.location[0]), Number(v.location[1])],
+      count: Number(v.count),
+      capacityPerUnit: Number(v.capacityPerUnit),
+      loadUnloadTimePerPersonSeconds: Number(v.loadUnloadTimePerPersonSeconds),
+      transitSpeedKmh: Number(v.transitSpeedKmh),
+    })),
+  };
+
+  return JSON.stringify(canonicalPayload);
+}
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function rotr32(x: number, n: number): number {
+  return (x >>> n) | (x << (32 - n));
+}
+
+/**
+ * Compute a deterministic 64-character lowercase hex SHA-256 hash string
+ * from the stringified routing parameters.
+ */
+export function computeRoutingParametersHash(stringifiedParameters: string): string {
+  const utf8 = new TextEncoder().encode(stringifiedParameters);
+  const bitLen = utf8.length * 8;
+  const totalBytes = Math.ceil((utf8.length + 9) / 64) * 64;
+  const padded = new Uint8Array(totalBytes);
+  padded.set(utf8);
+  padded[utf8.length] = 0x80;
+
+  const view = new DataView(padded.buffer);
+  const highBits = Math.floor(bitLen / 0x100000000);
+  const lowBits = bitLen >>> 0;
+  view.setUint32(totalBytes - 8, highBits, false);
+  view.setUint32(totalBytes - 4, lowBits, false);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+
+  const w = new Uint32Array(64);
+
+  for (let offset = 0; offset < totalBytes; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      w[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+      const S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+    .map((v) => v.toString(16).padStart(8, '0'))
+    .join('');
+}
+
+interface RoutingCacheLookupResponse {
+  ok: boolean;
+  hit: boolean;
+  hash: string;
+  algorithm: string;
+  folder: string;
+  path?: string;
+  routes?: ComputedRoute[];
+  createdAt?: string;
+}
+
+async function fetchCachedRoutingResult(
+  algorithm: RoutingAlgorithm,
+  hash: string,
+  signal?: AbortSignal
+): Promise<{ routes: ComputedRoute[]; path: string } | null> {
+  try {
+    const res = await fetch(
+      `/api/routing/cache?algorithm=${encodeURIComponent(algorithm)}&hash=${encodeURIComponent(hash)}`,
+      { method: 'GET', signal }
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as RoutingCacheLookupResponse;
+    if (data?.ok && data.hit && Array.isArray(data.routes)) {
+      return {
+        routes: data.routes,
+        path: data.path || `cache/routing/${data.folder}/${hash}.json`,
+      };
+    }
+  } catch {
+    // Non-fatal if cache endpoint is unreachable
+  }
+  return null;
+}
+
+async function storeCachedRoutingResult(
+  algorithm: RoutingAlgorithm,
+  hash: string,
+  stringifiedParameters: string,
+  routes: ComputedRoute[]
+): Promise<string | null> {
+  try {
+    const res = await fetch('/api/routing/cache', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        algorithm,
+        hash,
+        stringifiedParameters,
+        routes,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { ok?: boolean; saved?: boolean; path?: string };
+    if (data?.ok && data.saved) {
+      return data.path || null;
+    }
+  } catch {
+    // Non-fatal if cache storage fails
+  }
+  return null;
+}
+
+/**
  * Compute obstacle-avoiding vehicle evacuation routes and establish specific
  * Blue Square Pickup Locations on each enabled Source Area for all enabled Target Areas,
- * strictly avoiding all enabled Avoid Areas.
- * Supports selecting between 'Basic OSM' and 'evaccast_v1'.
+ * strictly avoiding all enabled Red Areas.
+ * Supports selecting between 'Basic OSM' and 'evaccast_v1' and maintains a separate
+ * on-disk cache per routing algorithm under `cache/routing/<algorithm>/<hash>.json`.
  */
 export async function computeAllEvacuationRoutes(
   sourceAreas: SourceArea[],
   targetAreas: TargetArea[],
-  avoidAreas: AvoidArea[],
+  redAreas: RedArea[],
   vehicleFleets: VehicleFleet[],
   algorithm: RoutingAlgorithm = 'Basic OSM',
   signal?: AbortSignal
@@ -964,7 +1268,7 @@ export async function computeAllEvacuationRoutes(
 
   const activeSources = sourceAreas.filter((s) => !s.disabled);
   const activeTargets = targetAreas.filter((t) => !t.disabled);
-  const activeAvoids = avoidAreas.filter((a) => !a.disabled);
+  const activeReds = redAreas.filter((a) => !a.disabled);
 
   const pushLog = (level: LogEntry['level'], message: string) => {
     logs.push({
@@ -978,7 +1282,7 @@ export async function computeAllEvacuationRoutes(
 
   pushLog(
     'ROUTING',
-    `[${algorithm}] Initiating evacuation route computation across ${activeSources.length} active source zones (${sourceAreas.length - activeSources.length} disabled), ${activeTargets.length} active shelters (${targetAreas.length - activeTargets.length} disabled), and ${activeAvoids.length} active avoid areas (${avoidAreas.length - activeAvoids.length} disabled).`
+    `[${algorithm}] Initiating evacuation route computation across ${activeSources.length} active source zones (${sourceAreas.length - activeSources.length} disabled), ${activeTargets.length} active shelters (${targetAreas.length - activeTargets.length} disabled), and ${activeReds.length} active red areas (${redAreas.length - activeReds.length} disabled).`
   );
 
   if (activeSources.length === 0) {
@@ -997,6 +1301,31 @@ export async function computeAllEvacuationRoutes(
     return { routes, logs };
   }
 
+  // 1. Create a hash string from the stringified version of all parameters
+  const stringifiedParameters = stringifyRoutingParameters(
+    sourceAreas,
+    targetAreas,
+    redAreas,
+    vehicleFleets
+  );
+  const paramHash = computeRoutingParametersHash(stringifiedParameters);
+
+  // 2. Check first if there is any content stored in the disk cache of this routing algorithm
+  const cachedResult = await fetchCachedRoutingResult(algorithm, paramHash, signal);
+  if (signal?.aborted) {
+    return { routes: [], logs };
+  }
+  if (cachedResult) {
+    pushLog(
+      'ROUTING',
+      `[${algorithm}] Cache HIT (${paramHash.slice(0, 12)}...): loaded ${cachedResult.routes.length} evacuation route(s) from ${cachedResult.path} without calling the routing algorithm.`
+    );
+    return {
+      routes: cachedResult.routes,
+      logs,
+    };
+  }
+
   const defaultDepot: [number, number] =
     vehicleFleets.length > 0
       ? vehicleFleets[0].location
@@ -1012,7 +1341,7 @@ export async function computeAllEvacuationRoutes(
         body: JSON.stringify({
           sourceAreas: activeSources,
           targetAreas: activeTargets,
-          avoidAreas: activeAvoids,
+          redAreas: activeReds,
         }),
         signal,
       });
@@ -1078,7 +1407,7 @@ export async function computeAllEvacuationRoutes(
         const approachCoords = await computeApproachViaClosestPointOnRoute(
           depot,
           p.coordinates,
-          activeAvoids,
+          activeReds,
           'primary',
           connectorCache
         );
@@ -1108,8 +1437,8 @@ export async function computeAllEvacuationRoutes(
           distanceMeters: distMeters,
           estimatedDurationSeconds: durationSec,
           assignedPopulation: assignedPop,
-          avoidedAreaNames: activeAvoids.map((a) => a.name),
-          isDetour: activeAvoids.length > 0,
+          avoidedRedAreaNames: activeReds.map((a) => a.name),
+          isDetour: activeReds.length > 0,
           vehicleFleetId: fleet?.id,
         });
 
@@ -1117,6 +1446,18 @@ export async function computeAllEvacuationRoutes(
           'ROUTING',
           `[evaccast_v1] Path #${i + 1}: Pickup [${p.pickupLocation[0]}, ${p.pickupLocation[1]}] in ${p.sourceName} -> Drop-Off [${p.dropOffLocation[0]}, ${p.dropOffLocation[1]}] in ${p.targetName} (${(distMeters / 1000).toFixed(2)} km, est. transit ${Math.floor(durationSec / 60)}m ${durationSec % 60}s @ ${speedKmh} km/h).`
         );
+      }
+
+      if (!signal?.aborted && routes.length > 0) {
+        const savedPath = await storeCachedRoutingResult(
+          algorithm,
+          paramHash,
+          stringifiedParameters,
+          routes
+        );
+        if (savedPath) {
+          pushLog('ROUTING', `[evaccast_v1] Stored routing output in disk cache: ${savedPath}`);
+        }
       }
 
       const minEvacInfo =
@@ -1149,7 +1490,7 @@ export async function computeAllEvacuationRoutes(
     pickupLocation: [number, number];
     pickupLabel: string;
     evacCoordinates: [number, number][];
-    avoidedAreaNames: string[];
+    avoidedRedAreaNames: string[];
     isDetour: boolean;
     assignedPopulation: number;
     sidePreference: 'primary' | 'alternate';
@@ -1185,14 +1526,14 @@ export async function computeAllEvacuationRoutes(
 
     // Establish 2 distinct Pickup Locations (Blue Squares) on this Source Area:
     // Pickup #1 (Primary Gate) & Pickup #2 (Secondary Gate)
-    const pickupAlpha = computeSpecificPickupPoint(source, tgtCenter, 0, activeAvoids);
-    const pickupBravo = computeSpecificPickupPoint(source, secTgtCenter, 1, activeAvoids);
+    const pickupAlpha = computeSpecificPickupPoint(source, tgtCenter, 0, activeReds);
+    const pickupBravo = computeSpecificPickupPoint(source, secTgtCenter, 1, activeReds);
 
     // --- CORRIDOR ALPHA (Pickup Alpha -> Primary Target Shelter) ---
     const evacAlpha = await computeObstacleAvoidingRoute(
       pickupAlpha,
       tgtCenter,
-      activeAvoids,
+      activeReds,
       'primary'
     );
     if (signal?.aborted) {
@@ -1207,7 +1548,7 @@ export async function computeAllEvacuationRoutes(
       pickupLocation: pickupAlpha,
       pickupLabel: `${source.name} — Pickup Square Alpha`,
       evacCoordinates: evacAlpha.coordinates,
-      avoidedAreaNames: evacAlpha.avoidedAreaNames,
+      avoidedRedAreaNames: evacAlpha.avoidedRedAreaNames,
       isDetour: evacAlpha.isDetour,
       assignedPopulation: Math.round(source.population * 0.6),
       sidePreference: 'primary',
@@ -1217,7 +1558,7 @@ export async function computeAllEvacuationRoutes(
     const evacBravo = await computeObstacleAvoidingRoute(
       pickupBravo,
       secTgtCenter,
-      activeAvoids,
+      activeReds,
       'alternate'
     );
     if (signal?.aborted) {
@@ -1232,7 +1573,7 @@ export async function computeAllEvacuationRoutes(
       pickupLocation: pickupBravo,
       pickupLabel: `${source.name} — Pickup Square Bravo`,
       evacCoordinates: evacBravo.coordinates,
-      avoidedAreaNames: evacBravo.avoidedAreaNames,
+      avoidedRedAreaNames: evacBravo.avoidedRedAreaNames,
       isDetour: evacBravo.isDetour,
       assignedPopulation: source.population - Math.round(source.population * 0.6),
       sidePreference: 'alternate',
@@ -1263,7 +1604,7 @@ export async function computeAllEvacuationRoutes(
     const approachCoordinates = await computeApproachViaClosestPointOnRoute(
       depot,
       corridor.evacCoordinates,
-      activeAvoids,
+      activeReds,
       corridor.sidePreference,
       connectorCache
     );
@@ -1289,20 +1630,32 @@ export async function computeAllEvacuationRoutes(
       distanceMeters: distMeters,
       estimatedDurationSeconds: durationSec,
       assignedPopulation: corridor.assignedPopulation,
-      avoidedAreaNames: corridor.avoidedAreaNames,
+      avoidedRedAreaNames: corridor.avoidedRedAreaNames,
       isDetour: corridor.isDetour,
       vehicleFleetId: fleet?.id,
     });
 
     pushLog(
       'ROUTING',
-      `Established Pickup Square ${gateName} [Blue Square] at [${corridor.pickupLocation[0]}, ${corridor.pickupLocation[1]}] on ${corridor.source.name} -> ${corridor.target.name} (${(distMeters / 1000).toFixed(2)} km, est. transit ${Math.floor(durationSec / 60)}m ${durationSec % 60}s @ ${speedKmh} km/h, 0 Avoid Area crossings).`
+      `Established Pickup Square ${gateName} [Blue Square] at [${corridor.pickupLocation[0]}, ${corridor.pickupLocation[1]}] on ${corridor.source.name} -> ${corridor.target.name} (${(distMeters / 1000).toFixed(2)} km, est. transit ${Math.floor(durationSec / 60)}m ${durationSec % 60}s @ ${speedKmh} km/h, 0 Red Area crossings).`
     );
+  }
+
+  if (!signal?.aborted && routes.length > 0) {
+    const savedPath = await storeCachedRoutingResult(
+      algorithm,
+      paramHash,
+      stringifiedParameters,
+      routes
+    );
+    if (savedPath) {
+      pushLog('ROUTING', `[${algorithm}] Stored routing output in disk cache: ${savedPath}`);
+    }
   }
 
   pushLog(
     'ROUTING',
-    `Route computation complete: ${routes.length} Blue Square Pickup Locations established across all active Source Areas (all routes verified 100% Avoid Area free).`
+    `Route computation complete: ${routes.length} Blue Square Pickup Locations established across all active Source Areas (all routes verified 100% Red Area free).`
   );
 
   return { routes, logs };

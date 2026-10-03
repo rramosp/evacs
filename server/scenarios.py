@@ -5,7 +5,7 @@ Each .pkl file contains a dictionary with:
   - 'name': str
   - 'source_areas': list of dicts ('name', 'population', 'population-distribution', 'shape', ...)
   - 'target_areas': list of dicts ('name', 'capacity', 'shape', ...)
-  - 'avoid_areas': list of dicts ('name', 'shape', ...)
+  - 'red_areas': list of dicts ('name', 'shape', ...)
   - 'vehicle_fleets': list of dicts ('name', 'count', 'capacity_per_unit', 'load_unload_secs_per_person', 'speed', 'lat', 'lon', ...)
 All geometric objects ('shape') are Shapely geometries (Polygon, MultiPolygon, LineString, MultiLineString) in (lon, lat) WGS84.
 Outputs JSON in EPSG:4326 ([lat, lng]) order for the frontend.
@@ -218,10 +218,11 @@ def load_scenario_pkl(filepath):
                 }
             )
 
-    # 3. Avoid Areas
-    avoid_areas = []
-    for idx, item in enumerate(raw.get("avoid_areas") or []):
-        base_name = str(item.get("name") or f"avoid_{idx:02d}")
+    # 3. Red Areas
+    red_areas = []
+    raw_reds = raw.get("red_areas") if "red_areas" in raw else raw.get("avoid_areas")
+    for idx, item in enumerate(raw_reds or []):
+        base_name = str(item.get("name") or f"red_{idx:02d}")
         parts = extract_polygons_lat_lng(item.get("shape"))
         if not parts:
             continue
@@ -230,8 +231,8 @@ def load_scenario_pkl(filepath):
                 all_lats.append(lat)
                 all_lons.append(lon)
             part_name = base_name if len(parts) == 1 else f"{base_name} ({p_idx + 1})"
-            part_id = f"{stem}-avoid-{idx}" if len(parts) == 1 else f"{stem}-avoid-{idx}-{p_idx}"
-            avoid_areas.append(
+            part_id = f"{stem}-red-{idx}" if len(parts) == 1 else f"{stem}-red-{idx}-{p_idx}"
+            red_areas.append(
                 {
                     "id": part_id,
                     "name": part_name,
@@ -292,7 +293,7 @@ def load_scenario_pkl(filepath):
         "zoom": zoom,
         "sourceAreas": source_areas,
         "targetAreas": target_areas,
-        "avoidAreas": avoid_areas,
+        "redAreas": red_areas,
         "vehicleFleets": vehicle_fleets,
     }
 

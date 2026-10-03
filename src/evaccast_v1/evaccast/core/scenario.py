@@ -6,7 +6,7 @@ Bokeh UI's "Export scenario"/"Import scenario" buttons
 
 That same "Import scenario" file input also accepts a second, unrelated
 shape: a plain routing request (evaccast.api.v1.demo_http.RouteRequest) -
-"sources"/"sinks" point lists plus an "avoid_geojson" obstacle group,
+"sources"/"sinks" point lists plus a "red_geojson" obstacle group,
 instead of filter trees. is_point_request()/source_target_states_from_points()
 below turn that shape into the same SelectionState pair this module's own
 apply_scenario() produces, so Source/Target work identically either way;

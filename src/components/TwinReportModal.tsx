@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   SourceArea,
   TargetArea,
-  AvoidArea,
+  RedArea,
   VehicleFleet,
   ComputedRoute,
   PickupLocationState,
@@ -41,7 +41,7 @@ interface TwinReportModalProps {
   twinSpeed: number;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
-  avoidAreas: AvoidArea[];
+  redAreas: RedArea[];
   vehicleFleets: VehicleFleet[];
   computedRoutes: ComputedRoute[];
   clusters: SourceInternalCluster[];
@@ -86,7 +86,7 @@ export const TwinReportModal: React.FC<TwinReportModalProps> = ({
   twinSpeed,
   sourceAreas,
   targetAreas,
-  avoidAreas,
+  redAreas,
   vehicleFleets,
   computedRoutes,
   clusters,
@@ -360,6 +360,37 @@ export const TwinReportModal: React.FC<TwinReportModalProps> = ({
 
   const detourRoutesCount = computedRoutes.filter((r) => r.isDetour).length;
 
+  // Build clean, monotonic time-series for People Evacuated vs. Time chart
+  const chartTimeSeries = (() => {
+    const raw =
+      telemetryStats?.evacuationTimeSeries && telemetryStats.evacuationTimeSeries.length > 0
+        ? [...telemetryStats.evacuationTimeSeries]
+        : [{ timeSeconds: 0, evacuatedCount: 0 }];
+    const pts: { timeSeconds: number; evacuatedCount: number }[] = [];
+    if (raw[0].timeSeconds > 0) {
+      pts.push({ timeSeconds: 0, evacuatedCount: 0 });
+    }
+    for (const pt of raw) {
+      const t = Math.max(0, Math.round(pt.timeSeconds));
+      const c = Math.max(0, Math.round(pt.evacuatedCount));
+      if (pts.length > 0 && pts[pts.length - 1].timeSeconds === t) {
+        pts[pts.length - 1] = { timeSeconds: t, evacuatedCount: Math.max(pts[pts.length - 1].evacuatedCount, c) };
+      } else {
+        pts.push({ timeSeconds: t, evacuatedCount: c });
+      }
+    }
+    const endT = Math.max(
+      Math.round(elapsedTwinSeconds),
+      pts[pts.length - 1]?.timeSeconds || 0
+    );
+    if (pts[pts.length - 1].timeSeconds === endT) {
+      pts[pts.length - 1] = { timeSeconds: endT, evacuatedCount: totalEvacuated };
+    } else {
+      pts.push({ timeSeconds: endT, evacuatedCount: totalEvacuated });
+    }
+    return pts;
+  })();
+
   // Export handlers (JSON & CSV)
   const handleDownloadJsonReport = () => {
     const payload = {
@@ -386,6 +417,7 @@ export const TwinReportModal: React.FC<TwinReportModalProps> = ({
         evacuationThroughputPerMinute: Number(evacuationRatePerMin.toFixed(2)),
         totalCompletedVehicleTrips: telemetryStats?.totalCompletedVehicleTrips || 0,
       },
+      evacuationTimeSeries: chartTimeSeries,
       populationBehaviorBreakdown: behaviors.map((b) => ({
         behavior: b,
         initialPopulation: initialByBehavior[b],
@@ -839,6 +871,289 @@ export const TwinReportModal: React.FC<TwinReportModalProps> = ({
                 </div>
               </div>
             </div>
+          </section>
+
+          {/* 1b. People Evacuated vs. Time Chart */}
+          <section
+            id="report-evacuation-time-chart-section"
+            style={{
+              background: 'rgba(15, 23, 42, 0.78)',
+              border: '1px solid rgba(148, 163, 184, 0.25)',
+              borderRadius: '10px',
+              padding: '14px 16px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: '10px',
+                flexWrap: 'wrap',
+                gap: '8px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <TrendingUp size={16} color="#10b981" />
+                <span style={{ fontSize: '0.88rem', fontWeight: 700, color: '#f8fafc' }}>
+                  People Evacuated vs. Time
+                </span>
+              </div>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '14px',
+                  fontSize: '0.73rem',
+                  color: '#cbd5e1',
+                }}
+              >
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                  <span
+                    style={{
+                      width: '14px',
+                      height: '3px',
+                      background: '#10b981',
+                      borderRadius: '2px',
+                      display: 'inline-block',
+                    }}
+                  />
+                  Evacuated ({totalEvacuated.toLocaleString()})
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                  <span
+                    style={{
+                      width: '14px',
+                      height: '0px',
+                      borderTop: '2px dashed #38bdf8',
+                      display: 'inline-block',
+                    }}
+                  />
+                  Total Scenario Population ({totalInitialPopulation.toLocaleString()})
+                </span>
+              </div>
+            </div>
+
+            {(() => {
+              const svgWidth = 800;
+              const svgHeight = 250;
+              const padLeft = 66;
+              const padRight = 28;
+              const padTop = 26;
+              const padBottom = 44;
+              const plotW = svgWidth - padLeft - padRight;
+              const plotH = svgHeight - padTop - padBottom;
+
+              const lastSeriesTime =
+                chartTimeSeries.length > 0
+                  ? chartTimeSeries[chartTimeSeries.length - 1].timeSeconds
+                  : 0;
+              const maxTimeSec = Math.max(60, Math.round(elapsedTwinSeconds), lastSeriesTime);
+              const maxPop = Math.max(1, totalInitialPopulation, totalEvacuated);
+              const yDomainMax = Math.ceil(maxPop * 1.12);
+
+              const toX = (tSec: number) =>
+                padLeft + Math.min(1, Math.max(0, tSec / maxTimeSec)) * plotW;
+              const toY = (count: number) =>
+                padTop + plotH - Math.min(1, Math.max(0, count / yDomainMax)) * plotH;
+
+              const yTotalLine = toY(totalInitialPopulation);
+
+              const yTicks = [0, 0.25, 0.5, 0.75, 1].map((frac) => Math.round(frac * maxPop));
+              const uniqueYTicks = Array.from(new Set(yTicks));
+
+              const xTickFracs = [0, 0.2, 0.4, 0.6, 0.8, 1];
+              const xTicks = xTickFracs.map((frac) => Math.round(frac * maxTimeSec));
+              const uniqueXTicks = Array.from(new Set(xTicks));
+
+              const polylinePoints = chartTimeSeries
+                .map((pt) => `${toX(pt.timeSeconds).toFixed(1)},${toY(pt.evacuatedCount).toFixed(1)}`)
+                .join(' ');
+
+              const firstX = toX(chartTimeSeries[0]?.timeSeconds ?? 0).toFixed(1);
+              const lastPt = chartTimeSeries[chartTimeSeries.length - 1] ?? {
+                timeSeconds: 0,
+                evacuatedCount: 0,
+              };
+              const lastX = toX(lastPt.timeSeconds).toFixed(1);
+              const lastY = toY(lastPt.evacuatedCount).toFixed(1);
+              const baselineY = (padTop + plotH).toFixed(1);
+              const areaPath = `M ${firstX},${baselineY} L ${polylinePoints
+                .split(' ')
+                .join(' L ')} L ${lastX},${baselineY} Z`;
+
+              return (
+                <div
+                  style={{
+                    background: 'rgba(2, 6, 23, 0.55)',
+                    border: '1px solid rgba(51, 65, 85, 0.65)',
+                    borderRadius: '8px',
+                    padding: '10px 12px 6px 12px',
+                  }}
+                >
+                  <svg
+                    id="report-evacuation-time-chart"
+                    viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                    style={{ width: '100%', height: 'auto', maxHeight: '260px', display: 'block' }}
+                    role="img"
+                    aria-label="Chart of number of people evacuated as a function of time with total scenario population horizontal line"
+                  >
+                    <defs>
+                      <linearGradient id="evacAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#10b981" stopOpacity="0.38" />
+                        <stop offset="100%" stopColor="#10b981" stopOpacity="0.03" />
+                      </linearGradient>
+                    </defs>
+
+                    {/* Horizontal grid lines and Y-axis tick labels */}
+                    {uniqueYTicks.map((val) => {
+                      const y = toY(val);
+                      return (
+                        <g key={`y-tick-${val}`}>
+                          <line
+                            x1={padLeft}
+                            y1={y}
+                            x2={padLeft + plotW}
+                            y2={y}
+                            stroke="rgba(148, 163, 184, 0.14)"
+                            strokeWidth="1"
+                          />
+                          <text
+                            x={padLeft - 8}
+                            y={y + 4}
+                            textAnchor="end"
+                            fill="#94a3b8"
+                            fontSize="11"
+                            fontFamily="monospace"
+                          >
+                            {val.toLocaleString()}
+                          </text>
+                        </g>
+                      );
+                    })}
+
+                    {/* Vertical grid lines and X-axis tick labels */}
+                    {uniqueXTicks.map((tSec) => {
+                      const x = toX(tSec);
+                      return (
+                        <g key={`x-tick-${tSec}`}>
+                          <line
+                            x1={x}
+                            y1={padTop}
+                            x2={x}
+                            y2={padTop + plotH}
+                            stroke="rgba(148, 163, 184, 0.12)"
+                            strokeWidth="1"
+                          />
+                          <text
+                            x={x}
+                            y={padTop + plotH + 16}
+                            textAnchor="middle"
+                            fill="#94a3b8"
+                            fontSize="11"
+                            fontFamily="monospace"
+                          >
+                            {formatMMSS(tSec)}
+                          </text>
+                        </g>
+                      );
+                    })}
+
+                    {/* Plot axes */}
+                    <line
+                      x1={padLeft}
+                      y1={padTop}
+                      x2={padLeft}
+                      y2={padTop + plotH}
+                      stroke="#475569"
+                      strokeWidth="1.5"
+                    />
+                    <line
+                      x1={padLeft}
+                      y1={padTop + plotH}
+                      x2={padLeft + plotW}
+                      y2={padTop + plotH}
+                      stroke="#475569"
+                      strokeWidth="1.5"
+                    />
+
+                    {/* Horizontal line representing Total Scenario Population */}
+                    <line
+                      id="report-chart-total-population-line"
+                      x1={padLeft}
+                      y1={yTotalLine}
+                      x2={padLeft + plotW}
+                      y2={yTotalLine}
+                      stroke="#38bdf8"
+                      strokeWidth="2"
+                      strokeDasharray="6 4"
+                    />
+                    <text
+                      x={padLeft + plotW - 6}
+                      y={Math.max(padTop + 12, yTotalLine - 6)}
+                      textAnchor="end"
+                      fill="#38bdf8"
+                      fontSize="11"
+                      fontWeight="bold"
+                      fontFamily="monospace"
+                    >
+                      Total Population: {totalInitialPopulation.toLocaleString()}
+                    </text>
+
+                    {/* Area under evacuated curve */}
+                    <path
+                      id="report-chart-evacuated-area"
+                      d={areaPath}
+                      fill="url(#evacAreaGrad)"
+                    />
+
+                    {/* People Evacuated vs. Time polyline */}
+                    <polyline
+                      id="report-chart-evacuated-line"
+                      fill="none"
+                      stroke="#10b981"
+                      strokeWidth="2.5"
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                      points={polylinePoints}
+                    />
+
+                    {/* Endpoint marker */}
+                    <circle
+                      cx={lastX}
+                      cy={lastY}
+                      r="4.5"
+                      fill="#10b981"
+                      stroke="#022c22"
+                      strokeWidth="1.5"
+                    />
+
+                    {/* Axis titles */}
+                    <text
+                      x={padLeft + plotW / 2}
+                      y={svgHeight - 6}
+                      textAnchor="middle"
+                      fill="#cbd5e1"
+                      fontSize="11.5"
+                      fontWeight="600"
+                    >
+                      Time (MM:SS)
+                    </text>
+                    <text
+                      x={16}
+                      y={padTop + plotH / 2}
+                      textAnchor="middle"
+                      fill="#cbd5e1"
+                      fontSize="11.5"
+                      fontWeight="600"
+                      transform={`rotate(-90 16 ${padTop + plotH / 2})`}
+                    >
+                      People Evacuated
+                    </text>
+                  </svg>
+                </div>
+              );
+            })()}
           </section>
 
           {/* 2. Population Behaviour Breakdown Table (Compliant, Self-Directed, Disoriented) */}
@@ -1640,7 +1955,7 @@ export const TwinReportModal: React.FC<TwinReportModalProps> = ({
                 </div>
               </div>
 
-              {/* Corridor & Avoid Area Avoidance Summary */}
+              {/* Corridor & Red Area Avoidance Summary */}
               <div
                 style={{
                   padding: '9px 11px',
@@ -1658,8 +1973,8 @@ export const TwinReportModal: React.FC<TwinReportModalProps> = ({
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <ShieldAlert size={16} style={{ color: '#f87171', flexShrink: 0 }} />
                   <span>
-                    <strong>Avoid Area Avoidance:</strong>{' '}
-                    {avoidAreas.filter((a) => !a.disabled).length} active Avoid Areas
+                    <strong>Red Area Avoidance:</strong>{' '}
+                    {redAreas.filter((a) => !a.disabled).length} active Red Areas
                     enforced; <strong>{detourRoutesCount}</strong> of {computedRoutes.length}{' '}
                     corridors dynamically detoured with zero polygon intersection.
                   </span>

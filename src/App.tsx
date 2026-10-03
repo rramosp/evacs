@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   SourceArea,
   TargetArea,
-  AvoidArea,
+  RedArea,
   VehicleFleet,
   ComputedRoute,
   PickupLocationState,
@@ -22,6 +22,7 @@ import {
   BrusselsMetroStationFeature,
   BrusselsMetroConfig,
   RoutingAlgorithm,
+  DataOverlayLayer,
 } from './types/evacuation';
 import { PresetScenarioData } from './data/presets';
 import { BRUSSELS_METRO_INITIAL_DATA } from './data/brusselsMetroData';
@@ -60,11 +61,16 @@ export function App() {
   const [selectedPreset, setSelectedPreset] = useState<PresetScenarioId>('custom');
   const [mapCenter, setMapCenter] = useState<[number, number]>([50.8503, 4.3517]);
   const [mapZoom, setMapZoom] = useState<number>(12);
+  const [mapFocusTarget, setMapFocusTarget] = useState<{
+    position: [number, number];
+    zoom: number;
+    requestId: number;
+  } | null>(null);
 
   // Core domain entities (populated dynamically from /api/scenarios on startup)
   const [sourceAreas, setSourceAreas] = useState<SourceArea[]>([]);
   const [targetAreas, setTargetAreas] = useState<TargetArea[]>([]);
-  const [avoidAreas, setAvoidAreas] = useState<AvoidArea[]>([]);
+  const [redAreas, setRedAreas] = useState<RedArea[]>([]);
   const [vehicleFleets, setVehicleFleets] = useState<VehicleFleet[]>([]);
 
   // Track baseline initial populations for each Source Area so Reset / Post-Finish Compute restores them
@@ -132,13 +138,32 @@ export function App() {
     trainCapacity: 300,
   });
 
+  // Built-in Google Maps Satellite tile server overlay placed at the top of the Overlays list (initially hidden)
+  const googleSatelliteDefault: DataOverlayLayer = {
+    id: 'google-satellite',
+    name: 'Google Satellite',
+    fileName: 'Google Maps Satellite Tile Server',
+    format: 'tile',
+    color: '#10b981',
+    visible: false,
+    tileUrl: 'https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+    subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+    attribution: '&copy; Google Maps Satellite',
+  };
+
+  // Independent overlay layers: 'Google Satellite' at top + GeoJSON / GeoTIFF layers from data/overlays (all initially hidden)
+  const [dataOverlays, setDataOverlays] = useState<DataOverlayLayer[]>([
+    googleSatelliteDefault,
+  ]);
+
   // Dynamically load Preset Scenarios from data/scenarios/*.pkl via server endpoint on application startup
+  // while keeping 'Custom / Blank Scenario' ('custom') as the default active scenario
   useEffect(() => {
     let cancelled = false;
 
     fetch('/api/scenarios')
       .then((r) => r.json())
-      .then(async (data) => {
+      .then((data) => {
         if (cancelled) return;
         if (data?.ok && Array.isArray(data.scenarios) && data.scenarios.length > 0) {
           const scenarios = data.scenarios as PresetScenarioData[];
@@ -148,50 +173,6 @@ export function App() {
           }
           setPresetScenarios(map);
 
-          const firstScenario = scenarios[0];
-          const freshSources = firstScenario.sourceAreas.map((s) => ({
-            ...s,
-            disabled: false,
-          }));
-          const freshTargets = firstScenario.targetAreas.map((t) => ({
-            ...t,
-            currentOccupancy: 0,
-            disabled: false,
-          }));
-          const freshAvoids = firstScenario.avoidAreas.map((a) => ({
-            ...a,
-            disabled: false,
-          }));
-
-          baselinePopulationsRef.current = Object.fromEntries(
-            freshSources.map((s) => [s.id, s.population])
-          );
-
-          const initialTwin = initializeTwinState(
-            [],
-            freshSources,
-            freshTargets,
-            firstScenario.vehicleFleets
-          );
-
-          setSelectedPreset(firstScenario.id);
-          setMapCenter(firstScenario.center);
-          setMapZoom(firstScenario.zoom);
-          setSourceAreas(freshSources);
-          setTargetAreas(freshTargets);
-          setAvoidAreas(freshAvoids);
-          setVehicleFleets(firstScenario.vehicleFleets);
-          setComputedRoutes([]);
-          setClusters(initialTwin.clusters);
-          setPickupStates(initialTwin.pickupStates);
-          setVehicles(initialTwin.vehicles);
-          setHeatmapPoints(initialTwin.heatmapPoints);
-          setTelemetryStats(initialTwin.telemetryStats);
-          setTotalEvacuated(0);
-          setTotalInTransit(0);
-          setTotalRemainingAtSource(initialTwin.totalRemainingAtSource);
-          setTotalWaitingAtPickups(0);
-
           const nowFormatted = new Date().toLocaleTimeString();
           setLogs((prev) => [
             ...prev,
@@ -200,57 +181,9 @@ export function App() {
               timestamp: nowFormatted,
               twinTimeFormatted: '00:00',
               level: 'INFO',
-              message: `Dynamically loaded ${scenarios.length} scenario(s) from data/scenarios/*.pkl. Active scenario: "${firstScenario.name}" (${freshSources.length} sources, ${freshTargets.length} shelters, ${freshAvoids.length} avoid areas, ${firstScenario.vehicleFleets.length} vehicle fleets).`,
+              message: `Dynamically loaded ${scenarios.length} preset scenario(s) from data/scenarios/*.pkl. Active scenario: "Custom / Blank Scenario".`,
             },
           ]);
-
-          // Compute initial evacuation routes for the dynamically loaded startup scenario
-          const activeSources = freshSources.filter((s) => !s.disabled);
-          const activeTargets = freshTargets.filter((t) => !t.disabled);
-          if (activeSources.length > 0 && activeTargets.length > 0) {
-            setIsComputingRoutes(true);
-            try {
-              const routeResult = await computeAllEvacuationRoutes(
-                freshSources,
-                freshTargets,
-                freshAvoids,
-                firstScenario.vehicleFleets
-              );
-              if (cancelled) return;
-              setComputedRoutes(routeResult.routes);
-              setLogs((prev) => [...prev, ...routeResult.logs]);
-
-              const routedTwin = initializeTwinState(
-                routeResult.routes,
-                freshSources,
-                freshTargets,
-                firstScenario.vehicleFleets
-              );
-              setClusters(routedTwin.clusters);
-              setPickupStates(routedTwin.pickupStates);
-              setVehicles(routedTwin.vehicles);
-              setHeatmapPoints(routedTwin.heatmapPoints);
-              setTelemetryStats(routedTwin.telemetryStats);
-              setTotalRemainingAtSource(routedTwin.totalRemainingAtSource);
-            } catch (err) {
-              if (!cancelled) {
-                setLogs((prev) => [
-                  ...prev,
-                  {
-                    id: `log-startup-err-${Date.now()}`,
-                    timestamp: new Date().toLocaleTimeString(),
-                    twinTimeFormatted: '00:00',
-                    level: 'WARN',
-                    message: `Initial route computation encountered an error: ${String(err)}`,
-                  },
-                ]);
-              }
-            } finally {
-              if (!cancelled) {
-                setIsComputingRoutes(false);
-              }
-            }
-          }
         }
       })
       .catch((err) => {
@@ -289,6 +222,151 @@ export function App() {
         // Fallback to BRUSSELS_METRO_INITIAL_DATA generated from the same parquet files
       });
   }, []);
+
+  // Load independent GeoJSON / GeoTIFF overlay layers from data/overlays on mount (all initially hidden)
+  useEffect(() => {
+    fetch('/api/overlays')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && Array.isArray(data.overlays)) {
+          const fileLayers: DataOverlayLayer[] = data.overlays.map(
+            (ov: Omit<DataOverlayLayer, 'visible'>) => ({
+              ...ov,
+              visible: false,
+            })
+          );
+          setDataOverlays((prev) => {
+            const existingGoogleSat =
+              prev.find((l) => l.id === 'google-satellite') ?? googleSatelliteDefault;
+            return [existingGoogleSat, ...fileLayers];
+          });
+        }
+      })
+      .catch(() => {
+        // Non-fatal if no overlays available; 'Google Satellite' remains at the top of the list
+      });
+  }, []);
+
+  const handleToggleDataOverlayVisibility = useCallback(
+    (id: string) => {
+      setDataOverlays((prev) =>
+        prev.map((layer) => {
+          if (layer.id !== id) return layer;
+          const nextVisible = !layer.visible;
+          const mins = Math.floor(elapsedTwinSeconds / 60);
+          const secs = Math.floor(elapsedTwinSeconds % 60);
+          const twinTimeFormatted = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+          setLogs((prevLogs) => [
+            ...prevLogs,
+            {
+              id: `log-overlay-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              timestamp: new Date().toLocaleTimeString(),
+              twinTimeFormatted,
+              level: 'INFO',
+              message: `Overlay layer "${layer.name}" (${layer.fileName}): map visibility ${
+                nextVisible ? 'ENABLED' : 'HIDDEN'
+              }.`,
+            },
+          ]);
+          return { ...layer, visible: nextVisible };
+        })
+      );
+    },
+    [elapsedTwinSeconds]
+  );
+
+  const handleAddOverlayAsRedArea = (layer: DataOverlayLayer, simplified: boolean = false) => {
+    if (isTwinning) {
+      appendLog('WARN', 'Pause twin before adding a Red Area.');
+      return;
+    }
+    const sourceGeojson = simplified ? layer.simplifiedGeojson ?? layer.geojson : layer.geojson;
+    if (layer.format !== 'geojson' || !sourceGeojson) {
+      appendLog('WARN', `Overlay "${layer.name}" has no GeoJSON polygon geometry to add as a Red Area.`);
+      return;
+    }
+
+    const rings: [number, number][][] = [];
+
+    const processCoordsRing = (rawRing: number[][]) => {
+      if (!Array.isArray(rawRing) || rawRing.length < 3) return;
+      let pts: [number, number][] = rawRing
+        .filter((c) => Array.isArray(c) && c.length >= 2 && Number.isFinite(c[0]) && Number.isFinite(c[1]))
+        .map((c) => [Number(c[1]), Number(c[0])]);
+      if (
+        pts.length > 3 &&
+        pts[0][0] === pts[pts.length - 1][0] &&
+        pts[0][1] === pts[pts.length - 1][1]
+      ) {
+        pts = pts.slice(0, -1);
+      }
+      if (pts.length >= 3) {
+        rings.push(pts);
+      }
+    };
+
+    const visitGeoJson = (obj: unknown) => {
+      if (!obj || typeof obj !== 'object') return;
+      const g = obj as Record<string, unknown>;
+      const gType = g.type;
+      if (gType === 'FeatureCollection' && Array.isArray(g.features)) {
+        g.features.forEach(visitGeoJson);
+      } else if (gType === 'Feature' && g.geometry) {
+        visitGeoJson(g.geometry);
+      } else if (gType === 'GeometryCollection' && Array.isArray(g.geometries)) {
+        g.geometries.forEach(visitGeoJson);
+      } else if (gType === 'Polygon' && Array.isArray(g.coordinates)) {
+        const polyRings = g.coordinates as number[][][];
+        if (polyRings.length > 0) {
+          processCoordsRing(polyRings[0]);
+        }
+      } else if (gType === 'MultiPolygon' && Array.isArray(g.coordinates)) {
+        const multiPoly = g.coordinates as number[][][][];
+        multiPoly.forEach((polyRings) => {
+          if (Array.isArray(polyRings) && polyRings.length > 0) {
+            processCoordsRing(polyRings[0]);
+          }
+        });
+      }
+    };
+
+    visitGeoJson(sourceGeojson);
+
+    if (rings.length === 0) {
+      appendLog('WARN', `Overlay "${layer.name}" does not contain any valid Polygon geometry.`);
+      return;
+    }
+
+    // Sort rings so the primary ring (`polygon`) is the largest by bounding box / vertex count
+    rings.sort((a, b) => b.length - a.length);
+
+    const baseName = simplified ? `${layer.name} (simplified)` : layer.name;
+    const existingCount = redAreas.filter(
+      (r) => r.name === baseName || r.name.startsWith(`${baseName} (`)
+    ).length;
+    const redName = existingCount === 0 ? baseName : `${baseName} (${existingCount + 1})`;
+
+    const newRed: RedArea = {
+      id: `red-${Date.now()}`,
+      name: redName,
+      polygon: rings[0],
+      ...(rings.length > 1 ? { polygons: rings } : {}),
+      disabled: false,
+    };
+
+    setRedAreas((prev) => [...prev, newRed]);
+    setSelectedEntityId(newRed.id);
+    setHasPendingTopologyChanges(true);
+    appendLog(
+      'WARN',
+      `Added GeoJSON overlay "${newRed.name}" as a${
+        simplified ? ' simplified' : ''
+      } Red Area (${rings.length} polygon${
+        rings.length > 1 ? 's' : ''
+      }). Routes will detour around it on recomputation.`,
+      elapsedTwinSeconds
+    );
+  };
 
   // Determine whether any Source or Target Area falls within the Region of Brussels
   const hasBrusselsAreas = useMemo(
@@ -419,7 +497,7 @@ export function App() {
         currentOccupancy: 0,
         disabled: false,
       }));
-      const freshAvoids = data.avoidAreas.map((a) => ({
+      const freshReds = data.redAreas.map((a) => ({
         ...a,
         disabled: false,
       }));
@@ -434,7 +512,7 @@ export function App() {
       setMapZoom(data.zoom);
       setSourceAreas(freshSources);
       setTargetAreas(freshTargets);
-      setAvoidAreas(freshAvoids);
+      setRedAreas(freshReds);
       setVehicleFleets(data.vehicleFleets);
       setComputedRoutes([]);
       setClusters(initialTwin.clusters);
@@ -450,13 +528,13 @@ export function App() {
 
       appendLog(
         'INFO',
-        `Loaded preset scenario: "${data.name}" (${freshSources.length} sources, ${freshTargets.length} shelters, ${freshAvoids.length} avoid areas, ${data.vehicleFleets.length} vehicle fleets).`
+        `Loaded preset scenario: "${data.name}" (${freshSources.length} sources, ${freshTargets.length} shelters, ${freshReds.length} red areas, ${data.vehicleFleets.length} vehicle fleets).`
       );
     } else {
       baselinePopulationsRef.current = {};
       setSourceAreas([]);
       setTargetAreas([]);
-      setAvoidAreas([]);
+      setRedAreas([]);
       setVehicleFleets([]);
       setComputedRoutes([]);
       setClusters([]);
@@ -486,7 +564,7 @@ export function App() {
 
   // Run OSRM + Obstacle Avoidance Route Computation & Establish Blue Square Pickups
   // Note: Only land routes over streets with the configured vehicleFleets are computed here;
-  // Brussels Metro lines remain static and unaffected by avoidAreas.
+  // Brussels Metro lines remain static and unaffected by redAreas.
   const handleComputeRoutes = useCallback(async () => {
     if (isTwinning || isTwinInProgress) {
       appendLog(
@@ -538,7 +616,7 @@ export function App() {
       const result = await computeAllEvacuationRoutes(
         effectiveSourceAreas,
         targetAreas,
-        avoidAreas,
+        redAreas,
         vehicleFleets,
         routingAlgorithm,
         abortController.signal
@@ -572,7 +650,7 @@ export function App() {
             directRoutesToClosestTarget[veh.id] = await computeDirectRouteToClosestTarget(
               veh.currentPosition,
               targetAreas,
-              avoidAreas
+              redAreas
             );
           }
 
@@ -599,7 +677,7 @@ export function App() {
             const rejoin = await computeRejoinPathToClosestRoute(
               veh.currentPosition,
               result.routes,
-              avoidAreas,
+              redAreas,
               veh.currentOccupancy > 0 ? 'to_target' : 'to_pickup'
             );
             if (rejoin) {
@@ -683,7 +761,7 @@ export function App() {
   }, [
     sourceAreas,
     targetAreas,
-    avoidAreas,
+    redAreas,
     vehicleFleets,
     routingAlgorithm,
     appendLog,
@@ -766,15 +844,10 @@ export function App() {
 
     const effectiveElapsedTwinSec = isRestartingCompletedTwin ? 0 : elapsedTwinSeconds;
 
-    // Determine which active Source Areas still need street routes (those not covered by active Metro Corridors)
-    const metroCoveredSourceIds = new Set(
-      activeMetroEvacuationOptions?.enabled
-        ? activeMetroEvacuationOptions.corridors.map((c) => c.sourceId)
-        : []
-    );
+    // All active Source Areas use calculated street evacuation routes when vehicle fleets are configured,
+    // even if Brussels Metro evacuation is also enabled for stations inside those Source Areas
     const needsStreetRoutes =
-      vehicleFleets.length > 0 &&
-      effectiveSourceAreas.some((s) => !s.disabled && !metroCoveredSourceIds.has(s.id));
+      vehicleFleets.length > 0 && effectiveSourceAreas.some((s) => !s.disabled);
 
     // If topology/population/fleets were modified while paused (or routes/vehicles not yet initialized), recompute & initialize before resuming!
     if (
@@ -795,14 +868,14 @@ export function App() {
         if (needsStreetRoutes && (hasPendingTopologyChanges || computedRoutes.length === 0)) {
           appendLog(
             'ROUTING',
-            `Computing street evacuation routes (${routingAlgorithm}) for Source Areas served by street vehicle fleets...`,
+            `Computing street evacuation routes (${routingAlgorithm}) for active Source Areas...`,
             effectiveElapsedTwinSec
           );
 
           const routeResult = await computeAllEvacuationRoutes(
             effectiveSourceAreas,
             targetAreas,
-            avoidAreas,
+            redAreas,
             vehicleFleets,
             routingAlgorithm,
             abortController.signal
@@ -815,7 +888,7 @@ export function App() {
           nextStreetRoutes = routeResult.routes;
           setComputedRoutes(routeResult.routes);
           setLogs((prev) => [...prev, ...routeResult.logs]);
-        } else if (!needsStreetRoutes && computedRoutes.length > 0 && vehicleFleets.length === 0) {
+        } else if (vehicleFleets.length === 0 && computedRoutes.length > 0) {
           nextStreetRoutes = [];
           setComputedRoutes([]);
         }
@@ -841,7 +914,7 @@ export function App() {
               directRoutesToClosestTarget[veh.id] = await computeDirectRouteToClosestTarget(
                 veh.currentPosition,
                 targetAreas,
-                avoidAreas
+                redAreas
               );
             }
 
@@ -868,7 +941,7 @@ export function App() {
               const rejoin = await computeRejoinPathToClosestRoute(
                 veh.currentPosition,
                 nextStreetRoutes,
-                avoidAreas,
+                redAreas,
                 veh.currentOccupancy > 0 ? 'to_target' : 'to_pickup'
               );
               if (rejoin) {
@@ -987,7 +1060,7 @@ export function App() {
 
     appendLog(
       'TWIN',
-      'Twin paused. You can now modify Source/Target/Avoid areas, adjust population counts, disable Target Shelters, or add/remove vehicles.',
+      'Twin paused. You can now modify Source/Target/Red areas, adjust population counts, disable Target Shelters, or add/remove vehicles.',
       elapsedTwinSeconds
     );
   };
@@ -1040,6 +1113,7 @@ export function App() {
     elapsedTwinSeconds,
     sourceAreas,
     targetAreas,
+    redAreas,
     twinSpeed,
   });
 
@@ -1058,6 +1132,7 @@ export function App() {
       elapsedTwinSeconds,
       sourceAreas,
       targetAreas,
+      redAreas,
       twinSpeed,
     };
   }, [
@@ -1068,6 +1143,7 @@ export function App() {
     elapsedTwinSeconds,
     sourceAreas,
     targetAreas,
+    redAreas,
     twinSpeed,
   ]);
 
@@ -1086,27 +1162,56 @@ export function App() {
       const state = twinStateRef.current;
       // 1x playback = 1 twin second per 1 real-time second
       const deltaTwinSec = wallDeltaSec * state.twinSpeed;
-      const nextElapsed = state.elapsedTwinSeconds + deltaTwinSec;
 
-      const stepResult = stepTwinState(
-        {
-          clusters: state.clusters,
-          pickupStates: state.pickupStates,
-          vehicles: state.vehicles,
-          heatmapPoints: [],
-          targetOccupancies: state.targetOccupancies,
-          telemetryStats: state.telemetryStats,
-          newLogs: [],
-          totalEvacuated: 0,
-          totalInTransit: 0,
-          totalRemainingAtSource: 0,
-          totalWaitingAtPickups: 0,
-        },
-        nextElapsed,
-        deltaTwinSec,
-        state.sourceAreas,
-        state.targetAreas
-      );
+      // Sub-step large twin deltas (e.g. at 500x and 1000x speeds) in <= 10s increments
+      // so vehicles and walking clusters transition smoothly across states without overshooting
+      const maxSubStepSec = 10;
+      const numSubSteps = Math.max(1, Math.min(25, Math.ceil(deltaTwinSec / maxSubStepSec)));
+      const subDeltaSec = deltaTwinSec / numSubSteps;
+
+      let currentSnapshot = {
+        clusters: state.clusters,
+        pickupStates: state.pickupStates,
+        vehicles: state.vehicles,
+        heatmapPoints: [] as HeatmapPoint[],
+        targetOccupancies: state.targetOccupancies,
+        telemetryStats: state.telemetryStats,
+        newLogs: [] as string[],
+        totalEvacuated: 0,
+        totalInTransit: 0,
+        totalRemainingAtSource: 0,
+        totalWaitingAtPickups: 0,
+      };
+      const accumulatedLogs: { msg: string; elapsed: number }[] = [];
+      let nextElapsed = state.elapsedTwinSeconds + deltaTwinSec;
+
+      for (let i = 1; i <= numSubSteps; i++) {
+        const subElapsed = state.elapsedTwinSeconds + subDeltaSec * i;
+        nextElapsed = subElapsed;
+        const subResult = stepTwinState(
+          currentSnapshot,
+          subElapsed,
+          subDeltaSec,
+          state.sourceAreas,
+          state.targetAreas,
+          state.redAreas
+        );
+        if (subResult.newLogs.length > 0) {
+          subResult.newLogs.forEach((msg) => {
+            accumulatedLogs.push({ msg, elapsed: subElapsed });
+          });
+        }
+        currentSnapshot = subResult;
+        if (
+          subResult.totalRemainingAtSource === 0 &&
+          subResult.totalInTransit === 0 &&
+          subResult.totalEvacuated > 0
+        ) {
+          break;
+        }
+      }
+
+      const stepResult = currentSnapshot;
 
       setClusters(stepResult.clusters);
       setPickupStates(stepResult.pickupStates);
@@ -1127,9 +1232,9 @@ export function App() {
         }))
       );
 
-      if (stepResult.newLogs.length > 0) {
-        stepResult.newLogs.forEach((msg) => {
-          appendLog('TWIN', msg, nextElapsed);
+      if (accumulatedLogs.length > 0) {
+        accumulatedLogs.forEach(({ msg, elapsed }) => {
+          appendLog('TWIN', msg, elapsed);
         });
       }
 
@@ -1409,41 +1514,41 @@ export function App() {
     );
   };
 
-  const handleAddAvoidArea = (avoid: Omit<AvoidArea, 'id'>) => {
+  const handleAddRedArea = (red: Omit<RedArea, 'id'>) => {
     if (isTwinning) {
-      appendLog('WARN', 'Pause twin before adding an Avoid Area.');
+      appendLog('WARN', 'Pause twin before adding a Red Area.');
       return;
     }
-    const newAvoid: AvoidArea = { ...avoid, id: `avoid-${Date.now()}`, disabled: false };
-    setAvoidAreas((prev) => [...prev, newAvoid]);
+    const newRed: RedArea = { ...red, id: `red-${Date.now()}`, disabled: false };
+    setRedAreas((prev) => [...prev, newRed]);
     setHasPendingTopologyChanges(true);
     appendLog(
       'WARN',
-      `Defined Avoid Area "${newAvoid.name}". Routes will detour around it on restart.`,
+      `Defined Red Area "${newRed.name}". Routes will detour around it on restart.`,
       elapsedTwinSeconds
     );
   };
 
-  const handleUpdateAvoidArea = (updatedAvoid: AvoidArea) => {
+  const handleUpdateRedArea = (updatedRed: RedArea) => {
     if (isTwinning) {
-      appendLog('WARN', 'Pause twin before modifying an Avoid Area.');
+      appendLog('WARN', 'Pause twin before modifying a Red Area.');
       return;
     }
-    setAvoidAreas((prev) => prev.map((a) => (a.id === updatedAvoid.id ? updatedAvoid : a)));
+    setRedAreas((prev) => prev.map((a) => (a.id === updatedRed.id ? updatedRed : a)));
     setHasPendingTopologyChanges(true);
-    appendLog('INFO', `Modified Avoid Area "${updatedAvoid.name}".`, elapsedTwinSeconds);
+    appendLog('INFO', `Modified Red Area "${updatedRed.name}".`, elapsedTwinSeconds);
   };
 
-  const handleToggleDisableAvoidArea = (id: string) => {
+  const handleToggleDisableRedArea = (id: string) => {
     if (isTwinning) {
-      appendLog('WARN', 'Pause twin before disabling/enabling an Avoid Area.');
+      appendLog('WARN', 'Pause twin before disabling/enabling a Red Area.');
       return;
     }
-    const avoid = avoidAreas.find((a) => a.id === id);
-    if (!avoid) return;
+    const red = redAreas.find((a) => a.id === id);
+    if (!red) return;
 
-    const nextDisabled = !avoid.disabled;
-    setAvoidAreas((prev) =>
+    const nextDisabled = !red.disabled;
+    setRedAreas((prev) =>
       prev.map((a) => (a.id === id ? { ...a, disabled: nextDisabled } : a))
     );
     setHasPendingTopologyChanges(true);
@@ -1451,26 +1556,26 @@ export function App() {
     appendLog(
       nextDisabled ? 'WARN' : 'INFO',
       nextDisabled
-        ? `Disabled Avoid Area "${avoid.name}" — routes may now pass through this zone on recomputation.`
-        : `Re-enabled Avoid Area "${avoid.name}" — strict routing exclusion active.`,
+        ? `Disabled Red Area "${red.name}" — routes may now pass through this zone on recomputation.`
+        : `Re-enabled Red Area "${red.name}" — strict routing exclusion active.`,
       elapsedTwinSeconds
     );
   };
 
-  const handleDeleteAvoidArea = (id: string) => {
+  const handleDeleteRedArea = (id: string) => {
     if (isTwinning) {
-      appendLog('WARN', 'Pause twin before removing an Avoid Area.');
+      appendLog('WARN', 'Pause twin before removing a Red Area.');
       return;
     }
-    const target = avoidAreas.find((a) => a.id === id);
-    setAvoidAreas((prev) => prev.filter((a) => a.id !== id));
+    const target = redAreas.find((a) => a.id === id);
+    setRedAreas((prev) => prev.filter((a) => a.id !== id));
     if (selectedEntityId === id) {
       setSelectedEntityId(null);
     }
     setHasPendingTopologyChanges(true);
     appendLog(
       'INFO',
-      `Removed Avoid Area "${target?.name || id}" from twin configuration and map.`,
+      `Removed Red Area "${target?.name || id}" from twin configuration and map.`,
       elapsedTwinSeconds
     );
   };
@@ -1547,7 +1652,7 @@ export function App() {
   };
 
   // Drawing Handlers
-  const handleStartDrawing = (type: 'source' | 'target' | 'avoid' | 'vehicle') => {
+  const handleStartDrawing = (type: 'source' | 'target' | 'red' | 'vehicle') => {
     if (isTwinning) {
       appendLog('WARN', 'Pause twin before drawing or placing entities.');
       return;
@@ -2011,6 +2116,17 @@ export function App() {
     }
   };
 
+  const handleFocusPickupLocation = (pickup: PickupLocationState) => {
+    setSelectedEntityId(pickup.id);
+    setMapCenter(pickup.location);
+    setMapZoom((prev) => Math.max(prev, 16));
+    setMapFocusTarget({
+      position: pickup.location,
+      zoom: 16,
+      requestId: Date.now(),
+    });
+  };
+
   return (
     <div className="cockpit-grid-layout">
       {/* 1. LEFT SIDE PANEL (25% Width x 100% Height, Collapsible) */}
@@ -2024,7 +2140,7 @@ export function App() {
         onToggleShowLabels={() => setShowLabels((prev) => !prev)}
         sourceAreas={sourceAreas}
         targetAreas={targetAreas}
-        avoidAreas={avoidAreas}
+        redAreas={redAreas}
         vehicleFleets={vehicleFleets}
         remainingBySource={remainingBySource}
         onAddSourceArea={handleAddSourceArea}
@@ -2035,10 +2151,10 @@ export function App() {
         onUpdateTargetArea={handleUpdateTargetArea}
         onToggleDisableTargetArea={handleToggleDisableTargetArea}
         onDeleteTargetArea={handleDeleteTargetArea}
-        onAddAvoidArea={handleAddAvoidArea}
-        onUpdateAvoidArea={handleUpdateAvoidArea}
-        onToggleDisableAvoidArea={handleToggleDisableAvoidArea}
-        onDeleteAvoidArea={handleDeleteAvoidArea}
+        onAddRedArea={handleAddRedArea}
+        onUpdateRedArea={handleUpdateRedArea}
+        onToggleDisableRedArea={handleToggleDisableRedArea}
+        onDeleteRedArea={handleDeleteRedArea}
         onAddVehicleFleet={handleAddVehicleFleet}
         onUpdateVehicleFleet={handleUpdateVehicleFleet}
         onDeleteVehicleFleet={handleDeleteVehicleFleet}
@@ -2093,6 +2209,9 @@ export function App() {
         onToggleUseBrusselsMetroForEvacuation={handleToggleUseBrusselsMetroForEvacuation}
         onChangeBrusselsMetroTrainCount={handleChangeBrusselsMetroTrainCount}
         onChangeBrusselsMetroTrainCapacity={handleChangeBrusselsMetroTrainCapacity}
+        dataOverlays={dataOverlays}
+        onToggleDataOverlayVisibility={handleToggleDataOverlayVisibility}
+        onAddOverlayAsRedArea={handleAddOverlayAsRedArea}
       />
 
       {/* 2. CENTER AREA COLUMN (Dynamic Flex Width) -> TOP MAP (Flex Height) + BOTTOM LOGS (Collapsible) */}
@@ -2104,7 +2223,7 @@ export function App() {
             showLabels={showLabels}
             sourceAreas={sourceAreas}
             targetAreas={targetAreas}
-            avoidAreas={avoidAreas}
+            redAreas={redAreas}
             vehicleFleets={vehicleFleets}
             computedRoutes={computedRoutes}
             pickupStates={pickupStates}
@@ -2130,6 +2249,8 @@ export function App() {
             brusselsMetroLines={brusselsMetroNetwork.lines}
             brusselsMetroStations={brusselsMetroNetwork.stations}
             activeMetroCorridors={activeMetroEvacuationOptions ? metroCorridors : []}
+            dataOverlays={dataOverlays}
+            focusTarget={mapFocusTarget}
           />
         </div>
 
@@ -2156,6 +2277,8 @@ export function App() {
         totalRemainingAtSource={totalRemainingAtSource}
         totalWaitingAtPickups={totalWaitingAtPickups}
         isTwinning={isTwinning}
+        selectedEntityId={selectedEntityId}
+        onFocusPickupLocation={handleFocusPickupLocation}
       />
 
       {/* Centered Twin Report Modal (enabled only when twin is paused) */}
@@ -2171,7 +2294,7 @@ export function App() {
         twinSpeed={twinSpeed}
         sourceAreas={sourceAreas}
         targetAreas={targetAreas}
-        avoidAreas={avoidAreas}
+        redAreas={redAreas}
         vehicleFleets={vehicleFleets}
         computedRoutes={computedRoutes}
         clusters={clusters}

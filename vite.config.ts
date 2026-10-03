@@ -127,6 +127,81 @@ function serveScenariosPklData(res: ServerResponse) {
   })
 }
 
+let cachedOverlaysJson: string | null = null
+let cachedOverlaysSignature = ''
+
+function serveDataOverlays(res: ServerResponse) {
+  const overlaysDir = path.resolve(process.cwd(), 'data/overlays')
+  const pythonBin = process.env.EE_PYTHON || '/opt/conda/envs/evacs/bin/python'
+  const scriptPath = path.resolve(process.cwd(), 'server/overlays.py')
+  let currentSig = ''
+  try {
+    const scriptMtime = fs.statSync(scriptPath).mtimeMs
+    const files = fs
+      .readdirSync(overlaysDir)
+      .filter((f) => {
+        const lower = f.toLowerCase()
+        return (
+          lower.endsWith('.geojson') ||
+          lower.endsWith('.tif') ||
+          lower.endsWith('.tiff') ||
+          lower.endsWith('.geotif') ||
+          lower.endsWith('.geotiff')
+        )
+      })
+      .sort()
+    currentSig = `script:${scriptMtime}|` + files
+      .map((f) => `${f}:${fs.statSync(path.join(overlaysDir, f)).mtimeMs}`)
+      .join('|')
+  } catch {
+    // Fallback to running script directly
+  }
+
+  if (cachedOverlaysJson && currentSig === cachedOverlaysSignature) {
+    res.setHeader('Content-Type', 'application/json')
+    res.statusCode = 200
+    res.end(cachedOverlaysJson)
+    return
+  }
+
+  const proc = spawn(pythonBin, [scriptPath])
+  let stdout = ''
+  let stderr = ''
+
+  proc.stdout.on('data', (chunk) => {
+    stdout += chunk.toString()
+  })
+  proc.stderr.on('data', (chunk) => {
+    stderr += chunk.toString()
+  })
+  proc.on('close', (code) => {
+    res.setHeader('Content-Type', 'application/json')
+    const lines = stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('{') && l.endsWith('}'))
+
+    if (lines.length > 0) {
+      const payload = lines[lines.length - 1]
+      cachedOverlaysJson = payload
+      cachedOverlaysSignature = currentSig
+      res.statusCode = 200
+      res.end(payload)
+      return
+    }
+
+    res.statusCode = 500
+    res.end(
+      JSON.stringify({
+        ok: false,
+        error:
+          stderr.trim() ||
+          `server/overlays.py exited with code ${code} without JSON output.`,
+      })
+    )
+  })
+}
+
 function serveBrusselsMetroParquetData(res: ServerResponse) {
   const linesPath = path.resolve(process.cwd(), 'data/brussels_metro_lines.parquet')
   const stationsPath = path.resolve(process.cwd(), 'data/brussels_metro_stations.parquet')
@@ -237,6 +312,178 @@ function serveEvaccastRouting(body: string, res: ServerResponse) {
   proc.stdin.end()
 }
 
+const INSTALLED_ROUTING_ALGORITHMS = ['Basic OSM', 'evaccast_v1'] as const
+
+function getRoutingAlgorithmCacheFolder(algorithm: string): string {
+  const trimmed = String(algorithm || '').trim()
+  if (trimmed === 'Basic OSM' || trimmed.toLowerCase() === 'basic_osm') {
+    return 'basic_osm'
+  }
+  if (trimmed === 'evaccast_v1') {
+    return 'evaccast_v1'
+  }
+  return (
+    trimmed
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'default'
+  )
+}
+
+function ensureRoutingCacheDirs() {
+  const baseCacheDir = path.resolve(process.cwd(), 'cache/routing')
+  try {
+    fs.mkdirSync(baseCacheDir, { recursive: true })
+    for (const algo of INSTALLED_ROUTING_ALGORITHMS) {
+      const folder = getRoutingAlgorithmCacheFolder(algo)
+      fs.mkdirSync(path.join(baseCacheDir, folder), { recursive: true })
+    }
+  } catch {
+    // Non-fatal directory initialization
+  }
+}
+
+ensureRoutingCacheDirs()
+
+function sanitizeCacheHash(rawHash: string): string {
+  return String(rawHash || '')
+    .trim()
+    .replace(/[^a-fA-F0-9_-]/g, '')
+}
+
+function serveRoutingCache(
+  req: Connect.IncomingMessage,
+  res: ServerResponse
+) {
+  ensureRoutingCacheDirs()
+  const baseCacheDir = path.resolve(process.cwd(), 'cache/routing')
+
+  if (req.method === 'GET') {
+    const urlObj = new URL(req.url || '/api/routing/cache', 'http://localhost')
+    const algorithm = urlObj.searchParams.get('algorithm') || 'Basic OSM'
+    const hash = sanitizeCacheHash(urlObj.searchParams.get('hash') || '')
+    const folder = getRoutingAlgorithmCacheFolder(algorithm)
+
+    res.setHeader('Content-Type', 'application/json')
+    if (!hash) {
+      res.statusCode = 400
+      res.end(JSON.stringify({ ok: false, hit: false, error: 'Missing hash parameter' }))
+      return
+    }
+
+    const algoDir = path.join(baseCacheDir, folder)
+    const filePath = path.join(algoDir, `${hash}.json`)
+    try {
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, 'utf-8')
+        const parsed = JSON.parse(raw)
+        if (parsed && Array.isArray(parsed.routes)) {
+          res.statusCode = 200
+          res.end(
+            JSON.stringify({
+              ok: true,
+              hit: true,
+              hash,
+              algorithm,
+              folder,
+              path: `cache/routing/${folder}/${hash}.json`,
+              routes: parsed.routes,
+              createdAt: parsed.createdAt,
+            })
+          )
+          return
+        }
+      }
+    } catch {
+      // Treat corrupted or unreadable file as cache miss
+    }
+
+    res.statusCode = 200
+    res.end(
+      JSON.stringify({
+        ok: true,
+        hit: false,
+        hash,
+        algorithm,
+        folder,
+        path: `cache/routing/${folder}/${hash}.json`,
+      })
+    )
+    return
+  }
+
+  if (req.method === 'POST') {
+    let body = ''
+    req.on('data', (chunk) => {
+      body += chunk.toString()
+    })
+    req.on('end', () => {
+      res.setHeader('Content-Type', 'application/json')
+      try {
+        const parsed = JSON.parse(body || '{}')
+        const algorithm = String(parsed.algorithm || 'Basic OSM')
+        const hash = sanitizeCacheHash(String(parsed.hash || ''))
+        const routes = parsed.routes
+        const stringifiedParameters =
+          typeof parsed.stringifiedParameters === 'string'
+            ? parsed.stringifiedParameters
+            : undefined
+
+        if (!hash || !Array.isArray(routes)) {
+          res.statusCode = 400
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error: 'Both a valid hash identifier and routes array are required.',
+            })
+          )
+          return
+        }
+
+        const folder = getRoutingAlgorithmCacheFolder(algorithm)
+        const algoDir = path.join(baseCacheDir, folder)
+        fs.mkdirSync(algoDir, { recursive: true })
+
+        const filePath = path.join(algoDir, `${hash}.json`)
+        const cachePayload = {
+          hash,
+          algorithm,
+          folder,
+          createdAt: new Date().toISOString(),
+          stringifiedParameters,
+          routes,
+        }
+        fs.writeFileSync(filePath, JSON.stringify(cachePayload, null, 2), 'utf-8')
+
+        res.statusCode = 200
+        res.end(
+          JSON.stringify({
+            ok: true,
+            saved: true,
+            hash,
+            algorithm,
+            folder,
+            path: `cache/routing/${folder}/${hash}.json`,
+          })
+        )
+      } catch (err) {
+        res.statusCode = 500
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        )
+      }
+    })
+    return
+  }
+
+  res.setHeader('Content-Type', 'application/json')
+  res.statusCode = 405
+  res.end(JSON.stringify({ ok: false, error: 'Method Not Allowed. Use GET or POST.' }))
+}
+
 function createSpaceDataMiddleware(): Connect.NextHandleFunction {
   return (req, res, next) => {
     if (!req.url) {
@@ -249,13 +496,25 @@ function createSpaceDataMiddleware(): Connect.NextHandleFunction {
       return
     }
 
-    // 0b. Brussels Metro Parquet Reader Endpoint (data/brussels_metro_lines.parquet & data/brussels_metro_stations.parquet)
+    // 0b. Data Overlays Reader Endpoint (data/overlays/*.geojson, *.tif, *.tiff, *.geotif, *.geotiff)
+    if (req.url.startsWith('/api/overlays')) {
+      serveDataOverlays(res)
+      return
+    }
+
+    // 0c. Brussels Metro Parquet Reader Endpoint (data/brussels_metro_lines.parquet & data/brussels_metro_stations.parquet)
     if (req.url.startsWith('/api/brussels-metro/network')) {
       serveBrusselsMetroParquetData(res)
       return
     }
 
-    // 0c. evaccast_v1 Routing Algorithm Endpoint (server/evaccast_routing.py)
+    // 0d. Disk Routing Cache Endpoint (cache/routing/<algorithm>/<hash>.json)
+    if (req.url.startsWith('/api/routing/cache')) {
+      serveRoutingCache(req, res)
+      return
+    }
+
+    // 0e. evaccast_v1 Routing Algorithm Endpoint (server/evaccast_routing.py)
     if (req.url.startsWith('/api/routing/evaccast-v1')) {
       if (req.method !== 'POST') {
         res.setHeader('Content-Type', 'application/json')

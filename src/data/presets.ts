@@ -1,7 +1,7 @@
 import {
   SourceArea,
   TargetArea,
-  AvoidArea,
+  RedArea,
   VehicleFleet,
   PresetScenarioId,
 } from '../types/evacuation';
@@ -21,6 +21,6 @@ export interface PresetScenarioData {
   zoom: number;
   sourceAreas: SourceArea[];
   targetAreas: TargetArea[];
-  avoidAreas: AvoidArea[];
+  redAreas: RedArea[];
   vehicleFleets: VehicleFleet[];
 }

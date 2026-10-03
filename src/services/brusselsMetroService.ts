@@ -9,6 +9,7 @@ import {
 } from '../types/evacuation';
 import { getPolygonCentroid, toTurfPolygon } from './routingEngine';
 import { buildCumulativeDistances } from './twinEngine';
+import { BRUSSELS_METRO_INITIAL_DATA } from '../data/brusselsMetroData';
 
 /**
  * Geographic bounding box for the Brussels-Capital Region & STIB Metro network
@@ -310,6 +311,151 @@ export function computeMetroTrajectoryBetweenStations(
     distanceMeters: buildCumulativeDistances(fallbackCoords).total,
     lineLabel: `Metro Line ${sourceStation.lines[0] || '1'}`,
     color: '#0066A3',
+  };
+}
+
+/**
+ * Compute an underground Brussels Metro track trajectory from any current train position `fromPos`
+ * (either at a station or mid-track along a Metro line) to a destination Metro station `toPos`
+ * using ONLY the Brussels Metro network lines.
+ */
+export function computeMetroTrackBetweenPositions(
+  fromPos: [number, number],
+  toPos: [number, number],
+  toStationName?: string
+): {
+  coordinates: [number, number][];
+  distanceMeters: number;
+  lineLabel: string;
+  color: string;
+} {
+  const lines = BRUSSELS_METRO_INITIAL_DATA.lines;
+  const stations = BRUSSELS_METRO_INITIAL_DATA.stations;
+
+  if (!stations.length || !lines.length) {
+    const fallback: [number, number][] = [fromPos, toPos];
+    return {
+      coordinates: fallback,
+      distanceMeters: buildCumulativeDistances(fallback).total,
+      lineLabel: 'Metro Line 1',
+      color: '#0066A3',
+    };
+  }
+
+  // 1. Identify destination Metro station
+  let toStation = toStationName
+    ? stations.find((st) => st.name_fr === toStationName || st.name_nl === toStationName)
+    : undefined;
+  if (!toStation) {
+    let bestDistSq = Infinity;
+    for (const st of stations) {
+      const dLat = st.position[0] - toPos[0];
+      const dLng = st.position[1] - toPos[1];
+      const dSq = dLat * dLat + dLng * dLng;
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        toStation = st;
+      }
+    }
+  }
+  const targetStation = toStation || stations[0];
+
+  // 2. Identify closest Metro station to `fromPos`
+  let fromStation = stations[0];
+  let bestFromDistMeters = Infinity;
+  for (const st of stations) {
+    const distMeters =
+      turf.distance(
+        [fromPos[1], fromPos[0]],
+        [st.position[1], st.position[0]],
+        { units: 'kilometers' }
+      ) * 1000;
+    if (distMeters < bestFromDistMeters) {
+      bestFromDistMeters = distMeters;
+      fromStation = st;
+    }
+  }
+
+  // If the train is already at or very close to `fromStation`, route station-to-station along Metro lines
+  if (bestFromDistMeters <= 50) {
+    if (fromStation.id === targetStation.id) {
+      const sameCoords: [number, number][] = [fromPos, targetStation.position];
+      return {
+        coordinates: sameCoords,
+        distanceMeters: buildCumulativeDistances(sameCoords).total,
+        lineLabel: `Metro Line ${targetStation.lines[0] || '1'}`,
+        color: '#0066A3',
+      };
+    }
+    const traj = computeMetroTrajectoryBetweenStations(
+      fromStation,
+      targetStation,
+      lines,
+      stations
+    );
+    const coords: [number, number][] = [fromPos, ...traj.coordinates.slice(1)];
+    coords[coords.length - 1] = targetStation.position;
+    return {
+      ...traj,
+      coordinates: coords,
+      distanceMeters: buildCumulativeDistances(coords).total,
+    };
+  }
+
+  // Otherwise, the train is mid-track on a Metro line: find the Metro line it is currently riding on,
+  // slice along that Metro line to `fromStation.position` (or directly to `targetStation` if on the same line),
+  // and continue along Metro lines to `targetStation`.
+  const canonicalLines = lines.filter((lf) => lf.variant === 1);
+  let closestLine = canonicalLines[0] || lines[0];
+  let bestLineVertexDistSq = Infinity;
+  const cosLat = Math.cos((fromPos[0] * Math.PI) / 180);
+
+  for (const lf of canonicalLines) {
+    const vIdx = findClosestVertexIndex(lf.coordinates, fromPos);
+    const pt = lf.coordinates[vIdx];
+    if (!pt) continue;
+    const dLat = pt[0] - fromPos[0];
+    const dLng = (pt[1] - fromPos[1]) * cosLat;
+    const dSq = dLat * dLat + dLng * dLng;
+    if (dSq < bestLineVertexDistSq) {
+      bestLineVertexDistSq = dSq;
+      closestLine = lf;
+    }
+  }
+
+  if (closestLine && targetStation.lines.includes(closestLine.line)) {
+    const directSlice = extractSingleLineSlice(closestLine, fromPos, targetStation.position);
+    return {
+      coordinates: directSlice.coordinates,
+      distanceMeters: directSlice.distanceMeters,
+      lineLabel: `Metro Line ${closestLine.line}`,
+      color: closestLine.color || '#0066A3',
+    };
+  }
+
+  const toNearestStationSlice = closestLine
+    ? extractSingleLineSlice(closestLine, fromPos, fromStation.position)
+    : {
+        coordinates: [fromPos, fromStation.position] as [number, number][],
+        distanceMeters: bestFromDistMeters,
+      };
+
+  const stationToTargetTraj = computeMetroTrajectoryBetweenStations(
+    fromStation,
+    targetStation,
+    lines,
+    stations
+  );
+
+  const combinedCoords: [number, number][] = [
+    ...toNearestStationSlice.coordinates,
+    ...stationToTargetTraj.coordinates.slice(1),
+  ];
+  return {
+    coordinates: combinedCoords,
+    distanceMeters: buildCumulativeDistances(combinedCoords).total,
+    lineLabel: stationToTargetTraj.lineLabel,
+    color: stationToTargetTraj.color,
   };
 }
 

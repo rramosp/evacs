@@ -14,7 +14,7 @@ capacity given contributes/accepts nothing extra - see
 evaccast.core.routing.system_optimum's own per-region fallback rules.
 
 Test this with (see examples/sample_request.json for a full request body,
-including a real avoid_geojson obstacle zone):
+including a real red_geojson obstacle zone):
 
     curl -w "\n" -X POST http://127.0.0.1:8000/api/v1/osm-route \
         -H "Content-Type: application/json" \
@@ -55,7 +55,7 @@ class RouteRequest(BaseModel):
 
     sources: list[SourcePoint] = Field(min_length=1)
     sinks: list[SinkPoint] = Field(min_length=1)
-    avoid_geojson: str | dict | None = None
+    red_geojson: str | dict | None = None
     dist_buffer: float = 1000
     network_type: str = "drive"
     algorithm: str = "capacity_scaling"
@@ -93,7 +93,7 @@ async def osm_routing_post(request: RouteRequest):
         sinks=[s.loc for s in request.sinks],
         source_populations=[s.population for s in request.sources],
         sink_capacities=[s.capacity for s in request.sinks],
-        avoid_geojson=request.avoid_geojson,
+        red_geojson=request.red_geojson,
         dist_buffer=request.dist_buffer,
         network_type=request.network_type,
         algorithm=request.algorithm,

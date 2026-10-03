@@ -2,6 +2,7 @@ import * as turf from '@turf/turf';
 import {
   SourceArea,
   TargetArea,
+  RedArea,
   VehicleFleet,
   ComputedRoute,
   PickupLocationState,
@@ -23,7 +24,9 @@ import {
   findClosestEvacuationRoute,
   assignFleetsToRoutesByProximity,
   dedupPolylineCoords,
+  computeShortestCollisionFreePath,
 } from './routingEngine';
+import { computeMetroTrackBetweenPositions } from './brusselsMetroService';
 
 export interface MetroEvacuationOptions {
   enabled: boolean;
@@ -191,6 +194,7 @@ export function createInitialTelemetryStats(
     pickupArrivedByBehavior: createZeroBehaviorCounts(),
     pickupArrivalPersonSecondsByBehavior: createZeroBehaviorCounts(),
     totalCompletedVehicleTrips: 0,
+    evacuationTimeSeries: [{ timeSeconds: 0, evacuatedCount: 0 }],
   };
 }
 
@@ -640,7 +644,7 @@ export function buildClustersForSources(sourceAreas: SourceArea[]): SourceIntern
 
 /**
  * Helper to append Brussels Metro Station Pickups and Metro Train units
- * along static Metro Line trajectories (unaffected by Avoid Areas).
+ * along static Metro Line trajectories (unaffected by Red Areas).
  */
 function appendMetroPickupsAndTrains(
   pickupStates: PickupLocationState[],
@@ -670,6 +674,12 @@ function appendMetroPickupsAndTrains(
       (p) => p.id === pickupId || p.routeId === corridor.id
     );
 
+    const evacCoords =
+      corridor.coordinates.length >= 2
+        ? corridor.coordinates
+        : [corridor.sourceStation.position, corridor.targetStation.position];
+    const evacDist = buildCumulativeDistances(evacCoords);
+
     pickupStates.push({
       id: pickupId,
       routeId: corridor.id,
@@ -680,6 +690,7 @@ function appendMetroPickupsAndTrains(
       label,
       location: corridor.sourceStation.position,
       dropOffLocation: corridor.targetStation.position,
+      routeCoords: evacCoords,
       waitingPopulation: 0,
       waitingByBehavior: createZeroBehaviorCounts(),
       totalBoardedCount: prevPickup?.totalBoardedCount || 0,
@@ -707,12 +718,6 @@ function appendMetroPickupsAndTrains(
         ? Math.floor(totalTrains / numCorridors) +
           (cIdx < totalTrains % numCorridors ? 1 : 0)
         : 1;
-
-    const evacCoords =
-      corridor.coordinates.length >= 2
-        ? corridor.coordinates
-        : [corridor.sourceStation.position, corridor.targetStation.position];
-    const evacDist = buildCumulativeDistances(evacCoords);
 
     // Metro trains travel at 45 km/h on underground grade-separated tracks with fast multi-door boarding (0.2s/person)
     const metroTransitSpeedKmh = 45;
@@ -790,18 +795,13 @@ export function initializeTwinState(
 
   const activeSources = sourceAreas.filter((s) => !s.disabled);
   const activeSourceIds = new Set(activeSources.map((s) => s.id));
+  const activeTargetIds = new Set(targetAreas.filter((t) => !t.disabled).map((t) => t.id));
 
-  // Source Areas that have active Brussels Metro evacuation corridors use their Metro Stations
-  // as Pickup Points and Target Area Metro Stations as Drop-Off Points
-  const metroSourceIds = new Set<string>(
-    metroEvacuation && metroEvacuation.enabled
-      ? metroEvacuation.corridors.map((c) => c.sourceId)
-      : []
-  );
-
+  // All calculated street evacuation routes between active Source and Target Areas are used concurrently
+  // alongside any active Brussels Metro evacuation corridors
   const activeStreetRoutes =
     vehicleFleets.length > 0
-      ? routes.filter((r) => activeSourceIds.has(r.sourceId) && !metroSourceIds.has(r.sourceId))
+      ? routes.filter((r) => activeSourceIds.has(r.sourceId) && activeTargetIds.has(r.targetId))
       : [];
 
   const pickupStates: PickupLocationState[] = [];
@@ -818,6 +818,10 @@ export function initializeTwinState(
 
   // 2. Establish Street Pickup Squares and Street Vehicle Units for Source Areas served by street fleets
   activeStreetRoutes.forEach((r, idx) => {
+    const routeCoords =
+      r.coordinates && r.coordinates.length >= 2
+        ? r.coordinates
+        : [r.pickupLocation, r.dropOffLocation || r.pickupLocation];
     pickupStates.push({
       id: `pickup-${r.id}`,
       routeId: r.id,
@@ -828,6 +832,7 @@ export function initializeTwinState(
       label: r.pickupLabel || `Pickup Point #${idx + 1}`,
       location: r.pickupLocation,
       dropOffLocation: r.dropOffLocation,
+      routeCoords,
       waitingPopulation: 0,
       waitingByBehavior: createZeroBehaviorCounts(),
       totalBoardedCount: 0,
@@ -1002,16 +1007,13 @@ export function reconcileTwinOnRestart(
 
   const activeSources = sourceAreas.filter((s) => !s.disabled);
   const activeSourceIds = new Set(activeSources.map((s) => s.id));
+  const activeTargetIds = new Set(targetAreas.filter((t) => !t.disabled).map((t) => t.id));
 
-  const metroSourceIds = new Set<string>(
-    metroEvacuation && metroEvacuation.enabled
-      ? metroEvacuation.corridors.map((c) => c.sourceId)
-      : []
-  );
-
+  // All calculated street evacuation routes between active Source and Target Areas remain active
+  // concurrently alongside any Brussels Metro evacuation corridors
   const activeStreetRoutes =
     vehicleFleets.length > 0
-      ? newRoutes.filter((r) => activeSourceIds.has(r.sourceId) && !metroSourceIds.has(r.sourceId))
+      ? newRoutes.filter((r) => activeSourceIds.has(r.sourceId) && activeTargetIds.has(r.targetId))
       : [];
 
   // 1. Establish new Pickup Location states from recomputed street routes, preserving cumulative history if matched
@@ -1020,6 +1022,10 @@ export function reconcileTwinOnRestart(
     const prevPickup = existingPickupStates?.find(
       (p) => p.routeId === r.id || (p.sourceId === r.sourceId && p.label === label)
     );
+    const routeCoords =
+      r.coordinates && r.coordinates.length >= 2
+        ? r.coordinates
+        : [r.pickupLocation, r.dropOffLocation || r.pickupLocation];
     return {
       id: `pickup-${r.id}`,
       routeId: r.id,
@@ -1030,6 +1036,7 @@ export function reconcileTwinOnRestart(
       label,
       location: r.pickupLocation,
       dropOffLocation: r.dropOffLocation,
+      routeCoords,
       waitingPopulation: 0,
       waitingByBehavior: createZeroBehaviorCounts(),
       totalBoardedCount: prevPickup?.totalBoardedCount || 0,
@@ -1513,6 +1520,9 @@ export function reconcileTwinOnRestart(
     pickupArrivedByBehavior: { ...baseTelemetry.pickupArrivedByBehavior },
     pickupArrivalPersonSecondsByBehavior: { ...baseTelemetry.pickupArrivalPersonSecondsByBehavior },
     totalCompletedVehicleTrips: baseTelemetry.totalCompletedVehicleTrips,
+    evacuationTimeSeries: baseTelemetry.evacuationTimeSeries
+      ? [...baseTelemetry.evacuationTimeSeries]
+      : [{ timeSeconds: 0, evacuatedCount: 0 }],
   };
 
   const heatmapPoints = generateHeatmapFromState(
@@ -1854,7 +1864,8 @@ export function stepTwinState(
   elapsedTwinSeconds: number,
   deltaTwinSeconds: number,
   sourceAreas: SourceArea[],
-  targetAreas: TargetArea[]
+  targetAreas: TargetArea[],
+  redAreas: RedArea[] = []
 ): TwinStateSnapshot {
   const newLogs: string[] = [];
 
@@ -1867,6 +1878,9 @@ export function stepTwinState(
     pickupArrivedByBehavior: { ...prevTelemetry.pickupArrivedByBehavior },
     pickupArrivalPersonSecondsByBehavior: { ...prevTelemetry.pickupArrivalPersonSecondsByBehavior },
     totalCompletedVehicleTrips: prevTelemetry.totalCompletedVehicleTrips,
+    evacuationTimeSeries: prevTelemetry.evacuationTimeSeries
+      ? [...prevTelemetry.evacuationTimeSeries]
+      : [{ timeSeconds: 0, evacuatedCount: 0 }],
   };
 
   const pickupMap = new Map<string, PickupLocationState>();
@@ -1918,10 +1932,9 @@ export function stepTwinState(
 
     if (allPickupsInZone.length === 0) return { ...cluster };
 
-    // When a Source Area has active Metro Station Pickup Points, prioritize the Metro Station Pickup Points
-    const metroPickupsInZone = allPickupsInZone.filter((p) => p.isMetro);
-    const pickupsInZone =
-      metroPickupsInZone.length > 0 ? metroPickupsInZone : allPickupsInZone;
+    // Consider all active Pickup Points inside the Source Area (both street Blue Square pickups
+    // and Brussels Metro Station pickups) so clusters walk to their closest available pickup
+    const pickupsInZone = allPickupsInZone;
 
     const pickupsWithDist = pickupsInZone
       .map((p) => {
@@ -2191,16 +2204,150 @@ export function stepTwinState(
       .reduce((acc, c) => acc + c.headcount, 0);
   };
 
-  // Calculate remaining unboarded evacuees per Source Area
-  const getUnboardedInSource = (sourceId: string): number => {
-    const movingCount = getMovingInSource(sourceId);
-    const waitingCount = Array.from(pickupMap.values())
-      .filter((p) => p.sourceId === sourceId)
-      .reduce((acc, p) => acc + p.waitingPopulation, 0);
-    return movingCount + waitingCount;
+  // Check whether any moving clusters in the pickup's Source Area are walking toward this pickup
+  const hasClustersWalkingToPickup = (pickupObj: PickupLocationState): boolean => {
+    return updatedClusters.some(
+      (c) =>
+        c.sourceId === pickupObj.sourceId &&
+        c.status === 'moving_in_zone' &&
+        c.headcount > 0 &&
+        (!c.targetPickupId || c.targetPickupId === pickupObj.id)
+    );
   };
 
   const updatedTargetOccupancies = { ...prevState.targetOccupancies };
+
+  // Reassign an empty vehicle whose original pickup/route has no more evacuees randomly
+  // to another compatible pickup point with evacuees still waiting (or moving toward it).
+  // Street vehicles are only reassigned to street pickups; Metro trains are only reassigned
+  // to Metro station pickups and travel strictly along STIB Brussels Metro lines.
+  const reassignEmptyVehicleOrComplete = (
+    veh: ActiveVehicleUnit,
+    requireUnreservedIfCurrentHasQueue = false
+  ): ActiveVehicleUnit => {
+    const compatiblePickups = Array.from(pickupMap.values()).filter(
+      (p) => Boolean(p.isMetro) === Boolean(veh.isMetro) && p.id !== veh.assignedPickupId
+    );
+
+    const getReservedAtPickup = (pickupId: string): number =>
+      prevState.vehicles
+        .filter(
+          (v) =>
+            v.id !== veh.id &&
+            v.assignedPickupId === pickupId &&
+            v.status === 'waiting_for_80_pct'
+        )
+        .reduce((acc, v) => acc + Math.max(0, v.maxCapacity - v.currentOccupancy), 0);
+
+    const waitingWithUnreserved = compatiblePickups.filter(
+      (p) => p.waitingPopulation > getReservedAtPickup(p.id)
+    );
+    const waitingAny = compatiblePickups.filter((p) => p.waitingPopulation > 0);
+    const movingTowards = compatiblePickups.filter((p) => hasClustersWalkingToPickup(p));
+
+    let candidates: PickupLocationState[] = [];
+    if (waitingWithUnreserved.length > 0) {
+      candidates = waitingWithUnreserved;
+    } else if (!requireUnreservedIfCurrentHasQueue && waitingAny.length > 0) {
+      candidates = waitingAny;
+    } else if (movingTowards.length > 0) {
+      candidates = movingTowards;
+    }
+
+    if (candidates.length === 0) {
+      if (requireUnreservedIfCurrentHasQueue) {
+        return veh;
+      }
+      return {
+        ...veh,
+        status: 'completed' as const,
+      };
+    }
+
+    const nextPickup = candidates[Math.floor(Math.random() * candidates.length)];
+    const nextEvacCoords: [number, number][] =
+      nextPickup.routeCoords && nextPickup.routeCoords.length >= 2
+        ? nextPickup.routeCoords
+        : [nextPickup.location, nextPickup.dropOffLocation || nextPickup.location];
+    const nextEvacDist = buildCumulativeDistances(nextEvacCoords);
+
+    let approachCoords: [number, number][];
+    if (veh.isMetro) {
+      const metroApproach = computeMetroTrackBetweenPositions(
+        veh.currentPosition,
+        nextPickup.location,
+        nextPickup.metroStationName
+      );
+      approachCoords = metroApproach.coordinates;
+    } else {
+      const snap = findClosestPointOnPolyline(veh.currentPosition, nextEvacCoords);
+      const pathToSnap = computeShortestCollisionFreePath(
+        veh.currentPosition,
+        snap.point,
+        redAreas
+      );
+      const suffixToPickup = buildRouteSuffixToPickup(nextEvacCoords, snap);
+      approachCoords = dedupPolylineCoords([...pathToSnap, ...suffixToPickup]);
+      if (approachCoords.length < 2) {
+        approachCoords = [veh.currentPosition, nextPickup.location];
+      }
+    }
+
+    const approachDist = buildCumulativeDistances(approachCoords);
+    const prevPickup = pickupMap.get(veh.assignedPickupId);
+    const prevLabel = prevPickup ? prevPickup.label : veh.assignedPickupId;
+
+    newLogs.push(
+      `🔄 ${veh.fleetName} reassigned from completed ${prevLabel} -> ${nextPickup.label} (${nextPickup.waitingPopulation} waiting, route -> ${nextPickup.targetName}).`
+    );
+
+    const updatedBase: ActiveVehicleUnit = {
+      ...veh,
+      assignedRouteId: nextPickup.routeId,
+      assignedPickupId: nextPickup.id,
+      sourceId: nextPickup.sourceId,
+      targetId: nextPickup.targetId,
+      targetName: nextPickup.targetName,
+      evacCoords: nextEvacCoords,
+      evacCumulative: nextEvacDist.cumulative,
+      waitingAtPickupSeconds: 0,
+      loadingProgressRemainder: 0,
+      loadingElapsedSeconds: 0,
+      unloadingProgressRemainder: 0,
+      unloadingElapsedSeconds: 0,
+      unloadingInitialOccupancy: 0,
+      progressMeters: 0,
+      postOffloadEvacCoords: undefined,
+      postOffloadTargetId: undefined,
+      postOffloadTargetName: undefined,
+      ...(veh.isMetro
+        ? {
+            metroLine: nextPickup.metroLine || veh.metroLine,
+            metroColor: nextPickup.metroColor || veh.metroColor,
+            sourceStationName: nextPickup.metroStationName || veh.sourceStationName,
+            targetStationName: nextPickup.metroTargetStationName || veh.targetStationName,
+          }
+        : {}),
+    };
+
+    if (approachDist.total <= 5) {
+      return {
+        ...updatedBase,
+        status: 'waiting_for_80_pct' as const,
+        currentPosition: nextPickup.location,
+        approachCoords: [nextPickup.location, nextPickup.location],
+        approachCumulative: [0, 0],
+      };
+    }
+
+    return {
+      ...updatedBase,
+      status: 'to_pickup' as const,
+      currentPosition: approachCoords[0],
+      approachCoords,
+      approachCumulative: approachDist.cumulative,
+    };
+  };
 
   // Helper to transition an empty vehicle after completing unloading at a Target Shelter
   const finalizeEmptyVehicleAfterUnload = (veh: ActiveVehicleUnit): ActiveVehicleUnit => {
@@ -2239,10 +2386,11 @@ export function stepTwinState(
     };
 
     const assignedPickup = pickupMap.get(veh.assignedPickupId);
-    const remainingForPickup =
-      getMovingInSource(veh.sourceId) + (assignedPickup ? assignedPickup.waitingPopulation : 0);
+    const assignedStillHasEvacuees =
+      Boolean(assignedPickup) &&
+      (assignedPickup!.waitingPopulation > 0 || hasClustersWalkingToPickup(assignedPickup!));
 
-    if (remainingForPickup > 0 || getUnboardedInSource(veh.sourceId) > 0) {
+    if (assignedStillHasEvacuees) {
       return {
         ...offloadedVeh,
         status: 'to_pickup' as const,
@@ -2250,10 +2398,7 @@ export function stepTwinState(
         approachCumulative: returnDist.cumulative,
       };
     } else {
-      return {
-        ...offloadedVeh,
-        status: 'completed' as const,
-      };
+      return reassignEmptyVehicleOrComplete(offloadedVeh);
     }
   };
 
@@ -2278,11 +2423,19 @@ export function stepTwinState(
         : createZeroBehaviorCounts(),
     };
 
-    if (veh.status === 'completed') return veh;
+    if (veh.status === 'completed') {
+      const hasAnyCompatibleWork = Array.from(pickupMap.values()).some(
+        (p) =>
+          Boolean(p.isMetro) === Boolean(veh.isMetro) &&
+          (p.waitingPopulation > 0 || hasClustersWalkingToPickup(p))
+      );
+      if (!hasAnyCompatibleWork) return veh;
+      return reassignEmptyVehicleOrComplete(veh);
+    }
     if (elapsedTwinSeconds < veh.departureDelaySeconds) return veh;
 
     const pickup = pickupMap.get(veh.assignedPickupId);
-    if (!pickup) return veh;
+    if (!pickup) return reassignEmptyVehicleOrComplete(veh);
 
     const loadUnloadSecPerPerson = Math.max(0, veh.loadUnloadTimePerPersonSeconds ?? 2);
 
@@ -2294,6 +2447,12 @@ export function stepTwinState(
 
     // STATE A: Driving empty along existing route TO Pickup Location (Blue Square or Metro Station) at configured transitSpeedKmh
     if (veh.status === 'to_pickup') {
+      // If the currently assigned pickup has no more evacuees waiting or walking toward it,
+      // immediately reassign the empty vehicle to another compatible pickup that still needs service
+      if (pickup.waitingPopulation === 0 && !hasClustersWalkingToPickup(pickup)) {
+        return reassignEmptyVehicleOrComplete(veh);
+      }
+
       const totalApproachDist = Math.max(
         0,
         veh.approachCumulative[veh.approachCumulative.length - 1] ?? 0
@@ -2338,12 +2497,13 @@ export function stepTwinState(
       const reservedAhead = reservedQueueByPickup.get(pickup.id) || 0;
       const spaceNeeded = veh.maxCapacity - veh.currentOccupancy;
 
-      // If this is a Metro train (or local queue is empty with no more moving clusters in zone) and more passengers are needed,
-      // draw waiting evacuees from other pickup queues in the same Source Area so Metro capacity is fully utilized!
-      if (
-        spaceNeeded > Math.max(0, pickup.waitingPopulation - reservedAhead) &&
-        (veh.isMetro || getMovingInSource(veh.sourceId) === 0)
-      ) {
+      // Pool waiting evacuees across sibling corridors at the same physical Metro station,
+      // or draw excess unreserved evacuees from other pickups in the same Source Area when
+      // all clusters have reached a pickup (or when no clusters are walking toward this pickup).
+      if (spaceNeeded > Math.max(0, pickup.waitingPopulation - reservedAhead)) {
+        const movingInSource = getMovingInSource(veh.sourceId);
+        const hasClustersWalkingToThisPickup = hasClustersWalkingToPickup(pickup);
+
         for (const otherPickup of pickupMap.values()) {
           const currentAvail = Math.max(0, pickup.waitingPopulation - reservedAhead);
           const deficit = spaceNeeded - currentAvail;
@@ -2353,39 +2513,71 @@ export function stepTwinState(
             otherPickup.id !== pickup.id &&
             otherPickup.waitingPopulation > 0
           ) {
-            const transferCount = Math.min(deficit, otherPickup.waitingPopulation);
-            if (transferCount > 0) {
-              const transferredByBehavior = allocateBoardedByBehavior(
-                otherPickup.waitingByBehavior,
-                transferCount
-              );
-              otherPickup.waitingPopulation -= transferCount;
-              otherPickup.waitingByBehavior.compliant = Math.max(
-                0,
-                otherPickup.waitingByBehavior.compliant - transferredByBehavior.compliant
-              );
-              otherPickup.waitingByBehavior['self-directed'] = Math.max(
-                0,
-                otherPickup.waitingByBehavior['self-directed'] - transferredByBehavior['self-directed']
-              );
-              otherPickup.waitingByBehavior.disoriented = Math.max(
-                0,
-                otherPickup.waitingByBehavior.disoriented - transferredByBehavior.disoriented
-              );
+            const isSameMetroStation = Boolean(
+              pickup.isMetro &&
+                otherPickup.isMetro &&
+                pickup.metroStationName &&
+                pickup.metroStationName === otherPickup.metroStationName
+            );
 
-              pickup.waitingPopulation += transferCount;
-              pickup.waitingByBehavior.compliant += transferredByBehavior.compliant;
-              pickup.waitingByBehavior['self-directed'] += transferredByBehavior['self-directed'];
-              pickup.waitingByBehavior.disoriented += transferredByBehavior.disoriented;
+            // Calculate how many waiting evacuees at otherPickup are needed by vehicles currently boarding there
+            const reservedAtOther = prevState.vehicles
+              .filter(
+                (v) =>
+                  v.id !== veh.id &&
+                  v.assignedPickupId === otherPickup.id &&
+                  v.status === 'waiting_for_80_pct'
+              )
+              .reduce((acc, v) => acc + Math.max(0, v.maxCapacity - v.currentOccupancy), 0);
 
-              transferWaitingClustersBetweenPickups(
-                updatedClusters,
-                otherPickup,
-                pickup,
-                transferredByBehavior,
-                sourceTurfPolyMap.get(veh.sourceId),
-                sourceCentroidMap.get(veh.sourceId) || pickup.location
-              );
+            const unreservedAtOther = isSameMetroStation
+              ? Math.max(
+                  0,
+                  otherPickup.waitingPopulation - (reservedQueueByPickup.get(otherPickup.id) || 0)
+                )
+              : Math.max(0, otherPickup.waitingPopulation - reservedAtOther);
+
+            const canTransferFromOther =
+              isSameMetroStation ||
+              movingInSource === 0 ||
+              (!hasClustersWalkingToThisPickup && pickup.waitingPopulation === 0);
+
+            if (canTransferFromOther && unreservedAtOther > 0) {
+              const transferCount = Math.min(deficit, unreservedAtOther);
+              if (transferCount > 0) {
+                const transferredByBehavior = allocateBoardedByBehavior(
+                  otherPickup.waitingByBehavior,
+                  transferCount
+                );
+                otherPickup.waitingPopulation -= transferCount;
+                otherPickup.waitingByBehavior.compliant = Math.max(
+                  0,
+                  otherPickup.waitingByBehavior.compliant - transferredByBehavior.compliant
+                );
+                otherPickup.waitingByBehavior['self-directed'] = Math.max(
+                  0,
+                  otherPickup.waitingByBehavior['self-directed'] -
+                    transferredByBehavior['self-directed']
+                );
+                otherPickup.waitingByBehavior.disoriented = Math.max(
+                  0,
+                  otherPickup.waitingByBehavior.disoriented - transferredByBehavior.disoriented
+                );
+
+                pickup.waitingPopulation += transferCount;
+                pickup.waitingByBehavior.compliant += transferredByBehavior.compliant;
+                pickup.waitingByBehavior['self-directed'] += transferredByBehavior['self-directed'];
+                pickup.waitingByBehavior.disoriented += transferredByBehavior.disoriented;
+
+                transferWaitingClustersBetweenPickups(
+                  updatedClusters,
+                  otherPickup,
+                  pickup,
+                  transferredByBehavior,
+                  sourceTurfPolyMap.get(veh.sourceId),
+                  sourceCentroidMap.get(veh.sourceId) || pickup.location
+                );
+              }
             }
           }
         }
@@ -2459,12 +2651,10 @@ export function stepTwinState(
 
       const hasAtLeastOnePassenger = veh.currentOccupancy >= 1;
       const occupancyRatio = veh.currentOccupancy / Math.max(1, veh.maxCapacity);
-      const remainingUnboardedForPickup =
-        getMovingInSource(veh.sourceId) + pickup.waitingPopulation;
-      const remainingUnboardedInSource = getUnboardedInSource(veh.sourceId);
+      const remainingQueueForVeh = Math.max(0, pickup.waitingPopulation - reservedAhead);
+      const anyClustersWalkingHere = hasClustersWalkingToPickup(pickup);
 
       // Departure Conditions:
-      const remainingQueueForVeh = Math.max(0, pickup.waitingPopulation - reservedAhead);
       const reached80Percent = occupancyRatio >= 0.80;
       const reached10Minutes = nextWaitSeconds >= 600.0; // 10 minutes = 600 twin seconds
       const reachedMetroCadence =
@@ -2472,7 +2662,8 @@ export function stepTwinState(
         remainingQueueForVeh === 0 &&
         nextWaitSeconds >= 25.0;
       const isLastCleanupSweep =
-        (remainingUnboardedForPickup === 0 || remainingUnboardedInSource === 0) &&
+        remainingQueueForVeh === 0 &&
+        !anyClustersWalkingHere &&
         hasAtLeastOnePassenger;
 
       // Depart if (80% occupancy OR metro cadence OR 10 min wait OR cleanup sweep) AND at least 1 passenger is onboard
@@ -2534,6 +2725,25 @@ export function stepTwinState(
           reservedAhead + Math.min(remainingQueueAfterBoard, neededFor80Pct)
         );
 
+        // If no more evacuees are available for this empty vehicle at this pickup (and none are walking toward it),
+        // reassign it randomly to another compatible pickup that still has people waiting (or mark completed if none remain)
+        if (
+          remainingQueueForVeh === 0 &&
+          !anyClustersWalkingHere &&
+          veh.currentOccupancy === 0
+        ) {
+          const reassigned = reassignEmptyVehicleOrComplete(
+            { ...veh, waitingAtPickupSeconds: nextWaitSeconds },
+            pickup.waitingPopulation > 0
+          );
+          if (
+            reassigned.assignedPickupId !== veh.assignedPickupId ||
+            reassigned.status === 'completed'
+          ) {
+            return reassigned;
+          }
+        }
+
         // Still waiting / boarding at Pickup Location / Metro Station
         const pctStr = Math.round(occupancyRatio * 100);
         const waitFormatted = formatMMSS(nextWaitSeconds);
@@ -2547,19 +2757,6 @@ export function stepTwinState(
           } else {
             pickup.boardingVehicleInfo = `${veh.fleetName}: ${veh.currentOccupancy}/${veh.maxCapacity} (${pctStr}% | Wait ${waitFormatted})`;
           }
-        }
-
-        // If 0 people left for this pickup/source area and vehicle is empty, mark completed
-        if (
-          remainingUnboardedForPickup === 0 &&
-          remainingUnboardedInSource === 0 &&
-          veh.currentOccupancy === 0
-        ) {
-          return {
-            ...veh,
-            waitingAtPickupSeconds: nextWaitSeconds,
-            status: 'completed' as const,
-          };
         }
 
         return {
@@ -2718,6 +2915,24 @@ export function stepTwinState(
     (acc, val) => acc + val,
     0
   );
+
+  // Record time-series sample for the People Evacuated vs. Time chart
+  const series = updatedTelemetry.evacuationTimeSeries || [{ timeSeconds: 0, evacuatedCount: 0 }];
+  const roundedElapsed = Math.round(elapsedTwinSeconds);
+  const lastSample = series[series.length - 1];
+  if (!lastSample) {
+    series.push({ timeSeconds: roundedElapsed, evacuatedCount: totalEvacuated });
+  } else if (lastSample.timeSeconds === roundedElapsed) {
+    if (lastSample.evacuatedCount !== totalEvacuated) {
+      series[series.length - 1] = { timeSeconds: roundedElapsed, evacuatedCount: totalEvacuated };
+    }
+  } else if (
+    lastSample.evacuatedCount !== totalEvacuated ||
+    roundedElapsed - lastSample.timeSeconds >= 10
+  ) {
+    series.push({ timeSeconds: roundedElapsed, evacuatedCount: totalEvacuated });
+  }
+  updatedTelemetry.evacuationTimeSeries = series;
 
   const totalInTransit = updatedVehicles
     .filter((v) => v.status === 'to_target' || v.status === 'unloading')

@@ -13,7 +13,7 @@ Area requests are shapely geometries in EPSG:4326 already.
 from shapely.geometry import Point
 from shapely.ops import unary_union
 
-from evaccast.core.network import DEFAULT_BUFFER_M, NETWORK_TYPE, avoid_geometry, fetch_graph_around
+from evaccast.core.network import DEFAULT_BUFFER_M, NETWORK_TYPE, fetch_graph_around, red_geometry
 from evaccast.core.planning import (  # noqa: F401 - re-exported for API callers
     InfeasibleEvacuationError,
     RouteComputation,
@@ -34,7 +34,7 @@ def route_between_points(
     sinks: list[tuple[float, float]],
     source_populations: list[float | None] | None = None,
     sink_capacities: list[float | None] | None = None,
-    avoid_geojson: str | dict | None = None,
+    red_geojson: str | dict | None = None,
     dist_buffer: float = DEFAULT_BUFFER_M,
     network_type: str = NETWORK_TYPE,
     algorithm: str = "capacity_scaling",
@@ -47,7 +47,7 @@ def route_between_points(
     region - a source must supply exactly its population (None = 0), a
     sink absorbs at most its capacity (None = unconstrained).
 
-    `avoid_geojson`: areas to prune from the network (GeoJSON string or
+    `red_geojson`: areas to prune from the network (GeoJSON string or
     dict), or None. `dist_buffer`: meters of network fetched beyond the
     points. `time_horizon_hours`/`allow_unsheltered`/`algorithm`/
     `speed_override_kph` (e.g. 25 to give every road 25 km/h, for
@@ -66,8 +66,8 @@ def route_between_points(
 
     source_points = [Point(lon, lat) for lat, lon in sources]
     sink_points = [Point(lon, lat) for lat, lon in sinks]
-    avoid = avoid_geometry(avoid_geojson) if avoid_geojson is not None else None
-    graph = fetch_graph_around(source_points + sink_points, buffer_m=dist_buffer, network_type=network_type, avoid=avoid)
+    red_area = red_geometry(red_geojson) if red_geojson is not None else None
+    graph = fetch_graph_around(source_points + sink_points, buffer_m=dist_buffer, network_type=network_type, red_area=red_area)
 
     return plan_evacuation(
         graph,
@@ -81,7 +81,7 @@ def route_between_points(
 def route_between_areas(
     source_areas: list[dict],
     target_areas: list[dict],
-    avoid_areas: list | None = None,
+    red_areas: list | None = None,
     dist_buffer: float = DEFAULT_BUFFER_M,
     network_type: str = NETWORK_TYPE,
     algorithm: str = "capacity_scaling",
@@ -97,7 +97,7 @@ def route_between_areas(
     "population": int | None, "vehicle_occupancy": int | None - only
     sizes RouteComputation.vehicle_paths (people per vehicle), not the
     solve}.
-    `target_areas`: the same with "capacity". `avoid_areas`: EPSG:4326
+    `target_areas`: the same with "capacity". `red_areas`: EPSG:4326
     geometries pruned from the network (unioned), or None.
     `speed_override_kph`: give every road this one free-flow speed (e.g.
     25, for debugging) - see route_between_points().
@@ -110,8 +110,8 @@ def route_between_areas(
     )
 
     shapes = [a["shape"] for a in source_areas] + [a["shape"] for a in target_areas]
-    avoid = unary_union(avoid_areas) if avoid_areas else None
-    graph = fetch_graph_around(shapes, buffer_m=dist_buffer, network_type=network_type, avoid=avoid)
+    red_area = unary_union(red_areas) if red_areas else None
+    graph = fetch_graph_around(shapes, buffer_m=dist_buffer, network_type=network_type, red_area=red_area)
 
     # Each area as the (node_ids, quantity) region plan_evacuation() takes.
     source_regions = [(nodes_within(graph, a["shape"]), a.get("population")) for a in source_areas]

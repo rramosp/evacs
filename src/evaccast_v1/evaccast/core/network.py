@@ -1,5 +1,5 @@
 """Fetching road networks (Overpass via osmnx, elevations via Open Topo
-Data) and handling avoid-area geometry - the part of the app that talks to
+Data) and handling red-area geometry - the part of the app that talks to
 the network, so it's slow and should run off any thread that needs to stay
 responsive.
 
@@ -55,16 +55,16 @@ def bounding_circle(geometries):
     return Point(center_lon, center_lat), float(radius)
 
 
-def fetch_graph_around(geometries, buffer_m=DEFAULT_BUFFER_M, network_type=NETWORK_TYPE, avoid=None):
+def fetch_graph_around(geometries, buffer_m=DEFAULT_BUFFER_M, network_type=NETWORK_TYPE, red_area=None):
     """The road network covering `geometries` (EPSG:4326 shapely points
     and/or polygons) plus `buffer_m` meters beyond their bounding_circle(),
     as an unprojected EPSG:4326 MultiDiGraph - with every node/edge
-    intersecting `avoid` (an EPSG:4326 geometry, or None) pruned out.
+    intersecting `red_area` (an EPSG:4326 geometry, or None) pruned out.
     Slow: one Overpass download (cached on disk by osmnx)."""
     center, radius = bounding_circle(geometries)
     graph = ox.graph_from_point((center.y, center.x), dist=radius + buffer_m, network_type=network_type)
-    if avoid is not None and not avoid.is_empty:
-        graph = remove_geometry_from_graph(graph, avoid)
+    if red_area is not None and not red_area.is_empty:
+        graph = remove_geometry_from_graph(graph, red_area)
     return graph
 
 
@@ -87,43 +87,43 @@ def add_node_elevations(graph):
             ox.settings.elevation_url_template = original_url_template
 
 
-def read_avoid_geojson(avoid_geojson: str | dict) -> gpd.GeoDataFrame:
-    """Parse `avoid_geojson` - a GeoJSON string or already-parsed dict -
+def read_red_geojson(red_geojson: str | dict) -> gpd.GeoDataFrame:
+    """Parse `red_geojson` - a GeoJSON string or already-parsed dict -
     into a GeoDataFrame. Falls back to a temp file when pyogrio refuses to
     read the string from memory (it can reject valid GeoJSON it reads fine
     from disk)."""
-    if isinstance(avoid_geojson, dict):
-        avoid_geojson = json.dumps(avoid_geojson)
+    if isinstance(red_geojson, dict):
+        red_geojson = json.dumps(red_geojson)
     try:
-        return gpd.read_file(io.StringIO(avoid_geojson))
+        return gpd.read_file(io.StringIO(red_geojson))
     except pyogrio.errors.DataSourceError:
         fd, path = tempfile.mkstemp(suffix=".geojson", text=True)
         try:
             with os.fdopen(fd, "w", encoding="utf8") as tmp:
-                tmp.write(avoid_geojson)
+                tmp.write(red_geojson)
             return gpd.read_file(f"GEOJSON:{path}")
         finally:
             os.remove(path)
 
 
-def avoid_geometry(avoid_geojson: str | dict, crs="EPSG:4326"):
-    """`avoid_geojson`'s features unioned into one shapely geometry,
+def red_geometry(red_geojson: str | dict, crs="EPSG:4326"):
+    """`red_geojson`'s features unioned into one shapely geometry,
     reprojected to `crs` (EPSG:4326 by default - the convention everything
     in this module uses; pass a graph's own CRS to prune a projected
     graph). A GeoJSON with no CRS is taken as EPSG:4326, per the spec."""
-    gdf = read_avoid_geojson(avoid_geojson)
+    gdf = read_red_geojson(red_geojson)
     if gdf.crs is None:
         gdf = gdf.set_crs("EPSG:4326")
     return gdf.to_crs(crs).union_all()
 
 
-def remove_geometry_from_graph(graph, avoid_poly):
-    """A copy of `graph` with any node inside `avoid_poly` and any edge
-    intersecting it removed - `avoid_poly` must already be in `graph`'s own
+def remove_geometry_from_graph(graph, red_poly):
+    """A copy of `graph` with any node inside `red_poly` and any edge
+    intersecting it removed - `red_poly` must already be in `graph`'s own
     CRS. A copy, so a caller can keep the unpruned original (e.g. to toggle
     an obstacle without re-fetching)."""
     graph = graph.copy()
     nodes, edges = ox.graph_to_gdfs(graph)
-    graph.remove_nodes_from(nodes[nodes.geometry.within(avoid_poly)].index)
-    graph.remove_edges_from(edges[edges.geometry.intersects(avoid_poly)].index)
+    graph.remove_nodes_from(nodes[nodes.geometry.within(red_poly)].index)
+    graph.remove_edges_from(edges[edges.geometry.intersects(red_poly)].index)
     return graph

@@ -173,7 +173,7 @@ def run_evaccast_routing(payload: dict[str, Any]) -> dict[str, Any]:
     """Run evaccast.api.v1.routing.route_between_areas on the provided scenario payload."""
     raw_sources = payload.get("sourceAreas", [])
     raw_targets = [t for t in payload.get("targetAreas", []) if not t.get("disabled", False)]
-    raw_avoids = payload.get("avoidAreas", [])
+    raw_reds = payload.get("redAreas", payload.get("avoidAreas", []))
 
     if not raw_sources:
         return {"ok": False, "error": "At least one Source Area is required."}
@@ -230,22 +230,30 @@ def run_evaccast_routing(payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    # Construct avoid_areas as in cell 5 of notebooks/test-evaccast-pickle-scenario.ipynb:
-    # avoid_areas = [a['shape'] for a in ...]
-    avoid_dicts = [
-        {
-            "name": str(av.get("name", "")),
-            "shape": _latlng_ring_to_polygon(av["polygon"]),
-        }
-        for av in raw_avoids
-        if av.get("polygon") and len(av["polygon"]) >= 3
-    ]
-    avoid_areas = [a["shape"] for a in avoid_dicts]
+    # Construct red_areas as in cell 5 of notebooks/test-evaccast-pickle-scenario.ipynb:
+    # red_areas = [a['shape'] for a in ...]
+    red_dicts: list[dict[str, Any]] = []
+    for rd in raw_reds:
+        rd_name = str(rd.get("name", ""))
+        rings = (
+            rd["polygons"]
+            if isinstance(rd.get("polygons"), list) and len(rd["polygons"]) > 0
+            else ([rd["polygon"]] if rd.get("polygon") else [])
+        )
+        for ring in rings:
+            if isinstance(ring, list) and len(ring) >= 3:
+                red_dicts.append(
+                    {
+                        "name": rd_name,
+                        "shape": _latlng_ring_to_polygon(ring),
+                    }
+                )
+    red_areas = [a["shape"] for a in red_dicts]
 
     computation = route_between_areas(
         source_areas,
         target_areas,
-        avoid_areas=avoid_areas,
+        red_areas=red_areas,
         time_horizon_hours=96,
         speed_override_kph=25,
     )

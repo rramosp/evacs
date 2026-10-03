@@ -24,10 +24,11 @@ export interface TargetArea {
   disabled?: boolean; // When true, receives no more people and is excluded from route computation
 }
 
-export interface AvoidArea {
+export interface RedArea {
   id: string;
   name: string;
-  polygon: [number, number][]; // Array of [lat, lng]
+  polygon: [number, number][]; // Array of [lat, lng] (primary / largest ring)
+  polygons?: [number, number][][]; // Optional array of [lat, lng][] rings for multi-polygon Red Areas
   disabled?: boolean; // When true, hazard zone is inactive and ignored during route computation
 }
 
@@ -61,7 +62,7 @@ export interface ComputedRoute {
   distanceMeters: number;
   estimatedDurationSeconds: number;
   assignedPopulation: number;
-  avoidedAreaNames: string[];
+  avoidedRedAreaNames: string[];
   isDetour: boolean;
   vehicleFleetId?: string;
   vehicleCountUsed?: number;
@@ -83,6 +84,11 @@ export interface BehaviorCounts {
   disoriented: number;
 }
 
+export interface EvacuationTimeSeriesPoint {
+  timeSeconds: number;
+  evacuatedCount: number;
+}
+
 export interface TwinTelemetryStats {
   initialByBehavior: BehaviorCounts;
   evacuatedByBehavior: BehaviorCounts;
@@ -90,6 +96,7 @@ export interface TwinTelemetryStats {
   pickupArrivedByBehavior: BehaviorCounts;
   pickupArrivalPersonSecondsByBehavior: BehaviorCounts;
   totalCompletedVehicleTrips: number;
+  evacuationTimeSeries?: EvacuationTimeSeriesPoint[];
 }
 
 export interface PickupLocationState {
@@ -118,6 +125,7 @@ export interface PickupLocationState {
   metroStationName?: string;
   metroTargetStationName?: string;
   dropOffLocation?: [number, number];
+  routeCoords?: [number, number][];
 }
 
 export interface SourceInternalCluster {
@@ -202,7 +210,7 @@ export interface HeatmapPoint {
 
 export type ActiveDrawMode =
   | null
-  | { type: 'source' | 'target' | 'avoid'; points: [number, number][] }
+  | { type: 'source' | 'target' | 'red'; points: [number, number][] }
   | { type: 'vehicle'; point: [number, number] | null };
 
 export type PresetScenarioId = string;
@@ -323,4 +331,22 @@ export interface BrusselsMetroConfig {
   trainCount: number;
   trainCapacity: number;
 }
+
+export interface DataOverlayLayer {
+  id: string;
+  name: string;
+  fileName: string;
+  format: 'geojson' | 'geotiff' | 'tile';
+  color: string;
+  visible: boolean;
+  featureCount?: number;
+  geojson?: GeoJSON.GeoJsonObject;
+  simplifiedGeojson?: GeoJSON.GeoJsonObject;
+  dataUrl?: string;
+  bounds?: [[number, number], [number, number]];
+  tileUrl?: string;
+  subdomains?: string[];
+  attribution?: string;
+}
+
 
