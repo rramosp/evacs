@@ -50,6 +50,7 @@ import { EvacuationMap } from './components/EvacuationMap';
 import { BottomLogPanel } from './components/BottomLogPanel';
 import { RightTelemetryPanel } from './components/RightTelemetryPanel';
 import { TwinReportModal } from './components/TwinReportModal';
+import { AiAssessmentModal } from './components/AiAssessmentModal';
 
 export function App() {
   // Dynamic preset scenarios loaded exclusively at runtime from data/scenarios/*.pkl
@@ -106,6 +107,7 @@ export function App() {
   const [twinSpeed, setTwinSpeed] = useState<number>(2);
   const [elapsedTwinSeconds, setElapsedTwinSeconds] = useState<number>(0);
   const [isTwinReportOpen, setIsTwinReportOpen] = useState<boolean>(false);
+  const [isAiAssessmentOpen, setIsAiAssessmentOpen] = useState<boolean>(false);
 
   // Telemetry metrics
   const [totalEvacuated, setTotalEvacuated] = useState<number>(0);
@@ -2172,6 +2174,11 @@ export function App() {
             setIsTwinReportOpen(true);
           }
         }}
+        onOpenAiAssessment={() => {
+          if (!isTwinning) {
+            setIsAiAssessmentOpen(true);
+          }
+        }}
         isTwinning={isTwinning}
         isTwinInProgress={isTwinInProgress}
         twinSpeed={twinSpeed}
@@ -2305,6 +2312,43 @@ export function App() {
         totalInTransit={totalInTransit}
         totalRemainingAtSource={totalRemainingAtSource}
         totalWaitingAtPickups={totalWaitingAtPickups}
+      />
+
+      {/* Centered AI Assessment Modal (enabled only when twin is paused or finished) */}
+      <AiAssessmentModal
+        isOpen={isAiAssessmentOpen && !isTwinning}
+        onClose={() => setIsAiAssessmentOpen(false)}
+        scenarioName={
+          selectedPreset === 'custom'
+            ? 'Custom Scenario'
+            : presetScenarios[selectedPreset]?.name ?? selectedPreset
+        }
+        routingAlgorithm={routingAlgorithm}
+        elapsedTwinSeconds={elapsedTwinSeconds}
+        twinSpeed={twinSpeed}
+        sourceAreas={sourceAreas}
+        targetAreas={targetAreas}
+        redAreas={redAreas}
+        vehicleFleets={vehicleFleets}
+        computedRoutes={computedRoutes}
+        clusters={clusters}
+        pickupStates={pickupStates}
+        vehicles={vehicles}
+        telemetryStats={telemetryStats}
+        totalEvacuated={totalEvacuated}
+        totalInTransit={totalInTransit}
+        totalRemainingAtSource={totalRemainingAtSource}
+        totalWaitingAtPickups={totalWaitingAtPickups}
+        logs={logs}
+        hasBrusselsAreas={hasBrusselsAreas}
+        brusselsMetroConfig={brusselsMetroConfig}
+        sourceMetroStations={sourceMetroStations}
+        targetMetroStations={targetMetroStations}
+        metroCorridors={metroCorridors}
+        sentinel2Layer={sentinel2Layer}
+        sentinel1Layer={sentinel1Layer}
+        glofasForecast={glofasForecast}
+        dataOverlays={dataOverlays}
       />
     </div>
   );

@@ -118,6 +118,11 @@ export interface PickupLocationState {
   totalCompletedVehicleWaitSeconds: number;
   maxVehicleWaitSeconds: number;
   totalDepartureOccupancyRatioSum: number;
+  arrivedByBehavior?: BehaviorCounts;
+  arrivedPersonSecondsByBehavior?: BehaviorCounts;
+  passengerWaitPersonSecondsByBehavior?: BehaviorCounts;
+  inVehiclePersonSecondsByBehavior?: BehaviorCounts;
+  evacuatedPersonSecondsByBehavior?: BehaviorCounts;
   boardingVehicleInfo?: string; // e.g., "STIB Bus #1 (64% | Wait 06:15/10:00)"
   isMetro?: boolean;
   metroLine?: string;
@@ -185,6 +190,15 @@ export interface ActiveVehicleUnit {
   metroColor?: string;
   sourceStationName?: string;
   targetStationName?: string;
+  totalTripsCompleted?: number;
+  totalPassengersBoarded?: number;
+  totalPassengersDelivered?: number;
+  deliveredByBehavior?: BehaviorCounts;
+  totalDistanceTraveledMeters?: number;
+  totalDrivingSeconds?: number;
+  totalWaitingSeconds?: number;
+  totalUnloadingSeconds?: number;
+  reassignmentCount?: number;
 }
 
 export interface TwinStateSnapshot {

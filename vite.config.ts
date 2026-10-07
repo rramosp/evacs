@@ -592,6 +592,187 @@ function createSpaceDataMiddleware(): Connect.NextHandleFunction {
       return
     }
 
+    // 1.b AI Assessment LLM Endpoints (OpenAI-compatible API configured via config.yaml)
+    if (req.url.startsWith('/api/ai-assessment/')) {
+      const readConfigYaml = () => {
+        const configPath = path.resolve(process.cwd(), 'config.yaml')
+        let modelEndpoint = 'https://generativelanguage.googleapis.com/v1beta/openai'
+        let model = 'gemini-3.8-flash'
+        let apiKeyEnv = 'OPENAI_API_KEY'
+
+        if (fs.existsSync(configPath)) {
+          const rawYaml = fs.readFileSync(configPath, 'utf-8')
+          for (const rawLine of rawYaml.split(/\r?\n/)) {
+            const trimmed = rawLine.trim()
+            if (!trimmed || trimmed.startsWith('#')) continue
+            const colonIdx = trimmed.indexOf(':')
+            if (colonIdx === -1) continue
+            const key = trimmed.slice(0, colonIdx).trim()
+            let val = trimmed.slice(colonIdx + 1).trim()
+            if (
+              (val.startsWith('"') && val.endsWith('"')) ||
+              (val.startsWith("'") && val.endsWith("'"))
+            ) {
+              val = val.slice(1, -1).trim()
+            } else {
+              const commentIdx = val.indexOf(' #')
+              if (commentIdx !== -1) {
+                val = val.slice(0, commentIdx).trim()
+              }
+            }
+            if (key === 'model_endpoint' && val) modelEndpoint = val
+            else if (key === 'model' && val) model = val
+            else if (key === 'api_key_env' && val) apiKeyEnv = val
+          }
+        }
+
+        return { modelEndpoint, model, apiKeyEnv }
+      }
+
+      if (req.url.startsWith('/api/ai-assessment/config')) {
+        res.setHeader('Content-Type', 'application/json')
+        try {
+          const cfg = readConfigYaml()
+          res.statusCode = 200
+          res.end(
+            JSON.stringify({
+              ok: true,
+              modelEndpoint: cfg.modelEndpoint,
+              model: cfg.model,
+              apiKeyEnv: cfg.apiKeyEnv,
+            })
+          )
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          res.statusCode = 500
+          res.end(JSON.stringify({ ok: false, error: message }))
+        }
+        return
+      }
+
+      if (req.url.startsWith('/api/ai-assessment/send')) {
+        if (req.method !== 'POST') {
+          res.setHeader('Content-Type', 'application/json')
+          res.statusCode = 405
+          res.end(JSON.stringify({ ok: false, error: 'Method Not Allowed. Use POST.' }))
+          return
+        }
+
+        let body = ''
+        req.on('data', (chunk) => {
+          body += chunk.toString()
+        })
+        req.on('end', async () => {
+          res.setHeader('Content-Type', 'application/json')
+          try {
+            const parsed = JSON.parse(body || '{}')
+            const prompt = typeof parsed.prompt === 'string' ? parsed.prompt.trim() : ''
+            if (!prompt) {
+              res.statusCode = 400
+              res.end(JSON.stringify({ ok: false, error: 'Prompt is empty.' }))
+              return
+            }
+
+            const { modelEndpoint, model, apiKeyEnv } = readConfigYaml()
+            const apiKey = process.env[apiKeyEnv]
+            if (!apiKey || !apiKey.trim()) {
+              res.statusCode = 500
+              res.end(
+                JSON.stringify({
+                  ok: false,
+                  error: `Environment variable "${apiKeyEnv}" (specified in config.yaml) is not set or empty.`,
+                })
+              )
+              return
+            }
+
+          const cleanBase = modelEndpoint.replace(/\/+$/, '')
+          const requestUrl = cleanBase.endsWith('/chat/completions')
+            ? cleanBase
+            : `${cleanBase}/chat/completions`
+
+          const upstreamRes = await fetch(requestUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${apiKey.trim()}`,
+            },
+            body: JSON.stringify({
+              model,
+              messages: [
+                {
+                  role: 'user',
+                  content: prompt,
+                },
+              ],
+            }),
+          })
+
+          const rawText = await upstreamRes.text()
+          let responseData: Record<string, unknown> | null = null
+          try {
+            responseData = JSON.parse(rawText)
+          } catch {
+            responseData = null
+          }
+
+          if (!upstreamRes.ok) {
+            const errObj = responseData?.error as Record<string, unknown> | undefined
+            const upstreamMsg =
+              (typeof errObj?.message === 'string' && errObj.message) ||
+              rawText ||
+              `HTTP ${upstreamRes.status} ${upstreamRes.statusText}`
+            res.statusCode = upstreamRes.status
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: `LLM request failed (${upstreamRes.status} on ${model}): ${upstreamMsg}`,
+              })
+            )
+            return
+          }
+
+          const choices = Array.isArray(responseData?.choices) ? responseData.choices : []
+          const firstChoice = choices[0] as Record<string, unknown> | undefined
+          const messageObj = firstChoice?.message as Record<string, unknown> | undefined
+          const content =
+            typeof messageObj?.content === 'string' ? messageObj.content : ''
+
+          if (!content) {
+            res.statusCode = 502
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: 'LLM response succeeded but returned empty message content.',
+              })
+            )
+            return
+          }
+
+          res.statusCode = 200
+          res.end(
+            JSON.stringify({
+              ok: true,
+              content,
+              model,
+              modelEndpoint,
+            })
+          )
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          res.statusCode = 500
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error: `Failed to send AI assessment request: ${message}`,
+            })
+          )
+        }
+        })
+        return
+      }
+    }
+
     // 2. Google Earth Engine Sentinel-2 Optical & Sentinel-1 SAR Endpoints
     if (
       !req.url.startsWith('/api/space-data/sentinel2') &&

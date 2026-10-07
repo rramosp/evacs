@@ -46,6 +46,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   FileBarChart2,
+  Sparkles,
 } from 'lucide-react';
 import evacLogoUrl from '../../imgs/evac-logo.png';
 
@@ -87,6 +88,7 @@ interface LeftControlPanelProps {
   onStopTwin: () => void;
   onResetTwin: () => void;
   onOpenTwinReport: () => void;
+  onOpenAiAssessment: () => void;
   isTwinning: boolean;
   isTwinInProgress?: boolean;
   twinSpeed: number;
@@ -167,6 +169,7 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
   onStopTwin,
   onResetTwin,
   onOpenTwinReport,
+  onOpenAiAssessment,
   isTwinning,
   isTwinInProgress = false,
   twinSpeed,
@@ -1928,44 +1931,93 @@ export const LeftControlPanel: React.FC<LeftControlPanelProps> = ({
               </button>
             </div>
 
-            <button
-              id="btn-twin-report"
-              type="button"
-              className="btn-twin-action report-btn"
-              onClick={onOpenTwinReport}
-              disabled={isTwinning}
-              title={
-                isTwinning
-                  ? 'Pause twin first to open the Twin report'
-                  : 'Open full Twin report popup'
-              }
+            <div
               style={{
                 marginTop: '8px',
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '8px',
                 width: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '7px',
-                padding: '7px 12px',
-                borderRadius: '6px',
-                border: isTwinning
-                  ? '1px solid rgba(148, 163, 184, 0.2)'
-                  : '1px solid rgba(56, 189, 248, 0.55)',
-                background: isTwinning
-                  ? 'rgba(30, 41, 59, 0.45)'
-                  : 'linear-gradient(135deg, rgba(14, 165, 233, 0.22) 0%, rgba(37, 99, 235, 0.32) 100%)',
-                color: isTwinning ? '#64748b' : '#f8fafc',
-                fontWeight: 600,
-                fontSize: '0.77rem',
-                cursor: isTwinning ? 'not-allowed' : 'pointer',
               }}
             >
-              <FileBarChart2
-                size={15}
-                style={{ color: isTwinning ? '#64748b' : '#38bdf8' }}
-              />
-              <span>Twin report</span>
-            </button>
+              <button
+                id="btn-twin-report"
+                type="button"
+                className="btn-twin-action report-btn"
+                onClick={onOpenTwinReport}
+                disabled={isTwinning}
+                title={
+                  isTwinning
+                    ? 'Pause or finish twin first to open the Twin Report'
+                    : 'Open full Twin Report popup'
+                }
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  padding: '7px 8px',
+                  borderRadius: '6px',
+                  border: isTwinning
+                    ? '1px solid rgba(148, 163, 184, 0.2)'
+                    : '1px solid rgba(56, 189, 248, 0.55)',
+                  background: isTwinning
+                    ? 'rgba(30, 41, 59, 0.45)'
+                    : 'linear-gradient(135deg, rgba(14, 165, 233, 0.22) 0%, rgba(37, 99, 235, 0.32) 100%)',
+                  color: isTwinning ? '#64748b' : '#f8fafc',
+                  fontWeight: 600,
+                  fontSize: '0.76rem',
+                  cursor: isTwinning ? 'not-allowed' : 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                <FileBarChart2
+                  size={14}
+                  style={{ color: isTwinning ? '#64748b' : '#38bdf8', flexShrink: 0 }}
+                />
+                <span>Twin Report</span>
+              </button>
+
+              <button
+                id="btn-ai-assessment"
+                type="button"
+                className="btn-twin-action ai-assessment-btn"
+                onClick={onOpenAiAssessment}
+                disabled={isTwinning}
+                title={
+                  isTwinning
+                    ? 'Pause or finish twin first to open AI Assessment'
+                    : 'Open AI Assessment prompt builder popup'
+                }
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  padding: '7px 8px',
+                  borderRadius: '6px',
+                  border: isTwinning
+                    ? '1px solid rgba(148, 163, 184, 0.2)'
+                    : '1px solid rgba(192, 132, 252, 0.55)',
+                  background: isTwinning
+                    ? 'rgba(30, 41, 59, 0.45)'
+                    : 'linear-gradient(135deg, rgba(168, 85, 247, 0.22) 0%, rgba(126, 34, 206, 0.32) 100%)',
+                  color: isTwinning ? '#64748b' : '#f8fafc',
+                  fontWeight: 600,
+                  fontSize: '0.76rem',
+                  cursor: isTwinning ? 'not-allowed' : 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                <Sparkles
+                  size={14}
+                  style={{ color: isTwinning ? '#64748b' : '#c084fc', flexShrink: 0 }}
+                />
+                <span>AI Assessment</span>
+              </button>
+            </div>
 
             <div className="twin-speed-bar">
               <span className="speed-label">Playback Speed:</span>

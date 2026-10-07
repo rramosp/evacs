@@ -1885,16 +1885,37 @@ export function stepTwinState(
 
   const pickupMap = new Map<string, PickupLocationState>();
   prevState.pickupStates.forEach((p) => {
+    const waitingByBeh = p.waitingByBehavior
+      ? { ...p.waitingByBehavior }
+      : createZeroBehaviorCounts();
+    const waitPersonSec = p.passengerWaitPersonSecondsByBehavior
+      ? { ...p.passengerWaitPersonSecondsByBehavior }
+      : createZeroBehaviorCounts();
+    waitPersonSec.compliant += (waitingByBeh.compliant || 0) * deltaTwinSeconds;
+    waitPersonSec['self-directed'] += (waitingByBeh['self-directed'] || 0) * deltaTwinSeconds;
+    waitPersonSec.disoriented += (waitingByBeh.disoriented || 0) * deltaTwinSeconds;
+
     pickupMap.set(p.id, {
       ...p,
-      waitingByBehavior: p.waitingByBehavior
-        ? { ...p.waitingByBehavior }
-        : createZeroBehaviorCounts(),
+      waitingByBehavior: waitingByBeh,
       boardedByBehavior: p.boardedByBehavior
         ? { ...p.boardedByBehavior }
         : createZeroBehaviorCounts(),
       evacuatedByBehavior: p.evacuatedByBehavior
         ? { ...p.evacuatedByBehavior }
+        : createZeroBehaviorCounts(),
+      arrivedByBehavior: p.arrivedByBehavior
+        ? { ...p.arrivedByBehavior }
+        : createZeroBehaviorCounts(),
+      arrivedPersonSecondsByBehavior: p.arrivedPersonSecondsByBehavior
+        ? { ...p.arrivedPersonSecondsByBehavior }
+        : createZeroBehaviorCounts(),
+      passengerWaitPersonSecondsByBehavior: waitPersonSec,
+      inVehiclePersonSecondsByBehavior: p.inVehiclePersonSecondsByBehavior
+        ? { ...p.inVehiclePersonSecondsByBehavior }
+        : createZeroBehaviorCounts(),
+      evacuatedPersonSecondsByBehavior: p.evacuatedPersonSecondsByBehavior
+        ? { ...p.evacuatedPersonSecondsByBehavior }
         : createZeroBehaviorCounts(),
       boardingVehicleInfo: undefined,
     });
@@ -1960,6 +1981,13 @@ export function stepTwinState(
     if (closest.distMeters <= arrivalRadiusMeters) {
       closest.pickup.waitingPopulation += cluster.headcount;
       closest.pickup.waitingByBehavior[cluster.behavior] += cluster.headcount;
+      if (closest.pickup.arrivedByBehavior) {
+        closest.pickup.arrivedByBehavior[cluster.behavior] += cluster.headcount;
+      }
+      if (closest.pickup.arrivedPersonSecondsByBehavior) {
+        closest.pickup.arrivedPersonSecondsByBehavior[cluster.behavior] +=
+          cluster.headcount * elapsedTwinSeconds;
+      }
       updatedTelemetry.pickupArrivedByBehavior[cluster.behavior] += cluster.headcount;
       updatedTelemetry.pickupArrivalPersonSecondsByBehavior[cluster.behavior] +=
         cluster.headcount * elapsedTwinSeconds;
@@ -2320,6 +2348,7 @@ export function stepTwinState(
       postOffloadEvacCoords: undefined,
       postOffloadTargetId: undefined,
       postOffloadTargetName: undefined,
+      reassignmentCount: (veh.reassignmentCount || 0) + 1,
       ...(veh.isMetro
         ? {
             metroLine: nextPickup.metroLine || veh.metroLine,
@@ -2366,6 +2395,7 @@ export function stepTwinState(
 
     const offloadedVeh: ActiveVehicleUnit = {
       ...veh,
+      totalTripsCompleted: (veh.totalTripsCompleted || 0) + 1,
       currentOccupancy: 0,
       occupancyByBehavior: createZeroBehaviorCounts(),
       waitingAtPickupSeconds: 0,
@@ -2421,6 +2451,9 @@ export function stepTwinState(
       occupancyByBehavior: rawVeh.occupancyByBehavior
         ? { ...rawVeh.occupancyByBehavior }
         : createZeroBehaviorCounts(),
+      deliveredByBehavior: rawVeh.deliveredByBehavior
+        ? { ...rawVeh.deliveredByBehavior }
+        : createZeroBehaviorCounts(),
     };
 
     if (veh.status === 'completed') {
@@ -2436,6 +2469,16 @@ export function stepTwinState(
 
     const pickup = pickupMap.get(veh.assignedPickupId);
     if (!pickup) return reassignEmptyVehicleOrComplete(veh);
+
+    // Accumulate in-vehicle person-seconds for passengers already onboard this vehicle
+    if (veh.currentOccupancy > 0 && pickup.inVehiclePersonSecondsByBehavior) {
+      pickup.inVehiclePersonSecondsByBehavior.compliant +=
+        (veh.occupancyByBehavior.compliant || 0) * deltaTwinSeconds;
+      pickup.inVehiclePersonSecondsByBehavior['self-directed'] +=
+        (veh.occupancyByBehavior['self-directed'] || 0) * deltaTwinSeconds;
+      pickup.inVehiclePersonSecondsByBehavior.disoriented +=
+        (veh.occupancyByBehavior.disoriented || 0) * deltaTwinSeconds;
+    }
 
     const loadUnloadSecPerPerson = Math.max(0, veh.loadUnloadTimePerPersonSeconds ?? 2);
 
@@ -2469,6 +2512,10 @@ export function stepTwinState(
           ...veh,
           status: 'waiting_for_80_pct' as const,
           waitingAtPickupSeconds: leftoverWaitSec,
+          totalDrivingSeconds: (veh.totalDrivingSeconds || 0) + driveTimeUsedSec,
+          totalWaitingSeconds: (veh.totalWaitingSeconds || 0) + leftoverWaitSec,
+          totalDistanceTraveledMeters:
+            (veh.totalDistanceTraveledMeters || 0) + remainingDistToPickup,
           loadingProgressRemainder: 0,
           loadingElapsedSeconds: 0,
           progressMeters: 0,
@@ -2484,6 +2531,8 @@ export function stepTwinState(
       return {
         ...veh,
         progressMeters: nextProgress,
+        totalDrivingSeconds: (veh.totalDrivingSeconds || 0) + effectiveDeltaSec,
+        totalDistanceTraveledMeters: (veh.totalDistanceTraveledMeters || 0) + stepMeters,
         currentPosition: pos,
       };
     }
@@ -2493,6 +2542,7 @@ export function stepTwinState(
     // Whichever happens first, depart to Target Area IF there is at least 1 passenger!
     if (veh.status === 'waiting_for_80_pct') {
       const nextWaitSeconds = veh.waitingAtPickupSeconds + deltaTwinSeconds;
+      veh.totalWaitingSeconds = (veh.totalWaitingSeconds || 0) + deltaTwinSeconds;
 
       const reservedAhead = reservedQueueByPickup.get(pickup.id) || 0;
       const spaceNeeded = veh.maxCapacity - veh.currentOccupancy;
@@ -2615,6 +2665,7 @@ export function stepTwinState(
           );
 
           veh.currentOccupancy += boardedNow;
+          veh.totalPassengersBoarded = (veh.totalPassengersBoarded || 0) + boardedNow;
           veh.occupancyByBehavior.compliant += boardedBreakdown.compliant;
           veh.occupancyByBehavior['self-directed'] += boardedBreakdown['self-directed'];
           veh.occupancyByBehavior.disoriented += boardedBreakdown.disoriented;
@@ -2773,12 +2824,19 @@ export function stepTwinState(
         0,
         veh.evacCumulative[veh.evacCumulative.length - 1] ?? 0
       );
-      const nextProgress = veh.progressMeters + speedMps * deltaTwinSeconds;
+      const stepMeters = speedMps * deltaTwinSeconds;
+      const nextProgress = veh.progressMeters + stepMeters;
 
       if (nextProgress >= totalEvacDist) {
+        const remainingDistToTarget = Math.max(0, totalEvacDist - veh.progressMeters);
+        const driveTimeUsedSec = speedMps > 0 ? remainingDistToTarget / speedMps : 0;
         const arrivalPos =
           veh.evacCoords[veh.evacCoords.length - 1] || veh.currentPosition;
         const distKmStr = (totalEvacDist / 1000).toFixed(2);
+
+        veh.totalDrivingSeconds = (veh.totalDrivingSeconds || 0) + driveTimeUsedSec;
+        veh.totalDistanceTraveledMeters =
+          (veh.totalDistanceTraveledMeters || 0) + remainingDistToTarget;
 
         // If load/unload time per person is 0 (instantaneous) or vehicle is empty, offload immediately
         if (loadUnloadSecPerPerson <= 0 || veh.currentOccupancy <= 0) {
@@ -2790,8 +2848,16 @@ export function stepTwinState(
             updatedTelemetry.evacuatedByBehavior[beh] += countB;
             updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] +=
               countB * elapsedTwinSeconds;
+            if (pickup.evacuatedPersonSecondsByBehavior) {
+              pickup.evacuatedPersonSecondsByBehavior[beh] += countB * elapsedTwinSeconds;
+            }
+            if (veh.deliveredByBehavior) {
+              veh.deliveredByBehavior[beh] += countB;
+            }
           });
 
+          veh.totalPassengersDelivered =
+            (veh.totalPassengersDelivered || 0) + veh.currentOccupancy;
           pickup.evacuatedCount += veh.currentOccupancy;
           pickup.evacuatedByBehavior.compliant += veh.occupancyByBehavior.compliant;
           pickup.evacuatedByBehavior['self-directed'] += veh.occupancyByBehavior['self-directed'];
@@ -2828,6 +2894,8 @@ export function stepTwinState(
       return {
         ...veh,
         progressMeters: nextProgress,
+        totalDrivingSeconds: (veh.totalDrivingSeconds || 0) + deltaTwinSeconds,
+        totalDistanceTraveledMeters: (veh.totalDistanceTraveledMeters || 0) + stepMeters,
         currentPosition: pos,
       };
     }
@@ -2835,6 +2903,7 @@ export function stepTwinState(
     // STATE D: Unloading passengers at Target Shelter accounting for per-person unloading time
     if (veh.status === 'unloading') {
       const nextUnloadElapsed = (veh.unloadingElapsedSeconds || 0) + deltaTwinSeconds;
+      veh.totalUnloadingSeconds = (veh.totalUnloadingSeconds || 0) + deltaTwinSeconds;
       const initialOcc = Math.max(
         1,
         veh.unloadingInitialOccupancy || veh.currentOccupancy
@@ -2861,6 +2930,7 @@ export function stepTwinState(
         );
 
         veh.currentOccupancy -= unloadedNow;
+        veh.totalPassengersDelivered = (veh.totalPassengersDelivered || 0) + unloadedNow;
         veh.occupancyByBehavior.compliant = Math.max(
           0,
           veh.occupancyByBehavior.compliant - unloadedBreakdown.compliant
@@ -2883,6 +2953,12 @@ export function stepTwinState(
           updatedTelemetry.evacuatedByBehavior[beh] += countB;
           updatedTelemetry.evacuatedPersonSecondsByBehavior[beh] +=
             countB * elapsedTwinSeconds;
+          if (pickup.evacuatedPersonSecondsByBehavior) {
+            pickup.evacuatedPersonSecondsByBehavior[beh] += countB * elapsedTwinSeconds;
+          }
+          if (veh.deliveredByBehavior) {
+            veh.deliveredByBehavior[beh] += countB;
+          }
         });
 
         // Credit pickup location shelter delivery statistics
